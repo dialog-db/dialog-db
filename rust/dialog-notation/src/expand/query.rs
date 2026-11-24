@@ -25,7 +25,7 @@ use crate::form::Kind;
 use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
 use crate::syntax::{Parameters, Signature, Syntax};
 
-use super::{Expander, apply, items};
+use super::{Expander, apply, items, open};
 
 /// Where in a condition its `(collect ?x)` stands.
 #[derive(Clone, Debug)]
@@ -188,7 +188,7 @@ impl Expander {
             }
             Some("view") => Err(Error::Refused(format!(
                 "{tree}: a view is a query whose answer is markup, `(query (todo/row ?t is: \
-                 ?row) (todo ?t title: ?title) (view ?row [:li ?title]))`, and a view in a \
+                 ?row) (todo ?t title: ?title ...) (view ?row [:li ?title]))`, and a view in a \
                  template is a query collected, `(todo/chip ?t is: (collect ?chips))`"
             ))),
             Some(word @ ("rule" | "concept" | "assert" | "retract")) => {
@@ -687,7 +687,8 @@ impl Expander {
                         // A read through several concepts is read
                         // through each, so they agree on whether the
                         // field is an entry, or the read is refused.
-                        let fitting = self.fitting(concept, &labels);
+                        let dotted = open(&collect.condition).1;
+                        let fitting = self.fitting(concept, &labels, dotted);
                         let mut keyed = fitting
                             .iter()
                             .map(|signature| self.entries.get(*signature) == Some(label));
@@ -784,7 +785,8 @@ impl Expander {
             .cloned()
             .collect();
         // A view's source is one concept: two the call fits are refused.
-        let declared = match self.fitting(&concept, &labels).as_slice() {
+        // Every field of it is read, so it fits by the labels it names.
+        let declared = match self.fitting(&concept, &labels, true).as_slice() {
             [] => None,
             [one] => Some((*one).clone()),
             several => return Err(Self::ambiguous(collect.condition.to_string(), several)),

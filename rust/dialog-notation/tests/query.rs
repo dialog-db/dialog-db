@@ -271,17 +271,22 @@ async fn it_finds_the_concept_of_one_name_its_labels_fit_in_any_order() -> Resul
         );
     }
     assert_eq!(answers[0], answers[1]);
-    // A use that fits two concepts is read through each, so where one
-    // has the field as an entry and the other as a value it is refused,
-    // naming both, and no variable the compiler made.
+    // A use with `...` that fits two concepts is read through each, so
+    // where one has the field as an entry and the other as a value it is
+    // refused, naming both, and no variable the compiler made. Without
+    // `...` it fits the one whose fields are those it says.
+    let both = "(concept (notebook/blocks ?n block: ?x note: ?y)
+               (xyz.tonk.notebook/block of: ?n is: ?x as: :text cardinality: :many)
+               (xyz.tonk.notebook/note of: ?n is: ?y as: :text cardinality: :one))";
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!("{entries} {both} {query}"))
+        .await?;
     let mut notebook = Notebook::open().await?;
     let ambiguous = notebook
         .submit(&format!(
-            "{entries}
-             (concept (notebook/blocks ?n block: ?x note: ?y)
-               (xyz.tonk.notebook/block of: ?n is: ?x as: :text cardinality: :many)
-               (xyz.tonk.notebook/note of: ?n is: ?y as: :text cardinality: :one))
-             {query}"
+            "{entries} {both} {}",
+            query.replace("(collect ?blocks))", "(collect ?blocks) ...)")
         ))
         .await
         .map_err(|error| error.downcast::<Error>());
@@ -779,7 +784,7 @@ async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result
           (xyz.todo.note/text of: ?t is: ?x as: :text cardinality: :many))
         (query (todo/day ?t is: ?card)
           (todo ?t title: ?title)
-          (todo/note ?t day: ?d)
+          (todo/note ?t day: ?d ...)
           (todo/note ?t day: ?d text: (collect ?texts))
           (is ?card {:title ?title :day ?d :texts ?texts}))"#;
     assert_eq!(

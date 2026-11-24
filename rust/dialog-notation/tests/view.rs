@@ -925,7 +925,7 @@ const SUMMARY: &str = r#"
       (view ?item [:li {:class ?s} ?title]))
     (query (list/summary ?l is: ?card)
       (list ?l name: ?name)
-      (todo (collect ?open) list: ?l state: :open)
+      (todo (collect ?open) list: ?l state: :open ...)
       (todo/item _ list: ?l is: (collect ?items))
       (is ?count (count ?open))
       (view ?card
@@ -1521,7 +1521,7 @@ async fn it_refuses_what_a_view_may_not_say() -> Result<()> {
     let whole = refusal(
         &[CONCEPTS],
         "(query (list/x ?l is: ?x) (list ?l name: ?name)
-           (todo (collect ?all) list: ?l)
+           (todo (collect ?all) list: ?l ...)
            (view ?x [:ul ?all]))
          (select (list/x ?l is: ?x))",
     );

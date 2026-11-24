@@ -480,7 +480,7 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
                (assert (todo todo:1 text: "Call mom" state: :open))
                (assert (todo todo:2 text: "Buy milk" state: :done))
                (assert (xyz.todo/text todo:3 "No state"))
-               (rule (xyz.said ?t text: ?x) (todo ?t text: ?x))"#,
+               (rule (xyz.said ?t text: ?x) (todo ?t text: ?x ...))"#,
         )
         .await?;
     let both = vec![
@@ -488,7 +488,7 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
         r#"(xyz.todo todo:2 text: "Buy milk")"#,
     ];
     assert_eq!(
-        report(&mut notebook, "(select (todo ?t text: ?x))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x ...))").await?,
         both
     );
     assert_eq!(
@@ -641,7 +641,7 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     notebook
         .submit(r#"(assert (todo/add list: list:home text: "Buy milk"))"#)
         .await?;
-    let todos = report(&mut notebook, "(select (todo ?t text: ?x))").await?;
+    let todos = report(&mut notebook, "(select (todo ?t text: ?x ...))").await?;
     assert_eq!(todos.len(), 1, "{todos:?}");
     // The command's entity is what its content derives.
     notebook
@@ -898,7 +898,7 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(select (todo ?i title: ?t state: ?s))").await?,
+        report(&mut notebook, "(select (todo ?i title: ?t state: ?s ...))").await?,
         vec![
             r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#,
             r#"(xyz.todo todo:2 state: :open title: "Call mum")"#,
@@ -922,7 +922,11 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
         ]
     );
     assert_eq!(
-        report(&mut notebook, "(select (todo ?i title: ?t state: :open))").await?,
+        report(
+            &mut notebook,
+            "(select (todo ?i title: ?t state: :open ...))"
+        )
+        .await?,
         vec![r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#]
     );
 
@@ -1291,7 +1295,7 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
     let folded = notebook
         .submit(
             "(rule (list/count-open ?l (count ?t))
-               (list ?l)
+               (list ?l ...)
                (todo ?t list: ?l state: :open))",
         )
         .await
@@ -1306,7 +1310,7 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
     notebook
         .submit(
             r#"(rule (todo/home ?t ?n)
-                 (todo ?t list: ?l)
+                 (todo ?t list: ?l ...)
                  (list ?l name: ?n))
 
                (assert (list list:home name: "Home"))

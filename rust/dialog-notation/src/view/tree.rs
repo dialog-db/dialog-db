@@ -1285,7 +1285,7 @@ mod tests {
               (view ?item [:li {:class ?s} ?title ?chips]))
             (query (list/summary ?l is: ?card)
               (list ?l name: ?name)
-              (todo (collect ?open) list: ?l state: :open)
+              (todo (collect ?open) list: ?l state: :open ...)
               (todo/item _ list: ?l is: (collect ?items))
               (is ?count (count ?open))
               (view ?card [:article [:h2 ?name] [:p ?count " open"] [:ul ?items]]))

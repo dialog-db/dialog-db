@@ -1125,10 +1125,11 @@ impl Expander {
     }
 
     /// The concepts declared under `name` that a use written with
-    /// `labels` fits: each has every label written. Two concepts of one
+    /// `labels` fits: each has every label written, and, unless the use
+    /// ends with `...`, no other. Two concepts of one
     /// name and other labels are told apart by what a use writes, never
     /// by the order they were declared in.
-    fn fitting(&self, name: &str, labels: &BTreeSet<String>) -> Vec<&Signature> {
+    fn fitting(&self, name: &str, labels: &BTreeSet<String>, dotted: bool) -> Vec<&Signature> {
         let written = Signature {
             name: name.to_string(),
             subject: "concept".into(),
@@ -1139,6 +1140,7 @@ impl Expander {
             .iter()
             .filter_map(|rule| rule.signature.as_ref())
             .filter(|signature| signature.takes(&written))
+            .filter(|signature| dotted || signature.parameters == written.parameters)
             .collect();
         found.sort();
         found.dedup();
@@ -1877,7 +1879,7 @@ impl Expander {
         // part that has no label, and the second is the one meant.
         // A part a read leaves out matches anything, so a trailing
         // `...` adds nothing to one and is taken off.
-        let (said, _) = open(tree);
+        let (said, dotted) = open(tree);
         let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
         let mut patterns: Vec<String> = Vec::new();
         let mut least = usize::MAX;
@@ -1903,6 +1905,54 @@ impl Expander {
             }
         }
         self.asked.push((tree.clone(), position, self.tree));
+        // A read of a concept says every field, or ends with `...`: one
+        // without it fits only a concept whose fields are those it says,
+        // and one that leaves fields out untold is refused, naming them.
+        // With `...` it fits every concept whose fields include its own,
+        // each read in turn. A write is not a read, and is fitted below.
+        let reads = position == Position::Premise || self.reporting;
+        if reads && !dotted && found.iter().any(|(_, signature)| signature.is_some()) {
+            let written = Signature::of(&said, "concept").map(|written| written.parameters);
+            let exact = |signature: &Option<Signature>| {
+                signature.as_ref().map(|signature| &signature.parameters) == written.as_ref()
+            };
+            if found.iter().any(|(_, signature)| exact(signature)) {
+                found.retain(|(_, signature)| signature.is_none() || exact(signature));
+            } else if let Some(written) = &written {
+                let untold = found
+                    .iter()
+                    .filter_map(|(_, signature)| signature.as_ref())
+                    .map(|signature| {
+                        let left: Vec<String> = signature
+                            .parameters
+                            .difference(written)
+                            .map(|label| format!("{label}:"))
+                            .collect();
+                        format!(
+                            "{} of ({} {})",
+                            left.join(" "),
+                            signature.name,
+                            signature
+                                .parameters
+                                .iter()
+                                .map(|label| format!("{label}:"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", and ");
+                let shown = tree.to_string();
+                let dots = match shown.strip_suffix(')') {
+                    Some(open) => format!("{open} ...)"),
+                    None => format!("{shown} ..."),
+                };
+                return Err(Error::Refused(format!(
+                    "{shown} leaves out {untold}: a read that says some of a concept's fields \
+                     ends with `...`, `{dots}`"
+                )));
+            }
+        }
         let ambiguous = |found: &[(Syntax, Option<Signature>)]| {
             Error::Ambiguous(
                 tree.to_string(),
@@ -2285,7 +2335,7 @@ impl Expander {
                                 Err(Error::Refused(format!(
                                     "{tree} has premises: a write at the top level is ground, or \
                                      takes what it reads in a `(when …)`, `(assert (xyz.todo/state \
-                                     of: ?t is: :done) (when (todo ?t text: \"Call mom\")))`. A \
+                                     of: ?t is: :done) (when (todo ?t text: \"Call mom\" ...)))`. A \
                                      write that stays is a `rule`"
                                 )))
                             });
@@ -2542,7 +2592,7 @@ mod tests {
     fn it_names_the_own_variables_of_two_sites_apart() -> Result<(), Error> {
         let rules = kernel(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
-            "(rule (xyz.out ?a97 other: ?a940) (task ?a97) (task ?a940))",
+            "(rule (xyz.out ?a97 other: ?a940) (task ?a97 ...) (task ?a940 ...))",
         )?;
         let [rule] = rules.as_slice() else {
             return Err(Error::Refused(format!("one rule: {rules:?}")));
@@ -2563,7 +2613,7 @@ mod tests {
     fn it_names_the_own_variables_of_one_form_written_twice_alike() -> Result<(), Error> {
         let rules = kernel(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
-            "(rule (xyz.out ?a other: ?b) (task ?a) (task ?b) (task ?a))",
+            "(rule (xyz.out ?a other: ?b) (task ?a ...) (task ?b ...) (task ?a ...))",
         )?;
         let [rule] = rules.as_slice() else {
             return Err(Error::Refused(format!("one rule: {rules:?}")));
@@ -2586,7 +2636,7 @@ mod tests {
     #[test]
     fn it_names_the_own_variables_of_every_site_apart() -> Result<(), Error> {
         for count in [2, 10, 100, 1000] {
-            let premises: String = (0..count).map(|at| format!(" (task ?e{at})")).collect();
+            let premises: String = (0..count).map(|at| format!(" (task ?e{at} ...)")).collect();
             let fields: String = (0..count).map(|at| format!(" f{at}: ?e{at}")).collect();
             let text = format!("(rule (xyz.out ?e0{fields}){premises})");
             // Two lines, so a site's own variable joins them and is not
@@ -2703,7 +2753,7 @@ mod tests {
         let made = expanded(
             TODO,
             "(rule (assert (todo ?t list: ?l text: ?x state: :open))
-               (todo/add list: ?l text: ?x)
+               (todo/add list: ?l text: ?x ...)
                (id ?t list: ?l text: ?x))",
         )
         .unwrap();
@@ -2750,7 +2800,7 @@ mod tests {
     fn it_writes_an_expansions_variable_used_once_as_a_blank() {
         let rule = expanded(
             TODO,
-            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x ...))",
         )
         .unwrap();
         assert_eq!(
@@ -2911,7 +2961,7 @@ mod tests {
         let exact = expanded(both, "(rule (xyz.seen ?t tag: ?g) (item/tag ?t tag: ?g))").unwrap();
         assert_eq!(exact.len(), 1, "{exact:?}");
         assert!(
-            exact[0].contains("xyz.item/tag") && !exact[0].contains("xyz.item/label"),
+            exact[0].contains("(xyz.item ?t tag:") && !exact[0].contains("label:"),
             "{exact:?}"
         );
         let every = expanded(
@@ -2926,7 +2976,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(labelled.len(), 1, "{labelled:?}");
-        assert!(labelled[0].contains("xyz.item/label"), "{labelled:?}");
+        assert!(labelled[0].contains("label:"), "{labelled:?}");
         let sourced = expanded(
             both,
             "(rule (xyz.seen ?t source: ?s) (item/tag ?t source: ?s))",
@@ -3183,7 +3233,7 @@ mod tests {
     fn it_reads_and_deduces_a_command_as_a_concept() {
         let premise = expanded(
             TODO,
-            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x ...))",
         )
         .unwrap();
         assert_eq!(premise.len(), 1);
@@ -3543,9 +3593,9 @@ mod tests {
                        (xyz.list ?l task: (:many (:entity ?i))))";
         for text in [
             "(select (todo ?i list: ?l title: ?t state: ?s))",
-            "(select (todo ?i title: ?t))",
+            "(select (todo ?i title: ?t ...))",
             r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
-            "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open))",
+            "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open ...))",
         ] {
             let by_lines = expanded(lines, text).unwrap();
             assert_eq!(by_lines, expanded(reads, text).unwrap(), "{text}");
@@ -3630,7 +3680,7 @@ mod tests {
                 "(concept (todo ?i title: ?t)
                    (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
                    (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))",
-                "(select (todo ?i title: ?t))"
+                "(select (todo ?i title: ?t ...))"
             ),
             Err(Error::Refused(why)) if why.contains("every variable in it is a parameter: ?l")
         ));
@@ -3638,7 +3688,7 @@ mod tests {
             expanded(
                 "(concept (todo ?i title: ?t)
                    (xyz.todo/title of: ?i is: ?t cardinality: :few))",
-                "(select (todo ?i title: ?t))"
+                "(select (todo ?i title: ?t ...))"
             ),
             Err(Error::Refused(why)) if why.contains("is not a cardinality")
         ));
@@ -3661,8 +3711,8 @@ mod tests {
         let concluded = expanded(
             lists,
             "(rule (list/count-open ?l (count ?t))
-               (list ?l)
-               (todo ?t list: ?l state: :open))",
+               (list ?l ...)
+               (todo ?t list: ?l state: :open ...))",
         )
         .unwrap();
         assert_eq!(concluded.len(), 1);
@@ -3681,7 +3731,7 @@ mod tests {
         let labelled = expanded(
             lists,
             "(rule (list/count ?l status: ?s count: (count ?t))
-               (todo ?t list: ?l state: ?s))",
+               (todo ?t list: ?l state: ?s ...))",
         )
         .unwrap();
         assert!(

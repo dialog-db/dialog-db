@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A concept read that leaves fields out says `...`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773).
+
+A read of a concept names every field, or ends with `...`. One that
+leaves fields out without it is refused, naming the fields it leaves out
+and the read written with `...`:
+
+```clj
+(concept (todo ?t list: ?l title: ?title state: ?s) …)
+(select (todo ?t title: ?title))      ; refused: leaves out list: state:
+(select (todo ?t title: ?title ...))  ; reads every to-do's title
+```
+
+What this changes for you:
+
+- A read in a select, a rule's or a query's premise, or under `unless`
+  that leaves fields out is `Error::Refused` until it ends with `...`.
+- Of several concepts of one name, a read without `...` fits the one
+  whose fields are those it says; with `...` it is read through every one
+  whose fields include its own, as every fitting one was read before.
+- A write is not a read and is unchanged: an assert says every field,
+  and a retract every field or the entity alone.
+
+Why: a read that leaves fields out by mistake read nothing about them
+and said nothing; `...` says it is meant.
+
 ### The notation elects by `min` and `max`, and refuses `top`
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773).

@@ -375,9 +375,9 @@
 ; GAP: a concept named by an entity, `concept: tonk:notebook/route`. YAML 604.
 (rule (xyz.tonk.notebook.retitle/subject ?i ?n)
   (intent ?i command: notebook/retitle expression: ?e)
-  (intent/expression ?e site: ?site)
-  (site ?site concept: tonk:notebook/route)
-  (notebook/route ?site entity: ?n))
+  (intent/expression ?e site: ?site ...)
+  (site ?site concept: tonk:notebook/route ...)
+  (notebook/route ?site entity: ?n ...))
 
 ; Write one notebook block's source.
 (concept (block/edit subject: ?b source: ?s notebook: ?n)
@@ -531,7 +531,7 @@
 
 ; Enter a moved block under its new position.
 (rule (assert (notebook/blocks ?n block: {?k ?b}))
-  (block/move subject: ?b notebook: ?n key: ?k))
+  (block/move subject: ?b notebook: ?n key: ?k ...))
 
 ; Every entry the block held goes, not just `from`: a block entered twice is
 ; repaired by its next move.
@@ -539,7 +539,7 @@
 ; A moved block leaves every other entry it held.
 ; GAP: a retract of one entry of a collection, as above. YAML 916.
 (rule (retract (notebook/blocks ?n block: {?old ?b}))
-  (block/move subject: ?b notebook: ?n key: ?k)
+  (block/move subject: ?b notebook: ?n key: ?k ...)
   (notebook/blocks ?n block: {?old ?b})
   (!= ?old is: ?k))
 
@@ -549,7 +549,7 @@
 ; Retract a removed block's every entry from the notebook's sequence.
 ; GAP: a retract of one entry of a collection, as above. YAML 937.
 (rule (retract (notebook/blocks ?n block: {?k ?b}))
-  (block/remove subject: ?b notebook: ?n)
+  (block/remove subject: ?b notebook: ?n ...)
   (notebook/blocks ?n block: {?k ?b}))
 
 ; The block's own facts go too. A block with a source and no entry is what
@@ -558,7 +558,7 @@
 
 ; Retract a removed block's own facts.
 (rule (retract (notebook/block ?b))
-  (block/remove subject: ?b notebook: ?n)
+  (block/remove subject: ?b notebook: ?n ...)
   (notebook/block ?b notebook: ?n source: ?s))
 
 ; Seed.
