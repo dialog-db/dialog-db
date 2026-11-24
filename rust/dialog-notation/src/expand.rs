@@ -684,6 +684,10 @@ fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syn
 /// ```
 fn lines(template: Syntax) -> Result<Syntax, Error> {
     let mut any = false;
+    // A body that holds what is neither a line nor a read, a read of
+    // another concept, is left as it is; its lines still say their
+    // cardinality.
+    let mut other = false;
     let mut reads: Vec<Syntax> = Vec::new();
     for part in members(template.clone()) {
         let read = match line(&part)? {
@@ -704,7 +708,10 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
                 read
             }
             None if part.is_read() => part,
-            None => return Ok(template),
+            None => {
+                other = true;
+                continue;
+            }
         };
         // Two blanks are two entities, so a read of a blank stays apart.
         let fits = |earlier: &Syntax| {
@@ -730,6 +737,7 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
         }
     }
     Ok(match (any, reads.len()) {
+        _ if other => template,
         (false, _) => template,
         (true, 1) => reads.remove(0),
         (true, _) => apply("all", reads),
