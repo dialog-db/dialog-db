@@ -145,11 +145,16 @@ fn reserved_name(name: &str) -> bool {
 /// The first part of `tree` as written that names what the notation
 /// names itself, with the name, outermost first. What is quoted is not
 /// a form and names nothing.
-fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
+pub(crate) fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
     let mut open = vec![tree];
     while let Some(part) = open.pop() {
         match part {
             Syntax::Reference(name) if reserved_name(name) => return Some((part, name.clone())),
+            // A variable the notation makes holds a `[`, which the reader
+            // never reads: only a caller that builds trees can name one.
+            Syntax::Variable(name) if syntax::unwritten(name) => {
+                return Some((part, format!("?{name}")));
+            }
             Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
             // `this` is what every query and rule calls the entity, so a
             // field of that name would be the entity. (A concept pinned

@@ -356,8 +356,15 @@ fn made<'a>(
 impl TryFrom<&Form> for Syntax {
     type Error = Error;
 
+    /// The tree `form` says. One a caller built that names a variable the
+    /// notation makes, or a name under its namespace, is refused as
+    /// `Reserved`, as no text read can say it.
     fn try_from(form: &Form) -> Result<Self, Error> {
-        tree(form, None, false, &mut Path::new(), &mut Written::default())
+        let tree = tree(form, None, false, &mut Path::new(), &mut Written::default())?;
+        match crate::expand::reserved(&tree) {
+            Some((_, name)) => Err(Error::Reserved(name)),
+            None => Ok(tree),
+        }
     }
 }
 
@@ -452,9 +459,9 @@ impl Syntax {
                         };
                         if let Some(pair) = pairs.windows(2).find(|pair| same(pair)) {
                             let (what, twice) = if set {
-                                ("member", Syntax::try_from(&pair[0].1)?)
+                                ("member", from_value(&pair[0].1)?)
                             } else {
-                                ("key", Syntax::try_from(&pair[0].0)?)
+                                ("key", from_value(&pair[0].0)?)
                             };
                             return Err(Error::Refused(format!(
                                 "{self} says the {what} {twice} twice"
@@ -828,7 +835,7 @@ impl TryFrom<&Value> for Parameters {
             .flatten()
             .ok_or_else(|| unread("terms"))?
             .iter()
-            .map(|(label, term)| Ok((label.to_string(), Syntax::try_from(term)?)))
+            .map(|(label, term)| Ok((label.to_string(), from_value(term)?)))
             .collect::<Result<_, Error>>()?;
         Ok(Parameters {
             items: nodes(&node, "items")?,
@@ -840,12 +847,26 @@ impl TryFrom<&Value> for Parameters {
 impl TryFrom<&Value> for Syntax {
     type Error = Error;
 
+    /// The tree `value` keeps. One that names a variable the notation
+    /// makes, or a name under its namespace, is refused as `Reserved`:
+    /// no text can say it, and a document never holds it.
     fn try_from(value: &Value) -> Result<Self, Error> {
+        let tree = from_value(value)?;
+        match crate::expand::reserved(&tree) {
+            Some((_, name)) => Err(Error::Reserved(name)),
+            None => Ok(tree),
+        }
+    }
+}
+
+/// The tree `value` keeps, as it keeps it.
+fn from_value(value: &Value) -> Result<Syntax, Error> {
+    {
         let node = fields(value)?;
         let part = |field: &str| data::field(&node, field).ok_or_else(|| unread(field));
         Ok(match kind(&node)? {
             "application" => Syntax::Application(
-                Box::new(Syntax::try_from(part("operator")?)?),
+                Box::new(from_value(part("operator")?)?),
                 Parameters::try_from(part("operand")?)?,
             ),
             "variable" => Syntax::Variable(text(&node, "name")?),
@@ -867,9 +888,7 @@ impl TryFrom<&Value> for Syntax {
                     .ok_or_else(|| unread("entries"))?
                     .iter()
                     .map(|entry| match data::items(entry)?.as_deref() {
-                        Some([key, value]) => {
-                            Ok((Syntax::try_from(key)?, Syntax::try_from(value)?))
-                        }
+                        Some([key, value]) => Ok((from_value(key)?, from_value(value)?)),
                         _ => Err(unread("entries")),
                     })
                     .collect::<Result<_, Error>>()?,
