@@ -23,15 +23,19 @@
 //! [`compile`](crate::compile()), gives a query whose answer is markup as
 //! its plan.
 //!
-//! A row's values come from any writer of the branch, so a template is
-//! refused where they could reach script: an element that runs what it
-//! holds (`script`, `iframe`, `object`, `embed`), an attribute named
-//! `on…` that is no `on/` event, `srcdoc`, a `style` a value writes, and
-//! a URL (`href`, `src`, `action`, `formaction`) a value writes from its
-//! start; a fixed start, `["/notebook/" ?n]`, is taken. What is left is
-//! the back end's: it escapes every text and attribute value it writes,
-//! as for any text, and sets them as text and attributes, never as
-//! markup.
+//! A row's values come from any writer of the branch. A template is
+//! refused in the shapes known to let them reach script: an element that
+//! runs, loads or changes how the page is read (`RUNS`: `script`,
+//! `iframe`, `object`, `embed`, `style`, `link`, `meta`, `base`,
+//! `frame`, `frameset`, `applet`), an attribute named `on…` that is no
+//! `on/` event, `srcdoc`, a `style` a value writes, and an attribute that
+//! takes a URL (`URLS`) unless fixed text settles its scheme as `http`,
+//! `https` or `mailto`, a constant included. Names are compared in any
+//! case, and a fixed start with a control character or a space is
+//! refused. This is a refusal of known dangerous shapes and no
+//! sanitizer: the back end stays the boundary. It escapes every text and
+//! attribute value it writes and sets them as text and attributes, never
+//! as markup.
 
 use dialog_corpus::Value;
 
@@ -221,7 +225,7 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                     ))
                 })?
                 .to_string();
-            if RUNS.contains(&tag.to_ascii_lowercase().as_str()) {
+            if RUNS.contains(&tag.trim().to_ascii_lowercase().as_str()) {
                 return Err(Error::Unsafe(format!(
                     "{tree}: a [:{tag} …] runs what it holds"
                 )));
@@ -296,24 +300,63 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
     })
 }
 
-/// The elements that run what they hold or load: a template never makes
-/// one, since a row's values would be in it.
-const RUNS: [&str; 4] = ["script", "iframe", "object", "embed"];
+/// The elements that run or load what they hold or name, or change how
+/// the page around them is read: a template never makes one, since a
+/// row's values would be in it.
+const RUNS: [&str; 11] = [
+    "script", "iframe", "object", "embed", "style", "link", "meta", "base", "frame", "frameset",
+    "applet",
+];
 
 /// The attributes whose value is a URL a browser follows or loads.
-const URLS: [&str; 4] = ["href", "src", "action", "formaction"];
+const URLS: [&str; 12] = [
+    "href",
+    "xlink:href",
+    "src",
+    "srcset",
+    "action",
+    "formaction",
+    "poster",
+    "data",
+    "ping",
+    "background",
+    "cite",
+    "manifest",
+];
 
-/// The starts of a URL that no value after them turns into a scheme: a
-/// path, a fragment, a query, or a scheme of the web or of mail.
-const SAFE_STARTS: [&str; 6] = ["/", "#", "?", "http://", "https://", "mailto:"];
+/// The schemes a URL may name: the web's and mail's.
+const SCHEMES: [&str; 3] = ["http", "https", "mailto"];
+
+/// Whether the fixed start of a URL settles that it names no other
+/// scheme than the web's or mail's, whatever follows it. `whole` says
+/// the start is the whole URL. A start with a control character or a
+/// space in it is refused outright, the classic ways round a check.
+fn settled(start: &str, whole: bool) -> bool {
+    if start.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    match start.find([':', '/', '?', '#']) {
+        // A scheme is what comes before a `:` with no `/`, `?` or `#`
+        // before it.
+        Some(at) if start[at..].starts_with(':') => {
+            SCHEMES.contains(&start[..at].to_ascii_lowercase().as_str())
+        }
+        // A path, a query or a fragment comes first: no scheme follows.
+        Some(_) => true,
+        // No sign yet: what follows could still make a scheme, unless
+        // nothing follows.
+        None => whole,
+    }
+}
 
 /// Refuse an attribute through which a row's values could reach script:
 /// one named `on…`, which is an inline handler, `srcdoc`, which is a
-/// document, a `style` a value writes, and a URL a value writes from its
-/// start. A value is written into the others as text, which the back end
-/// escapes.
+/// document, a `style` a value writes, and a URL whose scheme is not
+/// settled as the web's or mail's by fixed text. Names are compared in
+/// any case. A value is written into the others as text, which the back
+/// end escapes.
 fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
-    let lowered = name.to_ascii_lowercase();
+    let lowered = name.trim().to_ascii_lowercase();
     let refuse = |why: &str| Err(Error::Unsafe(format!("[:{tag} {{:{name} …}}]: {why}")));
     let written = |attribute: &Attribute| match attribute {
         Attribute::Variable(_) => true,
@@ -331,18 +374,20 @@ fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
     if lowered == "style" && written(attribute) {
         return refuse("a style a value writes");
     }
-    if URLS.contains(&lowered.as_str()) && written(attribute) {
-        let start = match attribute {
+    if URLS.contains(&lowered.as_str()) {
+        let safe = match attribute {
+            Attribute::Text(text) => settled(text, true),
             Attribute::Parts(pieces) => match pieces.first() {
-                Some(Piece::Text(text)) => Some(text.to_ascii_lowercase()),
-                _ => None,
+                Some(Piece::Text(text)) => settled(text, pieces.len() == 1),
+                _ => false,
             },
-            _ => None,
+            Attribute::Variable(_) | Attribute::Value(_) => false,
+            Attribute::Present => true,
         };
-        if !start.is_some_and(|start| SAFE_STARTS.iter().any(|safe| start.starts_with(safe))) {
+        if !safe {
             return refuse(
-                "a URL a value writes from its start: give it a fixed start, \
-                 [\"/notebook/\" ?n]",
+                "a URL whose scheme fixed text does not settle as http, https or mailto: \
+                 give it a fixed start, [\"/notebook/\" ?n]",
             );
         }
     }
@@ -521,7 +566,7 @@ mod safety {
             ("[:a {:href [\"notes\" ?n]}]", "href"),
         ] {
             assert!(
-                matches!(read(text), Err(Error::Unsafe(said)) if said.contains(part)),
+                matches!(read(text), Err(Error::Unsafe(said)) if said.to_lowercase().contains(&part.to_lowercase())),
                 "{text}: {:?}",
                 read(text)
             );
