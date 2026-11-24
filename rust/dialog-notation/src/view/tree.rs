@@ -395,6 +395,31 @@ impl Maintainer {
         })
     }
 
+    /// Where a root stands among the roots in the tree, read from the
+    /// roots kept in key order. Rendered for one entity, the roots in the
+    /// tree are those whose key starts with it, and they stand together
+    /// in that order: those before them are counted off by a search.
+    fn root_index(&self, chain: &Chain) -> usize {
+        let Some(roots) = self.kids[0].get(&Vec::new()) else {
+            return 0;
+        };
+        let at = match roots.binary_search(chain) {
+            Ok(at) | Err(at) => at,
+        };
+        match &self.entity {
+            Some(entity)
+                if self.plan.elements[0].key.first().map(String::as_str)
+                    == Some(self.plan.entity.as_str()) =>
+            {
+                let before = roots[..at].partition_point(|root| {
+                    root.first().and_then(|key| key.first()) < Some(entity)
+                });
+                at - before
+            }
+            _ => at,
+        }
+    }
+
     /// The row an instance shows: the first of those behind it.
     fn shown(&self, element: usize, chain: &Chain) -> Option<Kept> {
         self.live[element]
@@ -789,11 +814,7 @@ impl Maintainer {
                                 Ok(at) | Err(at) => at,
                             }
                         }),
-                        None => self.live[0]
-                            .keys()
-                            .filter(|root| self.mounted(0, root))
-                            .position(|root| root == chain)
-                            .unwrap_or(0),
+                        None => self.root_index(chain),
                     };
                     let parent = match self.plan.elements[*element].parent {
                         Some(up) => self.address(up, &parent),
