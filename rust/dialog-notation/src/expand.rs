@@ -1134,22 +1134,29 @@ impl Expander {
         self.twice.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
-        // a name, a concept or a rule about syntax, is expanded before
-        // anything that may use it.
-        let declares = |tree: &Syntax| match tree.applies() {
-            Some("concept" | "query") => true,
-            Some("rule") => items(tree)
-                .first()
-                .and_then(Syntax::applies)
-                .is_some_and(|word| matches!(word, "syntax" | "warning")),
-            _ => false,
+        // a name is expanded before anything that may use it: a concept
+        // or a rule about syntax first, then a query, which reads
+        // concepts, then the rest. A query expanded before a concept it
+        // reads would read the concept's name as an attribute's, and
+        // nothing would expand it again.
+        let rank = |tree: &Syntax| match tree.applies() {
+            Some("concept") => 0,
+            Some("rule")
+                if items(tree)
+                    .first()
+                    .and_then(Syntax::applies)
+                    .is_some_and(|word| matches!(word, "syntax" | "warning")) =>
+            {
+                0
+            }
+            Some("query") => 1,
+            _ => 2,
         };
         let skipping = std::mem::take(&mut self.skipping);
         let mut pending: Vec<usize> = (0..trees.len())
-            .filter(|at| declares(&trees[*at]))
-            .chain((0..trees.len()).filter(|at| !declares(&trees[*at])))
             .filter(|at| !skipping.contains_key(at))
             .collect();
+        pending.sort_by_key(|at| rank(&trees[*at]));
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
         let mut refused: BTreeMap<usize, Diagnostic> = skipping
             .into_iter()
