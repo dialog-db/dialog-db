@@ -1120,6 +1120,41 @@ async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<
     Ok(())
 }
 
+/// The same holds of an attribute named under a concept a macro's
+/// expansion declares: read before the declaration it is the stored
+/// attribute, after it the concept's derived one. Read first, it is
+/// refused, saying to declare the concept above it.
+#[dialog_common::test]
+async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> Result<()> {
+    let kind = "(rule (syntax (concept (?name ?t name: ?x)
+                  (xyz.list/name of: ?t is: ?x as: :text cardinality: :one)))
+                (expand (list-kind ?name)))";
+    let rule = "(rule (xyz.out ?t v: ?x) (xyz.list/count ?t ?x))";
+    let declare = "(list-kind xyz.list)";
+    let open = || async {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(r#"(assert (xyz.list/count x:1 is: "raw"))"#)
+            .await?;
+        anyhow::Ok(notebook)
+    };
+    let mut notebook = open().await?;
+    let refused = notebook
+        .submit(&[kind, rule, declare].join("\n"))
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("xyz.list")),
+        "{refused:?}"
+    );
+    assert!(
+        report(&mut notebook, "(select (xyz.out ?t v: ?x))")
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a

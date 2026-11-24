@@ -648,6 +648,26 @@ mod tests {
                 "(concept (a ?t v: ?x) (xyz.b ?t v: ?x))",
                 "(select (a ?t v: ?x))",
             ],
+            // A concept a macro's expansion declares, read by a rule and
+            // a select of the same document: whatever the order, the
+            // read is the concept's or it is refused.
+            vec![
+                "(rule (syntax (concept (?name ?t is: ?x) \
+                 (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one))) \
+                 (expand (memo-kind ?name)))",
+                "(memo-kind xyz.memo/note)",
+                "(rule (xyz.out ?t v: ?x) (xyz.memo/note ?t is: ?x))",
+                "(select (xyz.memo/note ?t is: ?x))",
+            ],
+            // An attribute named under a concept a macro's expansion
+            // declares.
+            vec![
+                "(rule (syntax (concept (?name ?t name: ?x) \
+                 (xyz.list/name of: ?t is: ?x as: :text cardinality: :one))) \
+                 (expand (list-kind ?name)))",
+                "(list-kind xyz.list)",
+                "(rule (xyz.out ?t v: ?x) (xyz.list/count ?t ?x))",
+            ],
             // Two concepts of one name and other labels: an entry field
             // under one, a plain field under the other.
             vec![
@@ -662,14 +682,20 @@ mod tests {
                 "(select (notebook/outline ?n is: ?o))",
             ],
         ];
+        // Each order means what the order as listed means, which declares
+        // a name above what reads it; or, where a form reads a name a
+        // macro's expansion declares below it, it is refused saying so.
+        // No order answers otherwise.
         for forms in documents {
             let first = meaning(&forms.join("\n"))?;
             for order in orders(&forms) {
-                assert_eq!(
-                    meaning(&order.join("\n"))?,
-                    first,
-                    "{order:#?} against {forms:#?}"
-                );
+                let text = order.join("\n");
+                let declared_after = check(&mut Analyzer::new()?, &text).refusals().any(|refused| {
+                    matches!(&refused.refusal, Some(Error::Refused(why)) if why.contains("declare the concept above"))
+                });
+                if !declared_after {
+                    assert_eq!(meaning(&text)?, first, "{order:#?} against {forms:#?}");
+                }
             }
         }
         // The two the reviewer wrote, refused naming both forms.
