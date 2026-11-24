@@ -7384,3 +7384,207 @@ async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> 
     );
     Ok(())
 }
+
+/// A rule that holds a pattern replicates as its facts: its body is in
+/// format 5, so a peer that pulls the branch gets the rule and it fires
+/// there, over what was pulled and over what is pulled after, and a
+/// subscription there through the rule stays current. Cross-target: the
+/// client runs on native and in the browser against the provisioned S3.
+#[dialog_common::test]
+async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> {
+    use dialog_query::concept::query::ConceptQuery;
+    use dialog_query::query::Output as _;
+    use dialog_query::types::Any;
+    use dialog_query::{
+        ConceptConclusion, ConceptDescriptor, DeductiveRule, MapPattern, Parameters, Pattern,
+        Premise, Proposition, Term, the,
+    };
+    use futures_util::TryStreamExt as _;
+
+    let text = |value: &str| Value::String(value.into());
+    let concept = |field: &str, relation: &str, value_type: &str| -> Result<ConceptDescriptor> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": relation, "as": value_type, "cardinality": "many" } }
+        }))?)
+    };
+    // heading(this, heading) :- payload(this, {"title": heading, ...}).
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.set(
+        "payload".into(),
+        Pattern::Map(
+            MapPattern::new([(text("title"), Pattern::Term(Term::var("heading")))])?
+                .with_rest(Term::<Any>::blank()),
+        ),
+    );
+    let rule = DeductiveRule::new(
+        concept("heading", "note/heading", "text:")?,
+        vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("payload", "note/payload", "composite:map")?,
+            terms,
+        }))],
+    )?;
+    let headings = || -> Result<ConceptQuery> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("heading".into(), Term::var("heading"));
+        Ok(ConceptQuery {
+            predicate: concept("heading", "note/heading", "text:")?,
+            terms,
+        })
+    };
+    let titles = |rows: &[ConceptConclusion]| -> Vec<(dialog_corpus::Entity, Value)> {
+        let mut titles: Vec<_> = rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.entity().clone(),
+                    row.source().value_of("heading")?.clone(),
+                ))
+            })
+            .collect();
+        titles.sort_by(|a, b| a.0.cmp(&b.0));
+        titles
+    };
+    let payload = |title: &str| -> Result<dialog_corpus::Composite> {
+        Ok(dialog_corpus::Composite::map([(
+            text("title"),
+            text(title),
+        )])?)
+    };
+    let milk: dialog_corpus::Entity = "id:milk".parse()?;
+    let call: dialog_corpus::Entity = "id:call".parse()?;
+
+    // Alice installs the rule beside a payload and pushes.
+    let (alice_operator, alice_profile) = test_session_with_peer().await;
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&alice_operator, &alice_profile, &s3, "pattern-rule-a").await?;
+    #[allow(deprecated)]
+    alice_branch
+        .transaction()
+        .assert(&rule)
+        .assert(
+            the!("note/payload")
+                .of(milk.clone())
+                .is(payload("Buy milk")?),
+        )
+        .commit()
+        .publish()
+        .perform(&alice_operator)
+        .await?;
+    assert!(
+        alice_branch
+            .push()
+            .perform(&alice_operator)
+            .await?
+            .is_some()
+    );
+
+    // Bob pulls from the same remote.
+    let (bob_operator, bob_profile) = test_session_with_peer().await;
+    let bob_repo = bob_profile
+        .space(unique_name("pattern-rule-b"))
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_site = s3_site_address(&s3);
+    bob_profile
+        .secrets()
+        .site(&bob_site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&bob_profile)
+        .await?;
+    let bob_origin = connect("origin", bob_site, alice_repo.did(), &bob_operator).await?;
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_remote = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(bob_remote)
+        .perform(&bob_operator)
+        .await?;
+    assert!(
+        bob_branch
+            .pull(crate::Download::MinimalRanges)
+            .perform(&bob_operator)
+            .await?
+            .is_some()
+    );
+
+    // The rule arrived, as format 5, and fires on Bob's side.
+    let sources: Vec<Fact> = bob_branch
+        .claims()
+        .select(
+            Selector::new()
+                .of(rule.this())
+                .the("dialog.rule/source".parse()?),
+        )
+        .to_owned()
+        .perform(&bob_operator)
+        .await?
+        .try_collect()
+        .await?;
+    let [source] = sources.as_slice() else {
+        anyhow::bail!("one body pulled, found {}", sources.len());
+    };
+    assert!(
+        matches!(&source.is, Value::Bytes(bytes)
+            if dialog_query::rule::body::format_of(bytes) == Some(5)),
+        "the pulled body is in format 5"
+    );
+    let mut subscription = bob_branch.subscribe(headings()?);
+    let first = subscription
+        .poll(&bob_operator)
+        .await?
+        .expect("the initial poll evaluates");
+    assert_eq!(
+        titles(&first.asserted),
+        vec![(milk.clone(), text("Buy milk"))]
+    );
+
+    // Alice writes another payload; once Bob pulls it the rule derives
+    // its heading there and the subscription reports it.
+    #[allow(deprecated)]
+    alice_branch
+        .transaction()
+        .assert(
+            the!("note/payload")
+                .of(call.clone())
+                .is(payload("Call mum")?),
+        )
+        .commit()
+        .publish()
+        .perform(&alice_operator)
+        .await?;
+    assert!(
+        alice_branch
+            .push()
+            .perform(&alice_operator)
+            .await?
+            .is_some()
+    );
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&bob_operator)
+        .await?;
+    let delta = subscription
+        .poll(&bob_operator)
+        .await?
+        .expect("the pulled payload is a delta");
+    assert_eq!(titles(&delta.asserted), vec![(call, text("Call mum"))]);
+    assert!(delta.retracted.is_empty());
+    let rows = bob_branch
+        .query()
+        .select(headings()?)
+        .perform(&bob_operator)
+        .try_vec()
+        .await?;
+    assert_eq!(rows.len(), 2);
+    Ok(())
+}

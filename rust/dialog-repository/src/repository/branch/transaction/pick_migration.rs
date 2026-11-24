@@ -583,7 +583,7 @@ async fn a_branch_lists_the_rule_bodies_it_does_not_read() -> Result<()> {
     assert_eq!(listed.len(), 3, "{listed:?}");
     assert_eq!(
         reason(&newer),
-        "newer: the body is in format 99, and this release reads up to 4"
+        "newer: the body is in format 99, and this release reads up to 5"
     );
     assert!(reason(&garbage).starts_with("undecodable: "), "{listed:?}");
     assert_eq!(
