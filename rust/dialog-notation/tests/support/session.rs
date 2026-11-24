@@ -174,12 +174,6 @@ impl Notebook {
         }
         // Sorted, so a report reads the same whatever order the rows came
         // in, and never deduplicated: an answer given twice is seen twice.
-        // A derived attribute's relation is a hash: an answer names it as
-        // it is written, as an embedder shows it.
-        let mut report: Vec<String> = report
-            .iter()
-            .map(|line| self.analyzer.spelled(line))
-            .collect();
         report.sort();
         Ok((report, diagnostics))
     }

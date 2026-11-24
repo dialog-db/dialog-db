@@ -1206,6 +1206,66 @@ async fn it_refuses_a_concept_line_that_says_no_cardinality() -> Result<()> {
     Ok(())
 }
 
+/// A derived attribute's relation is named by a hash, which no person
+/// is shown: an answer asked once, an answer kept standing, and what a
+/// check of the fixtures says all name it as it is written.
+#[dialog_common::test]
+async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
+    let concepts = r#"
+        (concept (list ?l name: ?n)
+          (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+        (rule (list/label ?l ?n) (list ?l name: ?n))"#;
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!(
+            r#"{concepts} (assert (list list:home name: "Home"))"#
+        ))
+        .await?;
+    let asked = report(&mut notebook, "(select (list/label ?l ?n))").await?;
+    assert_eq!(asked, vec![r#"(list/label list:home is: "Home")"#]);
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        &format!("{concepts} (select (list/label ?l ?n))"),
+    );
+    let selection = checked
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            dialog_notation::Step::Select(selection) => Some((**selection).clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut standing = live.standing(selection)?;
+    let kept = standing.poll(&notebook.operator).await?.unwrap_or_default();
+    let kept: Vec<String> = kept.iter().map(ToString::to_string).collect();
+    assert_eq!(kept, asked);
+    let mut said = Vec::new();
+    for fixture in [
+        include_str!("fixtures/todo.clj"),
+        include_str!("fixtures/notebook.clj"),
+        include_str!("fixtures/table.clj"),
+    ] {
+        let checked = dialog_notation::check(
+            &mut dialog_notation::Analyzer::new()?,
+            &format!("{}\n{fixture}", include_str!("fixtures/core.clj")),
+        );
+        said.extend(
+            checked
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone()),
+        );
+    }
+    let hashed: Vec<&String> = said
+        .iter()
+        .chain(&kept)
+        .filter(|said| said.contains("dialog.notation.c."))
+        .collect();
+    assert!(hashed.is_empty(), "{hashed:?}");
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
