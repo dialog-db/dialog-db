@@ -1033,6 +1033,10 @@ pub struct Expander {
     pub(crate) twice: Vec<(usize, usize, Error)>,
     /// Trees of the document left out, each refused as it says.
     pub(crate) skipping: BTreeMap<usize, Error>,
+    /// The names each tree of the document read as an attribute's, by
+    /// the tree: one the document declares as a concept after that tree
+    /// was expanded was read as another relation than the one meant.
+    misread: Vec<(usize, String)>,
     /// The sites of the tree being expanded, each by its reference,
     /// numbered in the order they are met: what a site's own variables
     /// are named apart by. Begun again for each tree, so the numbers
@@ -1147,6 +1151,7 @@ impl Expander {
         self.origin.clear();
         self.defining.clear();
         self.twice.clear();
+        self.misread.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
         // a name is expanded before anything that may use it: a concept
@@ -1191,6 +1196,7 @@ impl Expander {
             for at in pending {
                 let tree = &trees[at];
                 self.tree = at;
+                self.misread.retain(|(read, _)| *read != at);
                 self.blame.clear();
                 self.sites.clear();
                 let mut rules = Vec::new();
@@ -1225,6 +1231,32 @@ impl Expander {
             pending = failed;
             if pending.is_empty() || self.declared == declared {
                 break;
+            }
+        }
+        // A tree that read as an attribute's a name the document declared
+        // as a concept after it read another relation than the concept:
+        // it is refused, saying to declare the concept above it. The tree
+        // that declares the name is not.
+        let misread: Vec<(usize, String)> = self
+            .misread
+            .iter()
+            .filter(|(at, name)| {
+                self.concepts.contains(name)
+                    && self.defining.get(&format!("concept {name}")) != Some(at)
+            })
+            .cloned()
+            .collect();
+        for (at, name) in misread {
+            if done.remove(&at).is_some() {
+                let error = Error::Refused(format!(
+                    "{} reads `{name}` as an attribute, and the document declares `{name}` as a \
+                     concept after it: declare the concept above what reads it",
+                    trees.get(at).map(ToString::to_string).unwrap_or_default()
+                ));
+                refused.insert(
+                    at,
+                    Diagnostic::refused(trees.get(at).cloned(), vec![Segment::Item(at)], error),
+                );
             }
         }
         let mut kernel = Vec::new();
@@ -1996,6 +2028,13 @@ impl Expander {
             let declared = word
                 .as_deref()
                 .is_some_and(|word| self.concepts.contains(word));
+            if !declared
+                && let Some(word) = word
+                    .as_deref()
+                    .filter(|word| Kind::of(word) == Kind::Attribute)
+            {
+                self.misread.push((self.tree, word.to_string()));
+            }
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
             if !declared
