@@ -9,6 +9,7 @@ use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_corpus::ArchiveDelta;
+use dialog_corpus::Entity;
 use dialog_corpus::FromKey as _;
 use dialog_corpus::history::{Context, History as _, region_writes};
 use dialog_corpus::merge;
@@ -94,6 +95,10 @@ pub struct Pull<'a> {
     confirm_upstream: bool,
     retry: Limit,
     download: Download,
+    /// The durable layers whose trees the branch points at: what the
+    /// download brings local of the head the pull would adopt includes
+    /// every tree that head points them at.
+    pointing: Vec<Entity>,
 }
 
 impl<'a> Pull<'a> {
@@ -104,7 +109,18 @@ impl<'a> Pull<'a> {
             confirm_upstream: true,
             retry: Limit::default(),
             download,
+            pointing: Vec::new(),
         }
+    }
+
+    /// Bring local, before the head moves, the trees the head the pull
+    /// would adopt points `layers` at, to the same [`Download`] as its
+    /// own: the durable layers of a stack on this branch, which have no
+    /// head of their own, so a replica that goes offline after the pull
+    /// reads them as it reads the branch.
+    pub(crate) fn pointing(mut self, layers: Vec<Entity>) -> Self {
+        self.pointing = layers;
+        self
     }
 
     /// Pull from the given branch alone, instead of every upstream.
@@ -227,6 +243,7 @@ impl<'a> Pull<'a> {
                 upstream.clone(),
                 confirm,
                 &self.download,
+                &self.pointing,
                 env,
             ))
             .await?;
@@ -259,6 +276,7 @@ impl<'a> Pull<'a> {
                 upstream.clone(),
                 confirm,
                 &self.download,
+                &self.pointing,
                 env,
             ))
         }))
@@ -313,6 +331,7 @@ impl<'a> Pull<'a> {
             upstream,
             self.confirm_upstream,
             &self.download,
+            &self.pointing,
             env,
         ))
         .await
@@ -357,7 +376,8 @@ impl<'a> Pull<'a> {
 
 /// Phase one of a pull for one upstream, with what the pull was asked to
 /// download: the merge is prepared ([`prepare_upstream`]), then what
-/// `download` names of the head it would adopt is fetched, all before any
+/// `download` names of the head it would adopt is fetched, and of every
+/// tree that head points the durable layers `pointing` at, all before any
 /// cell is written. A download that fails fails the pull, the head where
 /// it was.
 async fn prepare_downloaded<'a, Env: PullEnv>(
@@ -365,6 +385,7 @@ async fn prepare_downloaded<'a, Env: PullEnv>(
     upstream: Upstream,
     confirm_upstream: bool,
     download: &Download,
+    pointing: &[Entity],
     env: &Env,
 ) -> Result<PreparedPull<'a>, PullError> {
     let prepared = Box::pin(prepare_upstream(
@@ -375,11 +396,60 @@ async fn prepare_downloaded<'a, Env: PullEnv>(
     ))
     .await?;
     if let Some(revision) = prepared.revision() {
-        DownloadBranch::prepared(branch, upstream, revision.clone(), download.clone())
+        DownloadBranch::prepared(branch, upstream.clone(), revision.clone(), download.clone())
             .perform(env)
             .await?;
+        if *download != Download::MinimalRanges && !pointing.is_empty() {
+            for (tree, held) in pointed_trees(branch, &upstream, revision, pointing, env).await? {
+                DownloadBranch::prepared(
+                    branch,
+                    upstream.clone(),
+                    revision.clone(),
+                    download.clone(),
+                )
+                .tree(tree, held)
+                .perform(env)
+                .await?;
+            }
+        }
     }
     Ok(prepared)
+}
+
+/// The trees `revision`, a head a pull of `branch` would adopt from
+/// `upstream`, points the durable layers `layers` at, each with the tree
+/// the branch's head points the layer at, the one the replica holds: what
+/// the pull downloads beside the head. A tree the head already points at
+/// is left out.
+async fn pointed_trees<Env: PullEnv>(
+    branch: &Branch,
+    upstream: &Upstream,
+    revision: &Revision,
+    layers: &[Entity],
+    env: &Env,
+) -> Result<Vec<(TreeReference, Option<TreeReference>)>, PullError> {
+    use crate::stack::durable::{elected, pointed};
+    // The head's blocks may be held by reference, from the upstream.
+    let _loan = routes::lend(branch.routes(), branch.of(), &upstream.fallback());
+    let archive = branch.archive();
+    let store = erased(env);
+    let head = branch.revision();
+    let mut trees: Vec<(TreeReference, Option<TreeReference>)> = Vec::new();
+    for layer in layers {
+        let held = match &head {
+            Some(head) => elected(&pointed(&archive, &head.tree, layer, store).await?)
+                .map(|claim| claim.tree.clone()),
+            None => None,
+        };
+        for claim in pointed(&archive, &revision.tree, layer, store).await? {
+            if Some(&claim.tree) != held.as_ref()
+                && trees.iter().all(|(tree, _)| *tree != claim.tree)
+            {
+                trees.push((claim.tree, held.clone()));
+            }
+        }
+    }
+    Ok(trees)
 }
 
 /// Land `prepared`, the pull of `upstream`, holding the branch's write
@@ -1866,7 +1936,7 @@ mod tests {
                 is: Value::String("Seed".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1895,7 +1965,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1936,7 +2006,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1949,7 +2019,7 @@ mod tests {
                 is: Value::String("dev@test.com".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2035,7 +2105,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2051,7 +2121,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2104,7 +2174,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2126,7 +2196,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2208,7 +2278,7 @@ mod tests {
                     is: Value::String(of.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
 
@@ -2271,7 +2341,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2323,7 +2393,7 @@ mod tests {
                     is: Value::String(name.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )])
         };
 
@@ -2401,7 +2471,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2471,7 +2541,7 @@ mod tests {
                         is: Value::String(value.to_string()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2534,7 +2604,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2594,7 +2664,7 @@ mod tests {
                         is: Value::String(name.to_string()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2718,7 +2788,7 @@ mod history_tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )
     }
 
@@ -3322,7 +3392,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -3493,7 +3563,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -3712,7 +3782,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
@@ -3888,7 +3958,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         };
 
@@ -4013,7 +4083,7 @@ mod history_tests {
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.commit(stream::iter(vec![Instruction::Assert(
             urgent(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4033,7 +4103,7 @@ mod history_tests {
         mallory
             .commit(stream::iter(vec![Instruction::Assert(
                 urgent(),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -4226,7 +4296,7 @@ mod history_tests {
                 is: Value::String("Bob".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         )]))
         .perform(&operator)
         .await?;
@@ -5163,8 +5233,8 @@ mod history_tests {
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(fact, dialog_corpus::Pick::All),
-                    1 => Instruction::Assert(fact, dialog_corpus::Pick::Last),
+                    0 => Instruction::Assert(fact, dialog_corpus::Cardinality::Many),
+                    1 => Instruction::Assert(fact, dialog_corpus::Cardinality::One),
                     _ => Instruction::Retract(fact),
                 };
                 // A retract of an absent fact is a no-op commit; both

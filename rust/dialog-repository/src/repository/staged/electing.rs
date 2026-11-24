@@ -1,4 +1,4 @@
-//! The cells a transaction wrote under a choosing pick, found by the
+//! The cells a transaction wrote under cardinality one, found by the
 //! entity and attribute bounds of a read.
 
 use std::collections::BTreeMap;
@@ -7,7 +7,7 @@ use std::ops::Bound;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Entity, NameShape, Relation, Selector};
 
-/// One entry per cell a write under a choosing pick asserted, kept
+/// One entry per cell a write under cardinality one asserted, kept
 /// past its retraction: the cells a read of a range must settle. Kept
 /// by attribute then entity and by entity then attribute, on their
 /// spellings, so a read bounded on either (exactly or by prefix) ranges

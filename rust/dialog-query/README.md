@@ -85,7 +85,7 @@ Provides modeling primitives for describing a domain: attributes, concepts, rule
 
 #### Attributes
 
-An attribute is a relation qualified by a value type and a pick. It extends the `domain/name` identifier with what kind of values the relation is read as and which of an entity's claims a read returns. A Rust-declared attribute is read under `last` unless it says `#[pick(..)]`.
+An attribute is a relation, a value type and a cardinality. It extends the `domain/name` identifier with what kind of values the relation is read as and how many claims an entity has for it. A Rust-declared attribute has cardinality one unless it says `#[cardinality(many)]`.
 
 An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case):
 
@@ -117,18 +117,18 @@ mod model {
 }
 ```
 
-By default an attribute is read under the `last` pick: an entity has one value for it, the newest. Use `#[pick(all)]` when an entity can have multiple values (`#[pick(max)]` and `#[pick(min)]` read the greatest and least):
+By default an attribute has cardinality one: an entity has one value for it, the newest. Use `#[cardinality(many)]` when an entity can have multiple values:
 
 ```rs
 mod employee {
     /// Skills associated with the employee
     #[derive(Attribute, Clone)]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Skill(pub String);  // -> "employee/skill" (many)
 }
 ```
 
-> Note: the pick governs writes too. Under any pick but `all`, asserting a new value succeeds the claim a read under that pick returns; under `all`, claims accumulate.
+> Note: the cardinality governs writes too. Under one, asserting a new value succeeds the newest claim, the one a read returns; under many, claims accumulate. A ranked read (the greatest, the least, the first of a list) is a concept field over a cardinality-many attribute that picks `max`, `min` or `top`.
 
 `Attribute::of(...).is(...)` constructs a statement that can be asserted or retracted:
 

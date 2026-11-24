@@ -75,7 +75,7 @@ async fn assert_all(
         branch,
         facts
             .into_iter()
-            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
             .collect(),
         operator,
     )
@@ -205,7 +205,7 @@ async fn without_spills(branch: &Branch, operator: &Operator) -> Result<Blocks> 
     let mut visits = pin!(visits);
     while let Some(visit) = visits.next().await {
         match visit? {
-            Visit::Present(node) => blocks.store(node.buffer().clone()),
+            Visit::Present(node) => blocks.store(node.buffer()?.clone()),
             Visit::Absent(hash) => anyhow::bail!("the branch's node {hash} is not local"),
         }
     }
@@ -286,7 +286,7 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     commit(
         &branch,
         vec![
-            Instruction::Assert(transient.clone(), dialog_corpus::Pick::All),
+            Instruction::Assert(transient.clone(), dialog_corpus::Cardinality::Many),
             Instruction::Retract(transient.clone()),
         ],
         &operator,
@@ -1151,7 +1151,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1201,7 +1201,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1245,7 +1245,7 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         .commit(stream::iter(
             generate_data(512)?
                 .into_iter()
-                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1335,11 +1335,11 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
 
     let mut forward = Changes::new();
     for fact in data.iter().cloned() {
-        forward.associate(fact.the, fact.of, fact.is, dialog_corpus::Pick::All);
+        forward.associate(fact.the, fact.of, fact.is, dialog_corpus::Cardinality::Many);
     }
     let mut backward = Changes::new();
     for fact in data.into_iter().rev() {
-        backward.associate(fact.the, fact.of, fact.is, dialog_corpus::Pick::All);
+        backward.associate(fact.the, fact.of, fact.is, dialog_corpus::Cardinality::Many);
     }
 
     let one = branch
@@ -1385,7 +1385,7 @@ async fn it_can_upsert_facts() -> Result<()> {
         &branch,
         vec![Instruction::Assert(
             fact("test/attribute", entity.clone(), Value::Boolean(true))?,
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         )],
         &operator,
     )
@@ -1453,7 +1453,7 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
                 Entity::new()?,
                 Value::String("another value".into()),
             )?,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&counting)
         .await?;
@@ -1550,6 +1550,10 @@ async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
         // Exercises the 0x00-escape in the encoding.
         Value::Bytes(vec![0u8; n]),
         Value::Record(vec![7u8; n]),
+        Value::Composite(dialog_corpus::Composite::new([
+            ("doc/body".parse()?, Value::String("c".repeat(n))),
+            ("doc/tag".parse()?, Value::String("a".into())),
+        ])?),
     ];
     for value in values {
         assert!(
@@ -1571,6 +1575,60 @@ async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
     Ok(())
 }
 
+/// An attribute declared `composite:` reads the composites a branch holds
+/// under it and nothing else: a value of another type at the same relation
+/// is not one it reads.
+#[dialog_common::test]
+async fn it_reads_composites_through_an_attribute_declared_composite() -> Result<()> {
+    use dialog_query::query::Output as _;
+    use dialog_query::types::Any;
+    use dialog_query::{ConceptDescriptor, ConceptQuery, Parameters, Term};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let place = Value::Composite(dialog_corpus::Composite::new([
+        ("geo/lat".parse()?, Value::Float(37.77)),
+        ("geo/lon".parse()?, Value::Float(-122.42)),
+    ])?);
+    let (home, office) = (Entity::new()?, Entity::new()?);
+    assert_all(
+        &branch,
+        [
+            fact("x/where", home.clone(), place.clone())?,
+            fact("x/where", office.clone(), Value::String("downtown".into()))?,
+        ],
+        &operator,
+    )
+    .await?;
+
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "place": { "the": "x/where", "as": "composite:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("place".to_string(), Term::<Any>::var("place"));
+    let rows = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(&operator)
+        .try_vec()
+        .await?;
+    let read: Vec<(Entity, dialog_corpus::Composite)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.get::<Entity>("this")?,
+                row.get::<dialog_corpus::Composite>("place")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let Value::Composite(expected) = place else {
+        unreachable!()
+    };
+    assert_eq!(read, vec![(home, expected)]);
+    Ok(())
+}
+
 /// Replacing a fact whose prior value was spilled supersedes the prior
 /// (reconstructed via the block) and leaves exactly the new value,
 /// whether the new value is itself spilled or inline.
@@ -1589,7 +1647,7 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
                 &branch,
                 vec![Instruction::Assert(
                     fact("doc/body", entity.clone(), value)?,
-                    dialog_corpus::Pick::Last,
+                    dialog_corpus::Cardinality::One,
                 )],
                 &operator,
             )
@@ -1753,7 +1811,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
             "test/value".parse()?,
             format!("entity:00000000-0000-0000-0000-{:012}", n % 40).parse()?,
             Value::String(format!("value {n}")),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
 
         // The oracle opens a fresh handle (and therefore reads the root

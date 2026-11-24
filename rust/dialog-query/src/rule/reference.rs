@@ -32,8 +32,10 @@ use serde::ser::{self, SerializeMap as _};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
+use crate::constraint::Constraint;
 use crate::identity::{NULL, RULE, field};
 use crate::negation::Negation;
+use crate::pattern::Pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
@@ -114,10 +116,87 @@ fn head_reference(conclusion: &ConceptDescriptor) -> Reference {
 
 /// A premise's proposition: a concept application by its concept and
 /// bindings, anything else by its wire form.
+///
+/// An equality a side of which is a map or a list of terms has
+/// no wire form. It is referenced as its wire form would be read, with
+/// each side by its [`pattern_reference`], so an equality between two
+/// terms has the reference it always had.
 fn proposition_reference(proposition: &Proposition) -> Option<Reference> {
     match proposition {
         Proposition::Concept(query) => concept_premise(query),
+        Proposition::Constraint(Constraint::Equality(equality))
+            if equality.this.is_composite() || equality.is.is_composite() =>
+        {
+            Some(Type::MAP.map([
+                (text("assert"), text("==")),
+                (
+                    text("where"),
+                    Type::MAP.map([
+                        (text("this"), pattern_reference(&equality.this)?),
+                        (text("is"), pattern_reference(&equality.is)?),
+                    ]),
+                ),
+            ]))
+        }
         other => wire_reference(other),
+    }
+}
+
+/// The reference of a premise's proposition, for whatever orders
+/// premises by it.
+pub(crate) fn proposition(proposition: &Proposition) -> Option<Reference> {
+    proposition_reference(proposition)
+}
+
+/// A pattern, by its parts: a leaf as the term it is, and a map
+/// or a list of terms as a map from its shape to its parts' references,
+/// with what takes the entries or items it did not name beside them.
+/// The same pattern has the same reference however its map's entries
+/// were given, and no layout of a value of the shape is part of it.
+fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
+    let parts = |patterns: &[Pattern]| -> Option<Reference> {
+        Some(
+            Type::LIST.list(
+                patterns
+                    .iter()
+                    .map(pattern_reference)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        )
+    };
+    Some(match pattern {
+        Pattern::Term(term) => term_reference(term)?,
+        Pattern::Map(map) => {
+            let entries = map
+                .entries()
+                .iter()
+                .map(|(key, part)| Some((key.reference(), pattern_reference(part)?)))
+                .collect::<Option<Vec<_>>>()?;
+            let mut shape = vec![(text("map:"), Type::MAP.map(entries))];
+            if let Some(rest) = map.rest() {
+                shape.push((text("rest"), term_reference(rest)?));
+            }
+            Type::MAP.map(shape)
+        }
+        Pattern::List(list) => {
+            let mut shape = vec![(text("list:"), parts(list.items())?)];
+            if let Some(run) = list.run() {
+                shape.push((text("run"), term_reference(run)?));
+            }
+            Type::MAP.map(shape)
+        }
+    })
+}
+
+/// What a concept application binds under `name`: a term, or the map
+/// or list of terms it holds there.
+fn binding_reference(query: &ConceptQuery, name: &str) -> Option<Option<Reference>> {
+    match query.terms.shape(name) {
+        Some(pattern) => Some(Some(pattern_reference(pattern)?)),
+        None => match query.terms.get(name) {
+            Some(term) => Some(Some(term_reference(term)?)),
+            None => Some(None),
+        },
     }
 }
 
@@ -139,24 +218,26 @@ fn concept_premise(query: &ConceptQuery) -> Option<Reference> {
         let binding = if collections.contains(name) {
             named.insert(key_operand.clone());
             let mut entry = Vec::new();
-            if let Some(term) = query.terms.get(&key_operand) {
-                entry.push((text("the"), term_reference(term)?));
+            if let Some(the) = binding_reference(query, &key_operand)? {
+                entry.push((text("the"), the));
             }
-            if let Some(term) = query.terms.get(name) {
-                entry.push((text("is"), term_reference(term)?));
+            if let Some(is) = binding_reference(query, name)? {
+                entry.push((text("is"), is));
             }
             Type::MAP.map(entry)
         } else {
-            match query.terms.get(name) {
-                Some(term) => term_reference(term)?,
+            match binding_reference(query, name)? {
+                Some(binding) => binding,
                 None => continue,
             }
         };
         bindings.push((field_reference(field), binding));
     }
-    for (name, term) in query.terms.iter() {
-        if !named.contains(name.as_str()) {
-            bindings.push((text(name), term_reference(term)?));
+    for name in query.terms.keys() {
+        if !named.contains(name.as_str())
+            && let Some(binding) = binding_reference(query, name)?
+        {
+            bindings.push((text(name), binding));
         }
     }
     Some(Type::MAP.map([
@@ -562,7 +643,8 @@ mod tests {
     use crate::Value;
     use crate::attribute::Relation;
     use crate::corpus::Entity;
-    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor};
+    use crate::rule::body::format_of;
+    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor, InductiveRuleDescriptor};
 
     /// A constant inside a premise's wire form references as the value it
     /// is, so a constant has one identity wherever it appears.
@@ -729,4 +811,66 @@ mod tests {
             );
         }
     }
+    /// Three rules that hold no pattern, as the release before format 5
+    /// named and stored them: their entities and the blake3 of their
+    /// bodies, captured from the build before format 5 was added (the head of #778). A rule
+    /// of terms keeps its name and its bytes, so a rule already stored is
+    /// found, retracted and left alone by `upgrade_rules` as it was.
+    #[dialog_common::test]
+    fn it_keeps_the_name_and_the_bytes_of_a_rule_that_holds_no_pattern() {
+        let inductive: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": {
+                "tag": { "the": "org/tag", "as": "text:", "cardinality": "many" }
+            } },
+            "when": [{
+                "assert": { "with": {
+                    "label": { "the": "org/label", "as": "text:" }
+                } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "label": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("descriptor parses");
+        let inductive = inductive.compile().expect("rule compiles");
+        let rules = [
+            (
+                compile(employee("", serde_json::json!({ "integer:": 5 }))).this(),
+                compile(employee("", serde_json::json!({ "integer:": 5 }))).encode(),
+            ),
+            (
+                compile(employee("", serde_json::json!({ "text:": "senior" }))).this(),
+                compile(employee("", serde_json::json!({ "text:": "senior" }))).encode(),
+            ),
+            (inductive.this(), inductive.encode()),
+        ];
+        let named: Vec<(String, String)> = rules
+            .iter()
+            .map(|(entity, body)| (entity.to_string(), blake3::hash(body).to_hex().to_string()))
+            .collect();
+        assert_eq!(
+            named,
+            PINNED.map(|(a, b)| (a.to_string(), b.to_string())).to_vec()
+        );
+        for (_, body) in &rules {
+            assert_eq!(format_of(body), Some(4));
+        }
+    }
+
+    /// Captured at e0c35af, the head the format was added on.
+    const PINNED: [(&str, &str); 3] = [
+        (
+            "rule:7PA3y6a4vvM4D3R2Q2ki2cZjxzQ4WakbyAQAxBDy8tdL",
+            "5c586fd0a4a56194a3f6e483038ef8a1d22fe0f19b0b5a10df5039f911f0cf4c",
+        ),
+        (
+            "rule:fGodzcuj6H3zSw1WNU8WdKe6Adthu7UsJXYheZPix4b",
+            "b5da1a2fd4d96e01e0e99f3dcbcb668eeee068716a6ab926dc65629557983ea7",
+        ),
+        (
+            "rule:4saY3Sudyy5pLcqCBJ1DAgp7pYJeB5QrkMGVeGQW3JsC",
+            "899e10576e55cf3ef615d961d580e0c8c7682bd2c9c496e4e0bd62149c786be2",
+        ),
+    ];
 }

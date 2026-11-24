@@ -568,6 +568,43 @@ where
         }
     }
 
+    /// [`differentiate_within`](Self::differentiate_within), scoped to the
+    /// union of `cover`: sets kept sorted and disjoint as they are recorded
+    /// (a subscription's demand cover), borrowed as they are. Building the
+    /// scope touches none of their ranges, so a difference over a cover of
+    /// ten thousand ranges costs what one over ten does, but for the log of
+    /// the ranges each search pays.
+    pub fn differentiate_covered<'a, Env>(
+        &'a self,
+        other: &'a Self,
+        cover: &'a [&'a crate::KeyRanges<Key>],
+        self_storage: &'a Env,
+        other_storage: &'a Env,
+    ) -> impl Differential<Key, Value> + ConditionalSend + 'a
+    where
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+        Key: ConditionalSync,
+        Value: PartialEq + ConditionalSync,
+        D: ConditionalSync,
+    {
+        async_stream::try_stream! {
+            let difference = TreeDifference::compute_covered(
+                self,
+                other,
+                self_storage,
+                other_storage,
+                cover,
+                Prefetch::Lazy,
+            )
+            .await?;
+            for await change in difference.changes_covered(cover) {
+                yield change?;
+            }
+        }
+    }
+
     /// Builds a persistent tree from a sealed root hash. Used by
     /// [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`]. The batch's new nodes go into the caller's delta,
@@ -720,7 +757,11 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let (env, reading) = (
@@ -770,7 +811,11 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let full = tree
@@ -837,7 +882,11 @@ mod tests {
         }
         tree = edit.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let (env, reading) = (
@@ -883,7 +932,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1010,7 +1063,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1053,7 +1110,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1066,7 +1127,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1108,7 +1173,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1155,7 +1224,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1208,7 +1281,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         for i in 90..100u32 {
@@ -1219,7 +1296,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1391,7 +1472,11 @@ mod tests {
         let emptied = edit.persist(&mut delta)?;
         assert_eq!(emptied.root(), &empty_root_hash()?);
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let difference = TreeDifference::compute(&legacy, &emptied, &storage, &storage).await?;
@@ -1414,7 +1499,11 @@ mod tests {
 
         // Flush to storage
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Verify initial value
@@ -1430,7 +1519,11 @@ mod tests {
 
         // Flush update
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Verify updated value
@@ -1456,7 +1549,11 @@ mod tests {
 
         // Flush v1
         for (_, node) in delta_v1.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let v1_root = tree_v1.root().clone();
@@ -1471,7 +1568,11 @@ mod tests {
 
         // Flush v2
         for (_, node) in delta_v2.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Verify v1 is unchanged
@@ -1511,7 +1612,11 @@ mod tests {
                 .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_base.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1531,10 +1636,18 @@ mod tests {
 
         // Flush both branches
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Verify branch A
@@ -1575,7 +1688,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let root_after_insert = tree.root().clone();
@@ -1590,7 +1707,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let root_after_second_insert = tree.root().clone();
@@ -1605,7 +1726,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let root_after_delete = tree.root().clone();
@@ -1630,7 +1755,11 @@ mod tests {
                 .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_a.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1646,7 +1775,11 @@ mod tests {
                 .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_b.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -1671,7 +1804,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Get should work
@@ -1689,7 +1826,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Should be empty again
@@ -1732,7 +1873,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let root_before = tree.root().clone();
@@ -1771,7 +1916,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         assert_eq!(
@@ -1788,7 +1937,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         assert_eq!(tree.get(&1u32.to_le_bytes(), &storage).await?, None);
@@ -1802,7 +1955,11 @@ mod tests {
 
         // Flush
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         assert_eq!(
@@ -1828,7 +1985,11 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree_a = tree_a
             .edit()
@@ -1837,7 +1998,11 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree_a = tree_a
             .edit()
@@ -1846,7 +2011,11 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Build tree B with different insertion order
@@ -1860,7 +2029,11 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree_b = tree_b
             .edit()
@@ -1869,7 +2042,11 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree_b = tree_b
             .edit()
@@ -1878,7 +2055,11 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Different insertion orders should produce same root hash
@@ -1901,7 +2082,11 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree = tree
             .edit()
@@ -1910,7 +2095,11 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         tree = tree
             .edit()
@@ -1919,7 +2108,11 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Verify tree is not empty
@@ -1932,7 +2125,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         tree = tree
@@ -1941,7 +2138,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         tree = tree
@@ -1950,7 +2151,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Tree should be back to the empty state: the canonical
@@ -1978,7 +2183,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2039,7 +2248,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2076,7 +2289,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2118,7 +2335,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2159,7 +2380,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2172,7 +2397,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2211,7 +2440,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2224,7 +2457,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2262,7 +2499,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2285,7 +2526,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
 
             // Deleted key should be gone
@@ -2327,7 +2572,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2340,7 +2589,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2367,7 +2620,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2411,7 +2668,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2461,7 +2722,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2503,7 +2768,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2537,7 +2806,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2593,7 +2866,11 @@ mod tests {
                 .persist(&mut delta_a)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_a.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2609,7 +2886,11 @@ mod tests {
                 .persist(&mut delta_b)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_b.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2642,7 +2923,11 @@ mod tests {
                 .persist(&mut delta_base)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta_base.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2660,7 +2945,11 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         branch_b = branch_b
             .edit()
@@ -2669,7 +2958,11 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         branch_a = branch_a
             .edit()
@@ -2678,7 +2971,11 @@ mod tests {
             .persist(&mut delta_a)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_a.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         branch_b = branch_b
             .edit()
@@ -2687,7 +2984,11 @@ mod tests {
             .persist(&mut delta_b)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta_b.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Branch A: base + 100, 101
@@ -2739,7 +3040,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -2766,7 +3071,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
 
             // Read every surviving key. Any missing new node in storage
@@ -2817,7 +3126,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -2846,7 +3159,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
@@ -2888,7 +3205,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let mut unreadable = vec![];
@@ -2952,7 +3273,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         tree = tree
@@ -2962,7 +3287,11 @@ mod tests {
             .persist(&mut delta)?;
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let stream = tree.stream(&storage);
@@ -3029,7 +3358,11 @@ mod tests {
                 // storage-resident read paths get exercised.
                 if op % 10 == 9 {
                     for (_, node) in delta.flush() {
-                        storage.store(node.buffer().clone());
+                        storage.store(
+                            node.buffer()
+                                .expect("a node built from its block has one")
+                                .clone(),
+                        );
                     }
                 }
 

@@ -1,10 +1,10 @@
-//! Invariants the pick-write design claims of the tree, pinned as
+//! Invariants the cardinality-one write design claims of the tree, pinned as
 //! tests. A failing test here is a place where a batch does not land
 //! as the design says it does.
 
 use crate::ArchiveDelta;
 use crate::tree::{Corpus, CorpusExt as _, SpillCache};
-use crate::{Changes, Entity, Fact, Instruction, Pick, Relation, Update as _, Value};
+use crate::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Update as _, Value};
 use anyhow::Result;
 use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::helpers::test_subject;
@@ -77,7 +77,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Pick::All)],
+        vec![Instruction::Assert(salary(100), Cardinality::Many)],
     )
     .await?;
 
@@ -89,9 +89,9 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(200), Pick::Last),
-            Instruction::Assert(salary(300), Pick::All),
-            Instruction::Assert(salary(400), Pick::Last),
+            Instruction::Assert(salary(200), Cardinality::One),
+            Instruction::Assert(salary(300), Cardinality::Many),
+            Instruction::Assert(salary(400), Cardinality::One),
         ],
     )
     .await?;
@@ -108,19 +108,19 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(200),
-        Pick::Last,
+        Cardinality::One,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(300),
-        Pick::All,
+        Cardinality::Many,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(400),
-        Pick::Last,
+        Cardinality::One,
     );
     let mut by_batch = tree.clone();
     let mut delta = ArchiveDelta::zero();
@@ -159,7 +159,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Pick::All)],
+        vec![Instruction::Assert(salary(100), Cardinality::Many)],
     )
     .await?;
     apply(
@@ -167,8 +167,8 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(150), Pick::Max),
-            Instruction::Assert(salary(120), Pick::Max),
+            Instruction::Assert(salary(150), Cardinality::One),
+            Instruction::Assert(salary(120), Cardinality::One),
         ],
     )
     .await?;
@@ -204,6 +204,98 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
             .iter()
             .any(|(_, record)| record.claim().cause.contains(&version(0))),
         "the batch superseded the stored 100, and some record of it still says so, so a peer holding 100 retires it"
+    );
+    Ok(())
+}
+
+/// A batch carrying n identical copies of a head's instructions lands
+/// the same tree, root hash and history included, as a batch carrying
+/// one copy. Covers the three shapes an induced head takes after
+/// succession is resolved: an `all` assert, a retract followed by an
+/// `all` assert, and a lone retract.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn copies_of_a_head_land_the_same_tree() -> Result<()> {
+    let store = Blocks::new();
+    let entity = Entity::new()?;
+    let the: Relation = "issue/assignee".parse()?;
+    let fact = |value: u32| Fact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::UnsignedInt(value.into()),
+        cause: None,
+    };
+    let assert_all = |value: u32| Instruction::Assert(fact(value), Cardinality::Many);
+    let retract = |value: u32| Instruction::Retract(fact(value));
+    async fn records(tree: &Corpus, store: &Blocks) -> Result<usize> {
+        let history = TreeHistory::new(tree.clone(), store.clone());
+        Ok(history
+            .select(HistorySelector::All)
+            .try_collect::<Vec<_>>()
+            .await?
+            .len())
+    }
+
+    let mut base = Corpus::empty_in(test_subject());
+    apply(&mut base, &store, version(0), vec![assert_all(1)]).await?;
+
+    // A set head over a cell holding nothing of the value.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(&mut one, &store, version(1), vec![assert_all(2)]).await?;
+    apply(
+        &mut many,
+        &store,
+        version(1),
+        vec![assert_all(2), assert_all(2), assert_all(2)],
+    )
+    .await?;
+    assert_eq!(one.root(), many.root(), "set head: three copies, one tree");
+    assert_eq!(
+        records(&one, &store).await?,
+        records(&many, &store).await?,
+        "set head: same history records"
+    );
+
+    // A `last` head resolved against the view: retract the elected
+    // claim, assert the value under `all`, once vs. twice.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(
+        &mut one,
+        &store,
+        version(1),
+        vec![retract(1), assert_all(3)],
+    )
+    .await?;
+    apply(
+        &mut many,
+        &store,
+        version(1),
+        vec![retract(1), assert_all(3), retract(1), assert_all(3)],
+    )
+    .await?;
+    assert_eq!(
+        one.root(),
+        many.root(),
+        "succession head: two copies, one tree"
+    );
+    assert_eq!(held(&one, &store, &entity, &the).await?, vec![3]);
+    assert_eq!(
+        records(&one, &store).await?,
+        records(&many, &store).await?,
+        "succession head: same history records"
+    );
+
+    // A retracting head.
+    let mut one = base.clone();
+    let mut many = base.clone();
+    apply(&mut one, &store, version(1), vec![retract(1)]).await?;
+    apply(&mut many, &store, version(1), vec![retract(1), retract(1)]).await?;
+    assert_eq!(
+        one.root(),
+        many.root(),
+        "retract head: two copies, one tree"
     );
     Ok(())
 }

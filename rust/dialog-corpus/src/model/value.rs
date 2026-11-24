@@ -13,7 +13,9 @@ use std::{
 };
 
 use crate::Blake3Hash;
-use crate::{Cause, DialogCorpusError, Entity, Relation, TypeError, make_reference};
+use crate::{
+    Cause, Composite, CompositeKind, DialogCorpusError, Entity, Relation, TypeError, make_reference,
+};
 use base58::{FromBase58, ToBase58};
 use dialog_number::Number;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -59,6 +61,8 @@ pub enum Value {
     Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
     Symbol(Relation),
+    /// A map or a list of values (see [`Composite`]).
+    Composite(Composite),
 }
 
 /// A value as its bare payload, untagged: how a human-readable format
@@ -77,6 +81,7 @@ enum Bare<'a> {
     Float(f64),
     Record(&'a Vec<u8>),
     Symbol(&'a Relation),
+    Composite(&'a Composite),
 }
 
 impl Value {
@@ -91,6 +96,7 @@ impl Value {
             Value::Float(float) => Bare::Float(*float),
             Value::Record(record) => Bare::Record(record),
             Value::Symbol(relation) => Bare::Symbol(relation),
+            Value::Composite(composite) => Bare::Composite(composite),
         }
     }
 }
@@ -286,7 +292,7 @@ impl Value {
         match self {
             Value::String(text) => Entity::from_str(text).is_err(),
             Value::SignedInt(integer) => *integer < 0,
-            Value::Symbol(_) | Value::Record(_) => false,
+            Value::Symbol(_) | Value::Record(_) | Value::Composite(_) => false,
             Value::Bytes(_)
             | Value::Entity(_)
             | Value::Boolean(_)
@@ -395,6 +401,20 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 }
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
+                ValueDataType::Composite
+                | ValueDataType::Map
+                | ValueDataType::CompositeRecord
+                | ValueDataType::List => {
+                    let composite: Composite = map.next_value()?;
+                    let value = Value::Composite(composite);
+                    if !kind.holds(&value) {
+                        return Err(de::Error::custom(format!(
+                            "{value:?} is not a {}",
+                            kind.uri()
+                        )));
+                    }
+                    value
+                }
                 // Any number (`number:`) or one a sized number type holds
                 // (`natural:8` .. `float:64`), read as its bare spelling reads and
                 // held in the view's storage type.
@@ -486,6 +506,10 @@ impl Value {
             Value::Float(_) => ValueDataType::Float,
             Value::Record(_) => ValueDataType::Record,
             Value::Symbol(_) => ValueDataType::Symbol,
+            Value::Composite(composite) => match composite.kind() {
+                CompositeKind::Map => ValueDataType::Map,
+                CompositeKind::List => ValueDataType::List,
+            },
         }
     }
 
@@ -511,7 +535,7 @@ impl Value {
                 dialog_number::encode_f64(*float, &mut key);
             }
             other => {
-                key.push(other.data_type() as u8);
+                key.push(other.data_type().band(NUMBER_BAND) as u8);
                 key.extend_from_slice(&other.to_bytes());
             }
         }
@@ -531,6 +555,7 @@ impl Value {
             Value::Record(value) => value.to_owned(),
             // TODO: Change this to bytes of string representation
             Value::Symbol(value) => value.key_bytes().to_vec(),
+            Value::Composite(composite) => composite.to_bytes().into_owned(),
         }
     }
 
@@ -546,6 +571,9 @@ impl Value {
             Value::Float(number) => format!("float:{}", number),
             Value::Record(record) => format!("record:{}", record.to_base58()),
             Value::Symbol(attribute) => format!("attribute:{}", attribute),
+            Value::Composite(composite) => {
+                format!("composite:{}", composite.to_bytes().to_base58())
+            }
         }
     }
 
@@ -579,6 +607,7 @@ impl Hash for Value {
             Value::SignedInt(i) => i.hash(state),
             Value::Record(r) => r.hash(state),
             Value::Symbol(s) => s.hash(state),
+            Value::Composite(c) => c.hash(state),
         }
     }
 }
@@ -595,6 +624,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a.to_le_bytes() == b.to_le_bytes(),
             (Value::Record(a), Value::Record(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Composite(a), Value::Composite(b)) => a == b,
             _ => false,
         }
     }
@@ -660,6 +690,9 @@ impl FromStr for Value {
             }
             "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
             "attribute" => Value::Symbol(Relation::from_str(value)?),
+            "composite" => Value::Composite(Composite::from_bytes(
+                &value.from_base58().map_err(to_dialog_error_debug)?,
+            )?),
             _ => {
                 return Err(DialogCorpusError::InvalidValue(
                     "Value part of serialized string is empty".into(),
@@ -747,6 +780,21 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // spilled-value read-back path: a record above the inline
             // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
+            // A composite's bytes are its canonical encoding, checked as they
+            // are read: the spilled-value read-back path among others.
+            ValueDataType::Composite
+            | ValueDataType::Map
+            | ValueDataType::CompositeRecord
+            | ValueDataType::List => {
+                let value = Value::Composite(Composite::from_bytes(&value)?);
+                if !value_data_type.holds(&value) {
+                    return Err(DialogCorpusError::InvalidValue(format!(
+                        "{value:?} is not a {}",
+                        value_data_type.uri()
+                    )));
+                }
+                value
+            }
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Relation::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),
@@ -1025,6 +1073,26 @@ impl TryFrom<Value> for f32 {
                 value.data_type(),
             )),
         }
+    }
+}
+
+impl TryFrom<Value> for Composite {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Composite(composite) => Ok(composite),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Composite,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl From<Composite> for Value {
+    fn from(value: Composite) -> Self {
+        Value::Composite(value)
     }
 }
 
@@ -1327,7 +1395,8 @@ pub use dialog_search_tree::NUMBER_BAND;
 /// as a [`Value`].
 ///
 /// A type is named by an entity: `text:`, `integer:`, `natural:`,
-/// `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:` and `record:`.
+/// `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:`, `record:` and
+/// `composite:`.
 /// That is how it is written wherever it is serialized and what an
 /// attribute's identity hashes. The names the release before type
 /// entities wrote (`Text`, `SignedInteger`, ...) are still read, so
@@ -1391,11 +1460,42 @@ pub enum ValueDataType {
     F32 = 20,
     /// A number read as the nearest double-precision float: `float:64`.
     F64 = 21,
+    /// Any composite, a map or a list: `composite:` (see [`Composite`]).
+    /// The band every composite is keyed under, as every number is keyed
+    /// under [`Number`](Self::Number).
+    Composite = 22,
+    /// A map, a record or any other: `composite:map`. Types a slot, never
+    /// a key.
+    Map = 23,
+    /// A record, the sub-band of the map whose every key is an attribute:
+    /// `composite:record`. Types a slot, never a key.
+    CompositeRecord = 24,
+    /// A list: `composite:list`. Types a slot, never a key.
+    List = 25,
 }
 
+/// No variant takes [`ValueDataType::ATOM_REFERENCE`]'s byte.
+const _: () = {
+    let mut at = 0;
+    while at < ValueDataType::ALL.len() {
+        assert!(ValueDataType::ALL[at] as u8 != ValueDataType::ATOM_REFERENCE);
+        at += 1;
+    }
+};
+
 impl ValueDataType {
+    /// The byte a slot in a [`Composite`]'s body starts with when it refers
+    /// to a scalar in the composite's table of atoms, by its place there.
+    ///
+    /// It is reserved beside the type bytes so that no type ever takes it: a
+    /// body slot is either this or [`Composite`](Self::Composite), and a
+    /// reader tells them apart by the byte alone. It is not a type: no value
+    /// is of it, no fact holds it, and a key whose value starts with it does
+    /// not parse.
+    pub const ATOM_REFERENCE: u8 = 26;
+
     /// Every type, in discriminant order.
-    pub const ALL: [ValueDataType; 22] = [
+    pub const ALL: [ValueDataType; 26] = [
         ValueDataType::Bytes,
         ValueDataType::Entity,
         ValueDataType::Boolean,
@@ -1418,6 +1518,10 @@ impl ValueDataType {
         ValueDataType::I128,
         ValueDataType::F32,
         ValueDataType::F64,
+        ValueDataType::Composite,
+        ValueDataType::Map,
+        ValueDataType::CompositeRecord,
+        ValueDataType::List,
     ];
 
     /// The entity that names this type, such as `text:`.
@@ -1445,6 +1549,10 @@ impl ValueDataType {
             ValueDataType::I128 => "integer:128",
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
+            ValueDataType::Composite => "composite:",
+            ValueDataType::Map => "composite:map",
+            ValueDataType::CompositeRecord => "composite:record",
+            ValueDataType::List => "composite:list",
         }
     }
 
@@ -1474,6 +1582,10 @@ impl ValueDataType {
             ValueDataType::I128 => "integer:128",
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
+            ValueDataType::Composite => "composite:",
+            ValueDataType::Map => "composite:map",
+            ValueDataType::CompositeRecord => "composite:record",
+            ValueDataType::List => "composite:list",
         }
     }
 
@@ -1525,6 +1637,8 @@ impl ValueDataType {
             | ValueDataType::I64
             | ValueDataType::I128 => ValueDataType::SignedInt,
             ValueDataType::F32 | ValueDataType::F64 => ValueDataType::Float,
+            // A record is held as the map it is.
+            ValueDataType::CompositeRecord => ValueDataType::Map,
             other => other,
         }
     }
@@ -1562,7 +1676,33 @@ impl ValueDataType {
 
     /// Whether this is a sized number type (`natural:8` through `float:64`).
     pub fn is_view(self) -> bool {
-        self.storage() != self
+        matches!(
+            self,
+            ValueDataType::U8
+                | ValueDataType::U16
+                | ValueDataType::U32
+                | ValueDataType::U64
+                | ValueDataType::U128
+                | ValueDataType::I8
+                | ValueDataType::I16
+                | ValueDataType::I32
+                | ValueDataType::I64
+                | ValueDataType::I128
+                | ValueDataType::F32
+                | ValueDataType::F64
+        )
+    }
+
+    /// Whether this is one of the composite types: `composite:` and the
+    /// map, the record and the list in its band.
+    pub fn is_composite(self) -> bool {
+        matches!(
+            self,
+            ValueDataType::Composite
+                | ValueDataType::Map
+                | ValueDataType::CompositeRecord
+                | ValueDataType::List
+        )
     }
 
     /// Whether a value of this type holds `value` exactly: one of its own
@@ -1576,18 +1716,38 @@ impl ValueDataType {
         if matches!(value, Value::Float(float) if float.is_nan()) {
             return false;
         }
-        let actual = value.data_type();
         if self == ValueDataType::Number {
-            return actual.is_number();
+            return value.data_type().is_number();
         }
         if self.is_number() {
-            return actual.is_number()
+            return value.data_type().is_number()
                 && value
                     .clone()
                     .viewed_as(self)
                     .is_some_and(|viewed| viewed.same_number(value));
         }
-        actual == self
+        // The composite types last and out of line, so the scalar types'
+        // check is the one main makes.
+        if self.is_composite() {
+            return self.holds_composite(value);
+        }
+        value.data_type() == self
+    }
+
+    /// [`holds`](Self::holds) for the composite types: any composite for
+    /// `composite:`, and the kind each other one names.
+    #[cold]
+    #[inline(never)]
+    fn holds_composite(self, value: &Value) -> bool {
+        let Value::Composite(composite) = value else {
+            return false;
+        };
+        match self {
+            ValueDataType::Map => composite.is_map(),
+            ValueDataType::CompositeRecord => composite.is_record(),
+            ValueDataType::List => composite.is_list(),
+            _ => true,
+        }
     }
 
     /// Whether this is one of the number types.
@@ -1612,6 +1772,9 @@ impl ValueDataType {
             {
                 ValueDataType::Number
             }
+            // Every composite is keyed in the composite's band (a record's
+            // storage is the map's).
+            ValueDataType::Map | ValueDataType::List => ValueDataType::Composite,
             other => other,
         }
     }
@@ -1621,10 +1784,10 @@ impl ValueDataType {
         ValueDataType::Bytes
     }
 
-    /// The largest [`ValueDataType`] an index key carries. `number:` and the
-    /// sized number types type slots, never keys.
+    /// The largest [`ValueDataType`] an index key carries. The sized
+    /// number types type slots, never keys.
     pub fn max() -> Self {
-        ValueDataType::Number
+        ValueDataType::Composite
     }
 
     /// Check if the given value is of this type.
@@ -1659,6 +1822,10 @@ impl Display for ValueDataType {
             ValueDataType::Record => write!(f, "Record"),
             ValueDataType::Symbol => write!(f, "Symbol"),
             ValueDataType::Number => write!(f, "Number"),
+            ValueDataType::Composite => write!(f, "Composite"),
+            ValueDataType::Map => write!(f, "Map"),
+            ValueDataType::CompositeRecord => write!(f, "CompositeRecord"),
+            ValueDataType::List => write!(f, "List"),
             view => write!(f, "{}", view.uri()),
         }
     }
@@ -1683,6 +1850,10 @@ impl From<&u8> for ValueDataType {
             7 => ValueDataType::Record,
             8 => ValueDataType::Symbol,
             9 => ValueDataType::Number,
+            22 => ValueDataType::Composite,
+            23 => ValueDataType::Map,
+            24 => ValueDataType::CompositeRecord,
+            25 => ValueDataType::List,
             // A lossy fallback for infallible callers; the key-parse path
             // rejects unknown discriminants before reaching this (see
             // `varkey::value_payload_len`), so no persisted-byte path relies
@@ -2154,6 +2325,47 @@ mod view_tests {
         }
         for (a, b) in [(U8, I8), (I8, U16), (U32, F32), (U64, F64), (F64, U64)] {
             assert!(!a.nests_in(b), "{a} not in {b}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    #![allow(unexpected_cfgs)]
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::borrow::Cow;
+    use std::mem::{align_of, size_of};
+
+    use super::*;
+    use crate::ValueView;
+
+    /// A tag beside the largest scalar payload, the size `Value` and
+    /// `ValueView` had before composites: 32 bytes on a 64-bit target.
+    fn scalar_size(payload: usize) -> usize {
+        (payload.max(size_of::<u128>()) + 1).next_multiple_of(align_of::<u128>())
+    }
+
+    /// A composite costs no value that is not one: `Value`, `ValueView`
+    /// and an absent `Value` stay the size their scalars give them (32
+    /// bytes on a 64-bit target), and a `Composite` is no larger than the
+    /// `Vec` a `Value::Bytes` holds. Every row a scan, a commit or a query
+    /// moves holds these, so a larger composite would cost every one.
+    #[dialog_common::test]
+    fn it_keeps_values_the_size_their_scalars_give_them() {
+        assert!(size_of::<Composite>() <= size_of::<Vec<u8>>());
+        assert_eq!(size_of::<Value>(), scalar_size(size_of::<Vec<u8>>()));
+        assert_eq!(size_of::<Option<Value>>(), size_of::<Value>());
+        assert_eq!(
+            size_of::<ValueView<'static>>(),
+            scalar_size(size_of::<Cow<'static, [u8]>>())
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(size_of::<Value>(), 32);
+            assert_eq!(size_of::<ValueView<'static>>(), 32);
         }
     }
 }

@@ -96,7 +96,7 @@ fn assert_fact(entity: usize, value: &str) -> Instruction {
             is: Value::String(value.to_string()),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )
 }
 

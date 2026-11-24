@@ -25,9 +25,21 @@ pub type Rename = BTreeMap<String, String>;
 pub fn variables(premises: &[Premise]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for premise in premises {
-        for (_, term) in premise.parameters().iter() {
-            if let Some(name) = term.name() {
-                names.insert(name.to_string());
+        // The variables inside a map or a list of terms are
+        // the premise's own; the variable standing for the whole is not
+        // one anybody wrote.
+        let parameters = premise.parameters();
+        if parameters.has_shapes() {
+            for term in parameters.leaves() {
+                if let Some(name) = term.name() {
+                    names.insert(name.to_string());
+                }
+            }
+        } else {
+            for (_, term) in parameters.iter() {
+                if let Some(name) = term.name() {
+                    names.insert(name.to_string());
+                }
             }
         }
     }
@@ -76,31 +88,37 @@ fn rename_proposition(proposition: &Proposition, map: &Rename) -> Result<Proposi
             terms: rename_parameters(&query.terms, map),
             predicate: query.predicate.clone(),
         }),
-        Proposition::Attribute(query) => Proposition::Attribute(Box::new(AttributeQuery::new(
-            rename_term(query.the(), map),
-            rename_term(query.of(), map),
-            rename_term(query.is(), map),
-            rename_term(query.cause(), map),
-            Some(query.cardinality()),
-        ))),
+        Proposition::Attribute(query) => Proposition::Attribute(Box::new(
+            AttributeQuery::new(
+                rename_term(query.the(), map),
+                rename_term(query.of(), map),
+                rename_term(query.is(), map),
+                rename_term(query.cause(), map),
+                Some(query.cardinality()),
+            )
+            .with_layer(rename_term(query.layer(), map)),
+        )),
         Proposition::OptionalAttribute(query) => {
             let inner = query.query();
-            Proposition::OptionalAttribute(Box::new(OptionalAttributeQuery::new(
-                rename_term(inner.the(), map),
-                rename_term(inner.of(), map),
-                rename_term(inner.is(), map),
-                rename_term(inner.cause(), map),
-                Some(inner.cardinality()),
-            )))
+            Proposition::OptionalAttribute(Box::new(
+                OptionalAttributeQuery::new(
+                    rename_term(inner.the(), map),
+                    rename_term(inner.of(), map),
+                    rename_term(inner.is(), map),
+                    rename_term(inner.cause(), map),
+                    Some(inner.cardinality()),
+                )
+                .with_layer(rename_term(inner.layer(), map)),
+            ))
         }
         // Formulas, resolvers and constraints rebuild from their own
         // parameter maps, so a constant never leaves its typed form.
         Proposition::Formula(formula) => Proposition::Formula(
             formula.with_parameters(rename_parameters(&formula.parameters(), map))?,
         ),
-        Proposition::Resolver(resolver) => Proposition::Resolver(
+        Proposition::Resolver(resolver) => Proposition::Resolver(Box::new(
             resolver.with_parameters(&rename_parameters(&resolver.parameters(), map)),
-        ),
+        )),
         Proposition::Constraint(constraint) => Proposition::Constraint(
             constraint.with_parameters(&rename_parameters(&constraint.parameters(), map)),
         ),
@@ -108,11 +126,7 @@ fn rename_proposition(proposition: &Proposition, map: &Rename) -> Result<Proposi
 }
 
 fn rename_parameters(parameters: &Parameters, map: &Rename) -> Parameters {
-    let mut renamed = Parameters::new();
-    for (key, term) in parameters.iter() {
-        renamed.insert(key.clone(), rename_term(term, map));
-    }
-    renamed
+    parameters.map_terms(|term| rename_term(term, map))
 }
 
 pub(crate) fn rename_term<T>(term: &Term<T>, map: &Rename) -> Term<T>

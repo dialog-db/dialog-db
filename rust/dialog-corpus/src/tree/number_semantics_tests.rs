@@ -16,7 +16,7 @@ use super::rekey::rekey_tree;
 use super::{Corpus, CorpusExt as _, SpillCache};
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    ArchiveDelta, Cardinality, Entity, Fact, Instruction, NUMBER_BAND, Relation, Selector, Value,
     encode_key_value_owned,
 };
 
@@ -70,7 +70,7 @@ fn sizes(values: &[Value]) -> anyhow::Result<Vec<Instruction>> {
                     is: value.clone(),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             ))
         })
         .collect()
@@ -692,7 +692,7 @@ fn every_type_items() -> anyhow::Result<Vec<Instruction>> {
                 is: value.clone(),
                 cause: None,
             },
-            Pick::All,
+            Cardinality::Many,
         ));
         instructions.push(Instruction::Assert(
             Fact {
@@ -701,7 +701,7 @@ fn every_type_items() -> anyhow::Result<Vec<Instruction>> {
                 is: Value::String(format!("{value:?}")),
                 cause: None,
             },
-            Pick::All,
+            Cardinality::Many,
         ));
     }
     Ok(instructions)

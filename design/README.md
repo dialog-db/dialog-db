@@ -55,6 +55,15 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
+- [A composite value that holds a syntax tree and is read in place](composite-value.md):
+  **Building.** A map, a record (the map whose keys are attributes) or a
+  list, one canonical encoding with keys once, a size on every nested
+  body and offsets on a long sequence, read as a view of its buffer, and
+  named by its merkle reference.
+- [A parameter holds one variable or one constant](patterns.md):
+  **Building.** Patterns build and take apart the canonical composite
+  values from #843 (#778); a rule that holds one runs in a query layer
+  and is refused at commit. The [plan](patterns/plan.md) is the work.
 - [A read follows the head it should have pinned](query-isolation.md):
   **Building.** Every unit of isolation (a query, a select, a poll, a
   transaction) reads one revision, and the types make a live read
@@ -69,3 +78,24 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   reference, so reads and writes of keys the replica held wait on the
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
+- [A typed variable over a field of no declared type fails the query](typed-read-of-untyped-field.md):
+  **Building.** A value of another type than the variable's failed a
+  plain concept read and was passed over by every other read. Every read
+  now takes it for a fact of another attribute: passed over, not elected
+  among, and absent to a variable that may be.
+- [Importing a large dataset into dialog](large-transactions.md):
+  **Delimiting.** As one commit an import holds every new node in memory
+  until it seals; as many commits it writes the same nodes again and
+  again. The objective is confirmed; its bounds (how large, on what
+  machine, within what memory and time) are not yet stated.
+- [A consumer that can only query cannot draw a branch's search tree](tree-exploration.md):
+  **Building.** The one embedder that shows the tree reads blocks
+  through machinery of its own. A node is a handle that five accessors
+  read, the environment decoding once; what a replica holds is learned
+  and changed by commands. Built on top of the session stack.
+- [Writers on separate branches wait on one another in the file archive](file-writers.md):
+  **Building.** One file, an extent per writer: processes on separate
+  branches write without waiting on one another, as they do on main.
+- [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
+  **Describing.** Split out of file-writers: capturing what a transaction
+  considered, so a replay is skipped when nothing it read overlaps.

@@ -37,6 +37,8 @@ mod claims;
 pub use claims::*;
 
 mod commit;
+#[cfg(test)]
+pub(crate) use commit::legacy;
 pub use commit::*;
 
 pub(crate) mod context;
@@ -94,7 +96,7 @@ pub use upgrade::*;
 mod select;
 pub use select::*;
 
-mod session;
+pub(crate) mod session;
 use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
@@ -104,7 +106,7 @@ pub use subscription::*;
 mod set_upstream;
 pub use set_upstream::*;
 
-mod transaction;
+pub(crate) mod transaction;
 pub use transaction::*;
 
 pub(crate) mod upstream;
@@ -123,6 +125,8 @@ mod integration_tests;
 
 #[cfg(test)]
 mod isolation_tests;
+#[cfg(test)]
+mod pattern_rule_tests;
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")

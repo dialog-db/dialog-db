@@ -67,7 +67,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
                     None
                 },
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ));
     }
     index

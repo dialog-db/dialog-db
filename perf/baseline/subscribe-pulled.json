@@ -8,7 +8,7 @@
   },
   "counters": {
     "archive.get": 1,
-    "archive.get.bytes": 3832,
+    "archive.get.bytes": 3824,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,
@@ -20,5 +20,13 @@
     "span.settle": 0,
     "span.write_instructions": 0
   },
-  "instructions": 37537493
+  "instructions": 38081221,
+  "instructions_outside_allocator": 29027960,
+  "allocations": {
+    "alloc.bytes": 16532016,
+    "alloc.calls": 51220,
+    "free.calls": 50937,
+    "realloc.calls": 3359,
+    "realloc.from.bytes": 690541
+  }
 }

@@ -127,14 +127,14 @@ pub mod branch {
         pub Entity,
     );
 
-    /// `dialog.branch/tree` — the current revision's tree hash,
-    /// base58-encoded.
+    /// `dialog.branch/tree` — the root node of the current revision's
+    /// tree, as its `node:<base58(hash)>` entity: what the `tree/*`
+    /// resolvers take as `of`.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
     pub struct Tree(
-        /// Base58-encoded Blake3 hash of the current revision's tree
-        /// root.
-        pub String,
+        /// The root node's entity, `node:<base58(hash)>`.
+        pub Entity,
     );
 
     /// `dialog.branch/edition` — causal depth of the current revision.
@@ -154,7 +154,7 @@ pub mod branch {
     /// one, so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Pull(
         /// The pulled-from branch's entity.
         pub Entity,
@@ -164,7 +164,7 @@ pub mod branch {
     /// as for [`Pull`]. A push goes to every one, so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Push(
         /// The pushed-to branch's entity.
         pub Entity,
@@ -407,7 +407,7 @@ pub mod peer {
     /// cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.peer")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Address(
         /// The encoded site address.
         pub Vec<u8>,
@@ -466,7 +466,7 @@ pub mod revision {
     /// parent (two for a merge), so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.revision")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Parent(
         /// A parent revision's entity.
         pub Entity,
@@ -477,7 +477,7 @@ pub mod revision {
     /// so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.revision")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Ancestor(
         /// An ancestor revision's entity.
         pub Entity,
@@ -631,7 +631,7 @@ pub mod session {
     /// branch).
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.session")]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Branch(
         /// The branch entity (the `Branch.this` for that branch under
         /// the session's current replica).
@@ -982,7 +982,7 @@ pub struct ActiveBranch {
 pub struct BranchRevision {
     /// The branch entity (same as [`Branch::this`]).
     pub this: Entity,
-    /// Tree hash of the current revision, base58-encoded.
+    /// Root node of the current revision's tree, as its entity.
     pub tree: branch::Tree,
     /// Causal depth of the revision (Lamport timestamp).
     pub edition: branch::Edition,
@@ -1232,7 +1232,7 @@ mod tests {
         let b = Branch::new(&o, "main");
         let rev = BranchRevision {
             this: b.this.clone(),
-            tree: branch::Tree("zSomeHash".into()),
+            tree: branch::Tree(Entity::from_node(&[7u8; 32]).expect("valid entity")),
             edition: branch::Edition(42),
             revision: branch::Revision("test:revision".parse().expect("valid entity")),
         };

@@ -507,7 +507,7 @@ where
             branch
                 .commit(stream::iter(vec![Instruction::Assert(
                     asset.fact()?,
-                    dialog_corpus::Pick::Last,
+                    dialog_corpus::Cardinality::One,
                 )]))
                 .machinery()
                 .perform(env),

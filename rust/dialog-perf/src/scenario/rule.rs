@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Entity, Fact, Pick, Value};
+use dialog_corpus::{Cardinality, Entity, Fact, Value};
 use dialog_query::{ConceptDescriptor, DeductiveRule};
 
 use dialog_query::query::Output as _;
@@ -63,7 +63,7 @@ impl Prepared for Scan {
 pub async fn scan(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     env.install(&[member_rule()]).await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Scan { env }))
 }
@@ -91,7 +91,7 @@ impl Prepared for Point {
 pub async fn point(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     env.install(&[member_rule()]).await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Point { env, size }))
 }
@@ -101,7 +101,7 @@ const DEPTH: usize = 25;
 
 fn ancestor() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all:" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "cardinality": "many" }
     }}))
 }
 
@@ -110,7 +110,7 @@ fn ancestor_rules() -> [DeductiveRule; 2] {
         "parent": { "the": "family/parent", "as": "entity:" }
     }});
     let head = serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all:" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "cardinality": "many" }
     }});
     let base = rule(serde_json::json!({
         "deduce": head,
@@ -164,7 +164,7 @@ pub async fn recursive(size: usize) -> Result<Box<dyn Prepared>> {
             fact(&child, "family/parent", Value::Entity(parent))
         })
     });
-    env.commit(assert_all(facts, Pick::All)).await?;
+    env.commit(assert_all(facts, Cardinality::Many)).await?;
     env.reopen().await?;
     Ok(Box::new(Recursive { env }))
 }
@@ -180,7 +180,7 @@ pub const CASES: [&str; 4] = [
 /// `status`, read under `top` over `CASES`.
 pub fn status() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "status": { "the": "account/status", "as": CASES }
+        "status": { "the": "account/status", "as": CASES, "pick": "top" }
     }}))
 }
 
@@ -232,7 +232,7 @@ pub async fn accounts(size: usize) -> Result<Env> {
     let mut env = Env::open().await?;
     env.install(&status_rules()).await?;
     let facts = (0..size).flat_map(account_facts);
-    env.commit(assert_all(facts, Pick::Last)).await?;
+    env.commit(assert_all(facts, Cardinality::One)).await?;
     env.reopen().await?;
     Ok(env)
 }
@@ -314,7 +314,7 @@ impl Prepared for Install {
 /// `size` rules and the first read of the last one.
 pub async fn install(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, 100, Pick::Last).await?;
+    seed_stuff(&env, 100, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Install { env, size }))
 }
@@ -357,7 +357,7 @@ impl Prepared for Overlay {
 /// query.
 pub async fn overlay(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Overlay { env, size }))
 }
@@ -399,7 +399,7 @@ impl Prepared for Session {
 pub async fn session(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     env.install(&[member_rule()]).await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Session { env, size }))
 }

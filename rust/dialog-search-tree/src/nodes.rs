@@ -85,8 +85,9 @@ pub trait Node: sealed::Sealed + Clone + ConditionalSend + ConditionalSync + 'st
     /// The hash of the node's block: the name it is read by.
     fn hash(&self) -> &Blake3Hash;
 
-    /// The node's block.
-    fn buffer(&self) -> &Buffer;
+    /// The node's block. A node read from rows builds it on first asking,
+    /// and one whose rows do not rebuild it is an error.
+    fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError>;
 
     /// The node as the persistent node a cache keeps.
     fn into_persistent(self) -> PersistentNode<Self::Key, Self::Value>;
@@ -121,7 +122,7 @@ where
         PersistentNode::hash(self)
     }
 
-    fn buffer(&self) -> &Buffer {
+    fn buffer(&self) -> Result<&Buffer, DialogSearchTreeError> {
         PersistentNode::buffer(self)
     }
 
@@ -135,8 +136,10 @@ where
 }
 
 /// The block catalog a subject's nodes are kept in, when they are kept as
-/// blocks: the translation layer's, never a tree's.
-fn blocks_of(subject: &Subject) -> dialog_effects::archive::prelude::CatalogScope {
+/// blocks: the translation layer's, never a tree's. [`Read::load`] and
+/// [`Write::through_blocks`] name it here, and so does a store that
+/// answers the node requests over blocks of its own.
+pub fn blocks_of(subject: &Subject) -> dialog_effects::archive::prelude::CatalogScope {
     ArchiveScope::new(subject.clone()).index()
 }
 
@@ -515,8 +518,14 @@ impl<N: Node> Write<N> {
             return Resume::now(Ok(()));
         }
         Resume::later(async move {
+            // A node read from rows builds its block on first asking; one
+            // that cannot be built fails the write before anything is kept.
+            let blocks = nodes
+                .iter()
+                .map(|node| node.buffer().cloned())
+                .collect::<Result<Vec<_>, _>>()?;
             blocks_of(&subject)
-                .import(nodes.iter().map(|node| node.buffer().clone()))
+                .import(blocks)
                 .perform(env)
                 .await
                 .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;

@@ -46,11 +46,12 @@ use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::negation::Negation;
-use crate::parameters::Parameters;
+use crate::pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
 use crate::rule::deductive::rename::{Rename, rename_premises, rename_term, variables};
+use crate::rule::reference;
 use crate::term::Term;
 use crate::types::Any;
 
@@ -174,10 +175,17 @@ pub(crate) fn canonicalize(
         let Some(shape) = encode_premise(shape) else {
             return Ok(None);
         };
-        atoms.push(Atom {
-            shape,
-            slots: slots(premise.parameters().iter(), &locals),
-        });
+        // A variable inside a map or a list of terms occurs
+        // in the premise as any other does, at its place in the
+        // pattern.
+        let parameters = premise.parameters();
+        let slots = if parameters.has_shapes() {
+            let addressed = parameters.addressed();
+            slots(addressed.iter().map(|(key, term)| (key, *term)), &locals)
+        } else {
+            slots(parameters.iter(), &locals)
+        };
+        atoms.push(Atom { shape, slots });
     }
     for (field, spec) in reduce {
         let shape = encode(&(
@@ -185,6 +193,7 @@ pub(crate) fn canonicalize(
             ReduceSpec {
                 apply: spec.apply,
                 of: rename_term(&spec.of, &holes),
+                listed: spec.listed.clone(),
             },
         ))?;
         let terms = [
@@ -247,6 +256,7 @@ pub(crate) fn canonicalize(
                 ReduceSpec {
                     apply: spec.apply,
                     of: rename_term(&spec.of, &working),
+                    listed: spec.listed.clone(),
                 },
             )
         })
@@ -427,15 +437,15 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         .collect();
     let conclusion = ConceptDescriptor::try_from(fields)?;
     let renamed = rename_premises(rule.premises, names)?;
-    let mut keyed: Vec<(Vec<u8>, Premise)> = renamed
-        .into_iter()
-        .map(|premise| {
-            let key = encode_premise(&premise).ok_or_else(|| TypeError::TypeInference {
-                reason: "a premise that encoded stopped encoding under other names".to_string(),
-            })?;
-            Ok((key, premise))
-        })
-        .collect::<Result<_, TypeError>>()?;
+    // Sized up front: collected through a `Result` the vector would grow
+    // one push at a time, and every rule identity is spelled here.
+    let mut keyed: Vec<(Vec<u8>, Premise)> = Vec::with_capacity(renamed.len());
+    for premise in renamed {
+        let key = encode_premise(&premise).ok_or_else(|| TypeError::TypeInference {
+            reason: "a premise that encoded stopped encoding under other names".to_string(),
+        })?;
+        keyed.push((key, premise));
+    }
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
     let mut reduce: Vec<(String, ReduceSpec)> = rule
         .reduce
@@ -446,17 +456,26 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
                 ReduceSpec {
                     apply: spec.apply,
                     of: rename_term(&spec.of, names),
+                    listed: spec.listed.clone(),
                 },
             )
         })
         .collect();
     reduce.sort_by(|a, b| a.0.cmp(&b.0));
     let mut encoded = encode(&conclusion)?;
+    let reduced = encode(&reduce)?;
+    encoded.reserve(
+        keyed
+            .iter()
+            .map(|(key, _)| size_of::<u64>() + key.len())
+            .sum::<usize>()
+            + reduced.len(),
+    );
     for (key, _) in &keyed {
         encoded.extend_from_slice(&(key.len() as u64).to_be_bytes());
         encoded.extend_from_slice(key);
     }
-    encoded.extend(encode(&reduce)?);
+    encoded.extend(reduced);
     Ok((
         encoded,
         Identity {
@@ -489,11 +508,9 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
             moved.insert(The::key_operand(name), The::key_operand(&key));
             renamed.push((key, (*field).clone()));
         }
-        let mut terms = Parameters::new();
-        for (key, term) in query.terms.iter() {
-            let key = moved.get(key).cloned().unwrap_or_else(|| key.clone());
-            terms.insert(key, term.clone());
-        }
+        let terms = query
+            .terms
+            .rekeyed(|key| moved.get(key).cloned().unwrap_or_else(|| key.to_string()));
         Ok(ConceptQuery {
             predicate: ConceptDescriptor::try_from(renamed)?,
             terms,
@@ -529,11 +546,23 @@ fn without_descriptions(premise: &Premise) -> Premise {
 
 /// A premise's encoding: its polarity, then its proposition. `None`
 /// for a premise the formal notation cannot express.
+///
+/// A premise that holds a map or a list of terms has no wire
+/// form to encode. It has a reference (see
+/// [`reference`](crate::rule::reference)), which is a function of the
+/// premise and of nothing else, and that orders it and tells it apart
+/// here. Its polarity is tagged apart from an encoded premise's, so the
+/// two never read as one another.
 fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
     let (tag, proposition) = match premise {
         Premise::Assert(proposition) => (0u8, proposition),
         Premise::Unless(negation) => (1u8, &negation.0),
     };
+    if pattern::holds_shape(proposition) {
+        let mut bytes = vec![tag + 2];
+        bytes.extend(reference::proposition(proposition)?.as_bytes());
+        return Some(bytes);
+    }
     let mut bytes = vec![tag];
     bytes.extend(serde_ipld_dagcbor::to_vec(proposition).ok()?);
     Some(bytes)

@@ -117,8 +117,8 @@ mod tests {
     use super::rekey_tree;
     use crate::tree::{Corpus, CorpusExt as _, SpillCache};
     use crate::{
-        ArchiveDelta, BlobIndexExt as _, BlobRecord, Entity, Fact, Instruction, NUMBER_BAND, Pick,
-        Relation, Selector, Value,
+        ArchiveDelta, BlobIndexExt as _, BlobRecord, Cardinality, Entity, Fact, Instruction,
+        NUMBER_BAND, Relation, Selector, Value,
     };
 
     fn size() -> Relation {
@@ -138,7 +138,7 @@ mod tests {
                     is: value.clone(),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             ));
             instructions.push(Instruction::Assert(
                 Fact {
@@ -147,7 +147,7 @@ mod tests {
                     is: Value::String(format!("{value:?}")),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             ));
         }
         Ok(instructions)

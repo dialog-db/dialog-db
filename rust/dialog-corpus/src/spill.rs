@@ -274,7 +274,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    crate::Pick::All,
+                    crate::Cardinality::Many,
                 )]),
             )
             .await?;
@@ -313,7 +313,10 @@ mod tests {
         base.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                fact.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await?;
         delta.flush_into(&store);
@@ -375,7 +378,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+                stream::iter(vec![Instruction::Assert(
+                    fact.clone(),
+                    crate::Cardinality::Many,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -429,7 +435,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+                stream::iter(vec![Instruction::Assert(
+                    fact.clone(),
+                    crate::Cardinality::Many,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -470,7 +479,7 @@ mod tests {
                         is: Value::String("Alice".to_string()),
                         cause: None,
                     },
-                    crate::Pick::All,
+                    crate::Cardinality::Many,
                 )]),
             )
             .await?;

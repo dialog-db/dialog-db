@@ -93,15 +93,19 @@ use std::pin::pin;
 
 use futures_util::TryStreamExt;
 
+use crate::Standing;
 use crate::corpus::Type as ValueType;
 use crate::corpus::Value;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
+use crate::selective::Selective;
 use crate::term::Term;
 use crate::try_stream;
 use crate::type_system::{Primitive, Type};
 use crate::types::Any;
+use dialog_corpus::Contender;
+use std::sync::Arc;
 
 /// The fold applied to a reduced field's inputs, one group at a time.
 ///
@@ -125,6 +129,17 @@ pub enum Aggregator {
     Max,
     /// `f64` mean of the present numeric values.
     Avg,
+    /// The newest present value: the one bound from the fact standing
+    /// greatest, as a cardinality-one read elects among a cell's
+    /// claims.
+    Last,
+    /// The present value listed first in the attribute's `as`, which
+    /// ranks values best first. Never spelled in a rule's `reduce`:
+    /// only a concept field picking `top`
+    /// folds with it, its listing carried on the entry
+    /// ([`ReduceEntry::listed`]).
+    #[serde(skip_deserializing)]
+    Top,
 }
 
 impl Display for Aggregator {
@@ -136,12 +151,25 @@ impl Display for Aggregator {
             Aggregator::Min => "min",
             Aggregator::Max => "max",
             Aggregator::Avg => "avg",
+            Aggregator::Last => "last",
+            Aggregator::Top => "top",
         };
         write!(f, "{name}")
     }
 }
 
 impl Aggregator {
+    /// Whether this fold chooses its value by the standing of the facts
+    /// its inputs were bound from: `last` always, and `top` among the
+    /// values its listing leaves out, which any later input may be. A
+    /// group of such a fold gives the right value only when folded over
+    /// rows that carry their standing, as a fresh evaluation's do; a row
+    /// kept from a subscription's conclusion carries none, so such a
+    /// fold is not folded again from kept rows.
+    pub fn orders_by_standing(self) -> bool {
+        matches!(self, Aggregator::Last | Aggregator::Top)
+    }
+
     /// The type this fold's inputs must inhabit when present.
     ///
     /// `sum`/`avg` consume the numeric band; `min`/`max` the
@@ -152,7 +180,9 @@ impl Aggregator {
     /// this requirement is non-empty.
     pub fn input_requirement(self) -> Type {
         let primitive = match self {
-            Aggregator::Count | Aggregator::CountDistinct => Primitive::ALL,
+            Aggregator::Count | Aggregator::CountDistinct | Aggregator::Last | Aggregator::Top => {
+                Primitive::ALL
+            }
             Aggregator::Sum | Aggregator::Avg => Primitive::NUMERIC,
             Aggregator::Min | Aggregator::Max => Primitive::COMPARABLE,
         };
@@ -196,15 +226,19 @@ impl Aggregator {
                     .union(Primitive::singleton(ValueType::SignedInt));
                 let consumed = consumed.primitive_part();
                 let mut band = Primitive::EMPTY;
-                if consumed.intersect(integers).is_some() {
+                // A sum of naturals is a natural; once any input may be
+                // negative the sum may be.
+                if consumed.contains(ValueType::SignedInt) {
                     band = band.union(integers);
+                } else if consumed.contains(ValueType::UnsignedInt) {
+                    band = band.union(Primitive::singleton(ValueType::UnsignedInt));
                 }
                 if consumed.contains(ValueType::Float) {
                     band = band.union(Primitive::singleton(ValueType::Float));
                 }
                 Type::from(band)
             }
-            Aggregator::Min | Aggregator::Max => {
+            Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top => {
                 if optional {
                     consumed.optional()
                 } else {
@@ -234,6 +268,34 @@ pub struct ReduceSpec {
     pub apply: Aggregator,
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
+    /// The values the field's attribute lists, best first: what a
+    /// `top` ranks by. Set only by a concept field picking `top`.
+    #[serde(skip)]
+    pub listed: Vec<Value>,
+}
+
+impl ReduceSpec {
+    /// `apply` folded over `of`.
+    pub fn new(apply: Aggregator, of: Term<Any>) -> Self {
+        ReduceSpec {
+            apply,
+            of,
+            listed: Vec::new(),
+        }
+    }
+
+    /// The fold a concept field declaring the selective aggregator
+    /// `aggregate` reads its claims
+    /// through: `of` the claims, ranked by `listed` under `top`.
+    pub fn selective(aggregate: Selective, of: Term<Any>, listed: Vec<Value>) -> Self {
+        let apply = match aggregate {
+            Selective::Last => Aggregator::Last,
+            Selective::Max => Aggregator::Max,
+            Selective::Min => Aggregator::Min,
+            Selective::Top => Aggregator::Top,
+        };
+        ReduceSpec { apply, of, listed }
+    }
 }
 
 impl From<&ReduceEntry> for ReduceSpec {
@@ -241,6 +303,7 @@ impl From<&ReduceEntry> for ReduceSpec {
         ReduceSpec {
             apply: entry.aggregator,
             of: entry.input.clone(),
+            listed: entry.listed.clone(),
         }
     }
 }
@@ -257,6 +320,10 @@ pub struct ReduceEntry {
     /// `Absent` binding is skipped; an unbound variable is an
     /// evaluation error.
     pub input: Term<Any>,
+    /// The values a `top` ranks by, best first; empty for every other
+    /// fold.
+    #[serde(skip)]
+    pub listed: Vec<Value>,
 }
 
 impl ReduceEntry {
@@ -272,7 +339,19 @@ impl ReduceEntry {
             field: field.into(),
             aggregator,
             input,
+            listed: Vec::new(),
         }
+    }
+
+    /// Whether the fold is a selective aggregator, returning one of its
+    /// inputs (`min`, `max`, `last`), rather than a computing one, whose
+    /// value none of them is. A selected value stands as the fact it was
+    /// bound from does.
+    pub fn is_selective(&self) -> bool {
+        matches!(
+            self.aggregator,
+            Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top
+        )
     }
 
     /// Checked construction against the declared or inferred type of
@@ -303,6 +382,7 @@ impl ReduceEntry {
             field,
             aggregator,
             input,
+            listed: Vec::new(),
         })
     }
 
@@ -335,11 +415,101 @@ pub struct Reduce {
     pub entries: Vec<ReduceEntry>,
 }
 
+/// A present input of a fold: the value, and the standing of the fact
+/// it was bound from, when a fact did.
+type Input = (Value, Option<Standing>);
+
 /// Buffered per-group state: the decoded key tuple and one column of
-/// present input values per reduce entry.
+/// present inputs per reduce entry.
 struct Group {
     key: Vec<Option<Value>>,
-    columns: Vec<Vec<Value>>,
+    columns: Vec<Vec<Input>>,
+}
+
+/// The groups a fold has read so far, by key bytes, each with its
+/// columns of present input values.
+struct Table {
+    group_terms: Vec<Term<Any>>,
+    entries: Vec<ReduceEntry>,
+    groups: BTreeMap<Vec<u8>, Group>,
+}
+
+impl Table {
+    fn new(reduce: Reduce) -> Self {
+        let Reduce { groups, entries } = reduce;
+        Self {
+            group_terms: groups.iter().map(|name| Term::var(name.as_str())).collect(),
+            entries,
+            groups: BTreeMap::new(),
+        }
+    }
+
+    /// Put a row's present inputs into its group's columns.
+    fn add(&mut self, row: &Match) -> Result<(), EvaluationError> {
+        let mut key = Vec::with_capacity(self.group_terms.len());
+        for term in &self.group_terms {
+            // Unbound propagates as UnboundVariable; Absent is a
+            // legitimate key component.
+            match row.lookup(term)? {
+                Binding::Present(value) => key.push(Some(value)),
+                Binding::Absent => key.push(None),
+            }
+        }
+        let key_bytes = encode(&key)?;
+        let entries = &self.entries;
+        let group = self.groups.entry(key_bytes).or_insert_with(|| Group {
+            key,
+            columns: vec![Vec::new(); entries.len()],
+        });
+        for (column, entry) in group.columns.iter_mut().zip(entries) {
+            match row.lookup(&entry.input)? {
+                Binding::Present(value) => {
+                    let standing = entry
+                        .input
+                        .name()
+                        .and_then(|variable| row.standing_of(variable));
+                    column.push((value, standing));
+                }
+                Binding::Absent => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// One row for each group, in the order of the key bytes.
+    fn finish(self) -> Result<Vec<Match>, EvaluationError> {
+        let Self {
+            group_terms,
+            entries,
+            groups,
+        } = self;
+        let mut output = Vec::with_capacity(groups.len());
+        for group in groups.into_values() {
+            let mut row = Match::new();
+            for (term, value) in group_terms.iter().zip(group.key) {
+                match value {
+                    Some(value) => row.bind(term, value)?,
+                    None => row.bind_absent(term)?,
+                }
+            }
+            for (entry, column) in entries.iter().zip(group.columns) {
+                let out: Term<Any> = Term::var(entry.field.as_str());
+                match fold_column(entry, column)? {
+                    Some((value, standing)) => {
+                        row.bind(&out, value)?;
+                        // A chosen value stands as the fact it was
+                        // bound from; a computed one cites none.
+                        if let Some(standing) = standing {
+                            row.cite_variable_standing(&Arc::from(entry.field.as_str()), standing);
+                        }
+                    }
+                    None => row.bind_absent(&out)?,
+                }
+            }
+            output.push(row);
+        }
+        Ok(output)
+    }
 }
 
 impl Reduce {
@@ -354,58 +524,29 @@ impl Reduce {
     ///
     /// Output rows bind the grouping fields to the group key values
     /// (Present or Absent) and each reduce output field to its fold
-    /// result — Absent for the identity-less folds over an all-absent
+    /// result: Absent for the identity-less folds over an all-absent
     /// column. Rows come back ordered by group key bytes, so the
     /// result is independent of input row order.
     pub async fn fold(self, selection: impl Selection) -> Result<Vec<Match>, EvaluationError> {
-        let Self { groups, entries } = self;
-        let group_terms: Vec<Term<Any>> =
-            groups.iter().map(|name| Term::var(name.as_str())).collect();
-
-        let mut table: BTreeMap<Vec<u8>, Group> = BTreeMap::new();
+        let mut table = Table::new(self);
         let mut selection = pin!(selection);
         while let Some(row) = selection.try_next().await? {
-            let mut key = Vec::with_capacity(group_terms.len());
-            for term in &group_terms {
-                // Unbound propagates as UnboundVariable; Absent is a
-                // legitimate key component.
-                match row.lookup(term)? {
-                    Binding::Present(value) => key.push(Some(value)),
-                    Binding::Absent => key.push(None),
-                }
-            }
-            let key_bytes = encode(&key)?;
-            let group = table.entry(key_bytes).or_insert_with(|| Group {
-                key,
-                columns: vec![Vec::new(); entries.len()],
-            });
-            for (column, entry) in group.columns.iter_mut().zip(&entries) {
-                match row.lookup(&entry.input)? {
-                    Binding::Present(value) => column.push(value),
-                    Binding::Absent => {}
-                }
-            }
+            table.add(&row)?;
         }
+        table.finish()
+    }
 
-        let mut output = Vec::with_capacity(table.len());
-        for group in table.into_values() {
-            let mut row = Match::new();
-            for (term, value) in group_terms.iter().zip(group.key) {
-                match value {
-                    Some(value) => row.bind(term, value)?,
-                    None => row.bind_absent(term)?,
-                }
-            }
-            for (entry, column) in entries.iter().zip(group.columns) {
-                let out: Term<Any> = Term::var(entry.field.as_str());
-                match fold_column(entry, column)? {
-                    Some(value) => row.bind(&out, value)?,
-                    None => row.bind_absent(&out)?,
-                }
-            }
-            output.push(row);
+    /// [`fold`](Self::fold) over rows already in hand, without awaiting:
+    /// the same grouping and the same folds, so the same rows.
+    pub fn fold_rows<'r>(
+        self,
+        rows: impl IntoIterator<Item = &'r Match>,
+    ) -> Result<Vec<Match>, EvaluationError> {
+        let mut table = Table::new(self);
+        for row in rows {
+            table.add(row)?;
         }
-        Ok(output)
+        table.finish()
     }
 
     /// Evaluate as a premise-shaped stream transformer: consume the
@@ -437,9 +578,81 @@ fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
     }
 }
 
-/// Fold one group's column of present values. `None` means the
+/// Fold one group's column of present inputs. `None` means the
 /// output field binds Absent (identity-less fold, no present input).
-fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>, EvaluationError> {
+/// A selective fold returns it with its standing;
+/// one that computes a value returns it with none.
+fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
+    if entry.is_selective() {
+        return choose(entry, inputs);
+    }
+    let values: Vec<Value> = inputs.into_iter().map(|(value, _)| value).collect();
+    let folded = fold_values(entry, values)?;
+    Ok(folded.map(|value| (value, None)))
+}
+
+/// The input a selective fold returns: the least or the greatest value
+/// (`min`, `max`) or the newest (`last`). Every one falls back on the order a
+/// cardinality-one read elects a cell's claims by
+/// ([`Cardinality::newer`]): `last` is that order alone, and the others
+/// take the newest among the values they hold equal. Among equal
+/// values the one standing greatest is returned, so the choice carries
+/// the newest fact that holds it.
+fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
+    if matches!(entry.aggregator, Aggregator::Min | Aggregator::Max) {
+        for pair in inputs.windows(2) {
+            if order(&pair[0].0, &pair[1].0).is_none() {
+                return Err(fault(
+                    entry,
+                    format!("cannot order {:?} against {:?}", pair[0].0, pair[1].0),
+                ));
+            }
+        }
+    }
+    let mut best: Option<Input> = None;
+    for candidate in inputs {
+        best = Some(match best {
+            None => candidate,
+            Some(incumbent) => {
+                let ahead = prefers(
+                    entry,
+                    (&candidate.0, candidate.1.as_ref()),
+                    (&incumbent.0, incumbent.1.as_ref()),
+                );
+                let behind = prefers(
+                    entry,
+                    (&incumbent.0, incumbent.1.as_ref()),
+                    (&candidate.0, candidate.1.as_ref()),
+                );
+                // Neither is preferred: values that compare equal and
+                // stand equal (`-0.0` and `0.0`). The smaller encoding
+                // is kept, so the choice is independent of row order.
+                if ahead || (!behind && encode(&candidate.0)? < encode(&incumbent.0)?) {
+                    candidate
+                } else {
+                    incumbent
+                }
+            }
+        });
+    }
+    Ok(best)
+}
+
+/// Whether a selective fold takes `candidate` over `incumbent`: as the
+/// aggregate of the same name elects (see [`Selective::prefers`]), by value
+/// and then by standing.
+fn prefers(entry: &ReduceEntry, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
+    let aggregate = match entry.aggregator {
+        Aggregator::Max => Selective::Max,
+        Aggregator::Min => Selective::Min,
+        Aggregator::Top => Selective::Top,
+        _ => Selective::Last,
+    };
+    aggregate.prefers(&entry.listed, candidate, incumbent)
+}
+
+/// Fold one group's column of present values into a computed one.
+fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>, EvaluationError> {
     match entry.aggregator {
         Aggregator::Count => Ok(Some(Value::UnsignedInt(values.len() as u128))),
         Aggregator::CountDistinct => {
@@ -450,9 +663,10 @@ fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
         }
         Aggregator::Sum => fold_sum(entry, values).map(Some),
-        Aggregator::Min => fold_extremum(entry, values, Ordering::Less),
-        Aggregator::Max => fold_extremum(entry, values, Ordering::Greater),
         Aggregator::Avg => fold_avg(entry, values),
+        Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top => {
+            unreachable!("a selective fold is folded by `choose`")
+        }
     }
 }
 
@@ -541,40 +755,6 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
             a.compare(b)
         }
     }
-}
-
-/// `min` (`target = Less`) / `max` (`target = Greater`): keep the
-/// value that stands in `target` relation to the current best. An
-/// incomparable pair errors. Compare-equal but byte-distinct values
-/// (`-0.0` vs `0.0`) resolve to the smaller dag-cbor encoding so the
-/// pick is independent of row order.
-fn fold_extremum(
-    entry: &ReduceEntry,
-    values: Vec<Value>,
-    target: Ordering,
-) -> Result<Option<Value>, EvaluationError> {
-    let mut values = values.into_iter();
-    let Some(mut best) = values.next() else {
-        return Ok(None);
-    };
-    for candidate in values {
-        match order(&candidate, &best) {
-            Some(Ordering::Equal) => {
-                if encode(&candidate)? < encode(&best)? {
-                    best = candidate;
-                }
-            }
-            Some(ordering) if ordering == target => best = candidate,
-            Some(_) => {}
-            None => {
-                return Err(fault(
-                    entry,
-                    format!("cannot order {candidate:?} against {best:?}"),
-                ));
-            }
-        }
-    }
-    Ok(Some(best))
 }
 
 #[cfg(test)]
@@ -1160,18 +1340,26 @@ mod tests {
         }
     }
 
-    /// `sum` keeps the input's numeric band: either integer variant
-    /// admits the whole integer band (the accumulator narrows per
-    /// group), floats stay `Float`, and — identity 0 — the output is
-    /// required even over an optional input.
+    /// `sum` keeps the input's numeric band: naturals sum to a
+    /// natural, an input that may be negative admits the whole integer
+    /// band (the accumulator narrows per group), floats stay `Float`,
+    /// and — identity 0 — the output is required even over an optional
+    /// input.
     #[dialog_common::test]
     fn it_types_sum_output_by_numeric_band() {
         for input_type in [
             typed(ValueType::UnsignedInt),
-            typed(ValueType::SignedInt),
-            int_band(),
             typed(ValueType::UnsignedInt).optional(),
         ] {
+            let output = Aggregator::Sum.output_type(&input_type).unwrap();
+            assert_eq!(
+                output,
+                typed(ValueType::UnsignedInt),
+                "naturals sum to a natural"
+            );
+            assert!(!output.is_optional(), "sum has an identity");
+        }
+        for input_type in [typed(ValueType::SignedInt), int_band()] {
             let output = Aggregator::Sum.output_type(&input_type).unwrap();
             assert_eq!(output, int_band(), "integer input sums to the integer band");
             assert!(!output.is_optional(), "sum has an identity");
@@ -1256,7 +1444,7 @@ mod tests {
             .expect("min over optional String is well-typed");
         let total_type = total.output_type(&salary).unwrap();
         let first_type = first.output_type(&name).unwrap();
-        assert_eq!(total_type, int_band());
+        assert_eq!(total_type, typed(ValueType::UnsignedInt));
         assert_eq!(first_type, typed(ValueType::String).optional());
 
         let reduce = Reduce::new(vec!["dept".to_string()], vec![total, first]);

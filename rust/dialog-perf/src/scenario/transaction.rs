@@ -1,11 +1,14 @@
 //! A transaction read between its writes: what a library install does
 //! when it stages a schema and then resolves names against it.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::Pick;
+use dialog_corpus::Cardinality;
 use dialog_query::ConceptConclusion;
 use dialog_query::query::Output as _;
 
@@ -30,7 +33,7 @@ impl Prepared for Reads {
             for index in 0..self.size {
                 let this = entity("stuff", index);
                 let write = fact(&this, "stuff/name", text(format!("renamed-{index}")));
-                transaction = transaction.integrate(assert_all([write], Pick::Last));
+                transaction = transaction.integrate(assert_all([write], Cardinality::One));
                 let read: Vec<ConceptConclusion> = transaction
                     .query()
                     .select(query(&name, &["name"], Some(&this)))
@@ -56,7 +59,7 @@ impl Prepared for Reads {
 /// that renames each and reads the name back before the next write.
 pub async fn reads(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Reads { env, size }))
 }

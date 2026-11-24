@@ -45,8 +45,9 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct Primitive {
-    /// One bit per [`ValueType`] variant (positions 0-8), plus a
-    /// `Nothing` bit at position 9.
+    /// One bit per [`ValueType`] variant (positions 0-8, 10 for a
+    /// composite map and 11 for a composite list), plus a `Nothing` bit at
+    /// position 9.
     bits: u16,
 }
 
@@ -58,7 +59,7 @@ impl Display for Primitive {
         if self.required() == Self::ALL {
             write!(f, "Value")?;
         } else {
-            const ATOMS: [ValueType; 9] = [
+            const ATOMS: [ValueType; 11] = [
                 ValueType::String,
                 ValueType::Boolean,
                 ValueType::UnsignedInt,
@@ -68,6 +69,8 @@ impl Display for Primitive {
                 ValueType::Entity,
                 ValueType::Symbol,
                 ValueType::Record,
+                ValueType::Map,
+                ValueType::List,
             ];
             let mut first = true;
             for atom in ATOMS {
@@ -104,7 +107,7 @@ impl Primitive {
     /// variable that "accepts anything" still demands a Present
     /// value.
     pub const ALL: Self = Self {
-        bits: 0b1_1111_1111,
+        bits: 0b1101_1111_1111,
     };
 
     /// Every shape including the `Nothing` atom: the broadest
@@ -174,6 +177,12 @@ impl Primitive {
             ValueType::Entity => 1 << 6,
             ValueType::Symbol => 1 << 7,
             ValueType::Record => 1 << 8,
+            // Position 9 is the `Nothing` atom. A composite is a map or a
+            // list, as a number is one of three; a record is a member of
+            // the map's, as a sized number type is of its storage type's.
+            ValueType::Map | ValueType::CompositeRecord => 1 << 10,
+            ValueType::List => 1 << 11,
+            ValueType::Composite => (1 << 10) | (1 << 11),
             // Any number: all three number types.
             ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
             // A sized number type is a member of its storage type.
@@ -256,7 +265,7 @@ impl Primitive {
     /// Does **not** yield the `Nothing` atom.
     pub fn iter(self) -> impl Iterator<Item = ValueType> {
         let bits = self.bits;
-        (0..9u32).filter_map(move |pos| {
+        (0..12u32).filter_map(move |pos| {
             if (bits & (1 << pos)) != 0 {
                 value_type_for_bit(pos)
             } else {
@@ -277,6 +286,9 @@ fn value_type_for_bit(pos: u32) -> Option<ValueType> {
         6 => ValueType::Entity,
         7 => ValueType::Symbol,
         8 => ValueType::Record,
+        // 9 is the `Nothing` atom, which no value type is.
+        10 => ValueType::Map,
+        11 => ValueType::List,
         _ => return None,
     })
 }
@@ -424,11 +436,29 @@ impl Views {
         self.0 == 0
     }
 
-    /// The views, in type order.
+    /// Every sized number type, in type order: what a set can hold.
+    const SIZED: [ValueType; 12] = [
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::U128,
+        ValueType::I8,
+        ValueType::I16,
+        ValueType::I32,
+        ValueType::I64,
+        ValueType::I128,
+        ValueType::F32,
+        ValueType::F64,
+    ];
+
+    /// The views, in type order. It walks the sized number types alone,
+    /// not every type, so a refinement's check costs what the set holds
+    /// however many other types there are.
     pub fn iter(&self) -> impl Iterator<Item = ValueType> + '_ {
-        ValueType::ALL
+        Self::SIZED
             .into_iter()
-            .filter(|view| view.is_view() && self.0 & Self::bit(*view) != 0)
+            .filter(|view| self.0 & Self::bit(*view) != 0)
     }
 }
 
@@ -957,6 +987,16 @@ impl Type {
         self.admits(&value).then_some(value)
     }
 
+    /// Whether a variable of this type reads `value` at all: as it is,
+    /// or through a number view. What [`Match::bind`] accepts for the
+    /// variable, without binding it.
+    ///
+    /// [`Match::bind`]: crate::Match::bind
+    pub fn reads(&self, value: &Value) -> bool {
+        (matches!(self, Type::Primitive(_)) && self.admits(value))
+            || self.view(value.clone()).is_some()
+    }
+
     /// True when the given runtime value inhabits this type: the
     /// value's data type is a member of the primitive part, and the
     /// refinement (if any) admits the value itself.
@@ -1255,6 +1295,25 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// A set of views walks exactly the sized number types, in type
+    /// order, and yields each it holds: its list is every type that is a
+    /// view and no other.
+    #[dialog_common::test]
+    fn it_walks_every_sized_number_type_and_no_other() {
+        let sized: Vec<ValueType> = ValueType::ALL
+            .into_iter()
+            .filter(|kind| kind.is_view())
+            .collect();
+        assert_eq!(Views::SIZED.to_vec(), sized);
+        let all = Views::from_iter(sized.iter().copied());
+        assert_eq!(all.iter().collect::<Vec<_>>(), sized);
+        let some = Views::from_iter([ValueType::U16, ValueType::F64]);
+        assert_eq!(
+            some.iter().collect::<Vec<_>>(),
+            [ValueType::U16, ValueType::F64]
+        );
     }
 
     /// The band reads an integer a lower bound proves non-negative as

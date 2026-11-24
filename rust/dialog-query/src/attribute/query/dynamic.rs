@@ -8,6 +8,7 @@ use crate::proposition::Proposition;
 use crate::query::Output;
 use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
@@ -58,6 +59,23 @@ impl DynamicAttributeQuery {
             }
             _ => DynamicAttributeQuery::All(AttributeQueryAll::new(the, of, is, cause)),
         }
+    }
+
+    /// This query choosing one claim of each cell by `ranking`: the
+    /// read a concept field declaring a selective aggregator makes of its stored
+    /// claims.
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        let query = match self {
+            DynamicAttributeQuery::Only(query) => query,
+            DynamicAttributeQuery::All(query) => AttributeQueryOnly::new(
+                query.the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+                query.cause().clone(),
+            )
+            .with_layer(query.layer().clone()),
+        };
+        DynamicAttributeQuery::Only(query.ranked(ranking))
     }
 
     /// Get the 'the' (attribute) term.
@@ -114,6 +132,22 @@ impl DynamicAttributeQuery {
         }
     }
 
+    /// The layer term (`in:`). See [`AttributeQueryAll::layer`].
+    pub fn layer(&self) -> &Term<Entity> {
+        match self {
+            DynamicAttributeQuery::All(q) => q.layer(),
+            DynamicAttributeQuery::Only(q) => q.layer(),
+        }
+    }
+
+    /// This scan over `layer` (`in:`).
+    pub fn with_layer(self, layer: Term<Entity>) -> Self {
+        match self {
+            DynamicAttributeQuery::All(q) => DynamicAttributeQuery::All(q.with_layer(layer)),
+            DynamicAttributeQuery::Only(q) => DynamicAttributeQuery::Only(q.with_layer(layer)),
+        }
+    }
+
     /// The [`Selector`] this scan would issue against a store *given*
     /// the bindings in `source`, resolving each term to a constant where the
     /// row binds it. This is the same selector the scan's own evaluation
@@ -132,7 +166,8 @@ impl DynamicAttributeQuery {
             Err(_) => self.is().clone(),
         };
         let cause = self.cause().resolve(source);
-        let resolved = AttributeQueryAll::lookup(the, of, is, cause);
+        let layer = self.layer().resolve(source);
+        let resolved = AttributeQueryAll::lookup(the, of, is, cause).with_layer(layer);
         Selector::try_from(&resolved)
     }
 
@@ -230,6 +265,13 @@ impl Application for DynamicAttributeQuery {
         }
     }
 
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        match self {
+            DynamicAttributeQuery::All(q) => Application::bindings(q, claim),
+            DynamicAttributeQuery::Only(q) => Application::bindings(q, claim),
+        }
+    }
+
     fn restrict(&self, entity: &Entity) -> Restriction<Self> {
         match self.of() {
             Term::Constant(Value::Entity(this)) if this == entity => {
@@ -238,22 +280,30 @@ impl Application for DynamicAttributeQuery {
             Term::Constant(_) => Restriction::Unaffected,
             Term::Variable {
                 name: Some(name), ..
-            } if [self.the().name(), self.is().name(), self.cause().name()]
-                .into_iter()
-                .flatten()
-                .any(|other| other == &**name) =>
+            } if [
+                self.the().name(),
+                self.is().name(),
+                self.cause().name(),
+                self.layer().name(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|other| other == &**name) =>
             {
                 // `of` joins another slot through a shared variable
                 // name; pinning it would sever the join.
                 Restriction::Unsupported
             }
-            _ => Restriction::Scoped(DynamicAttributeQuery::new(
-                self.the().clone(),
-                Term::Constant(Value::Entity(entity.clone())),
-                self.is().clone(),
-                self.cause().clone(),
-                Some(self.cardinality()),
-            )),
+            _ => Restriction::Scoped(
+                DynamicAttributeQuery::new(
+                    self.the().clone(),
+                    Term::Constant(Value::Entity(entity.clone())),
+                    self.is().clone(),
+                    self.cause().clone(),
+                    Some(self.cardinality()),
+                )
+                .with_layer(self.layer().clone()),
+            ),
         }
     }
 }

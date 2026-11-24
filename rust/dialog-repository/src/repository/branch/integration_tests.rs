@@ -134,7 +134,7 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -159,7 +159,7 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -192,7 +192,7 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -269,7 +269,7 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -367,7 +367,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
                     is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         })
         .collect();
@@ -594,7 +594,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         attachment,
         document.clone(),
         Value::Entity(content.clone()),
-        dialog_corpus::Pick::Last,
+        dialog_corpus::Cardinality::One,
     );
     branch_a
         .transaction()
@@ -673,7 +673,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         "doc/cover".parse()?,
         "doc:2".parse::<Entity>()?,
         Value::Entity(content.clone()),
-        dialog_corpus::Pick::Last,
+        dialog_corpus::Cardinality::One,
     );
     branch_b
         .transaction()
@@ -781,7 +781,7 @@ async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<(
         body,
         document.clone(),
         Value::Bytes(payload.clone()),
-        dialog_corpus::Pick::Last,
+        dialog_corpus::Cardinality::One,
     );
 
     branch_a
@@ -1323,7 +1323,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1494,7 +1494,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             fact.clone(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1676,7 +1676,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
                 is: Value::String(body.clone()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1715,7 +1715,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1752,7 +1752,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1820,7 +1820,7 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
                 is: Value::String("x".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )
     };
     alice
@@ -1906,7 +1906,7 @@ async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
                 is: Value::String("x".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )
     };
     let side = alice_repo.branch("side").open().perform(&operator).await?;
@@ -2003,7 +2003,7 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2056,7 +2056,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2086,7 +2086,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2098,7 +2098,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Carol".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .merge()
         .perform(&profile)
@@ -2145,7 +2145,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact.clone(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2179,7 +2179,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             unrelated,
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2278,7 +2278,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -2324,7 +2324,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&env)
         .await?;
@@ -2348,7 +2348,7 @@ fn named(entity: &str, name: &str) -> Instruction {
             is: Value::String(name.into()),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )
 }
 
@@ -2793,7 +2793,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -2805,7 +2805,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                     is: Value::String(big.clone()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ));
         }
         alice_branch
@@ -2934,7 +2934,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -3219,7 +3219,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
                     is: Value::String(format!("resident-{i}")),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         })
         .collect();
@@ -3283,7 +3283,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -3343,7 +3343,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -3395,7 +3395,7 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -3524,7 +3524,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -3562,7 +3562,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4068,7 +4068,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -4242,7 +4242,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -4320,7 +4320,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&bob_operator)
         .await?;
@@ -4401,7 +4401,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
                 is: Value::String("UCAN User".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4452,7 +4452,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4584,7 +4584,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
                 is: Value::String("Delegated Push".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4653,7 +4653,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice Delegated".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -4762,7 +4762,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
             is: Value::String("downloaded on demand".repeat(64)),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )];
     branch_a
         .commit(stream::iter(facts))
@@ -4945,7 +4945,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             retracted.clone(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_a)
         .await?;
@@ -4994,7 +4994,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
                 is: Value::String("site B novelty".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_b)
         .await?;
@@ -5281,7 +5281,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -5419,7 +5419,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -5467,7 +5467,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         })
         .collect();
@@ -5558,7 +5558,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -5672,7 +5672,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -5733,7 +5733,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         })
         .collect();
@@ -5962,7 +5962,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
                     is: Value::String(format!("device-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         })
         .collect();
@@ -6168,7 +6168,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
                         is: Value::String(format!("resident-{i:04}").repeat(16)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -6198,7 +6198,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         const OWN_FACTS: usize = 16;
         branch
             .commit(stream::iter((0..OWN_FACTS).map(|i| {
-                Instruction::Assert(facts(i), dialog_corpus::Pick::All)
+                Instruction::Assert(facts(i), dialog_corpus::Cardinality::Many)
             })))
             .perform(&operator)
             .await?;
@@ -6534,7 +6534,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6569,7 +6569,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6590,7 +6590,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6652,7 +6652,7 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6684,7 +6684,7 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6739,7 +6739,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6770,7 +6770,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6790,7 +6790,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -6857,7 +6857,7 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
                 is: value.clone(),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator_a)
         .await?;
@@ -7140,7 +7140,7 @@ fn note(of: &str, body: &str) -> Instruction {
             is: Value::String(body.into()),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )
 }
 
@@ -7377,5 +7377,210 @@ async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> 
         vec!["note:b".to_string(), "note:base".to_string()],
         "nothing of A's head was merged into B's"
     );
+    Ok(())
+}
+
+/// A rule that holds a pattern replicates as its facts: its body is in
+/// format 5, so a peer that pulls the branch gets the rule and it fires
+/// there, over what was pulled and over what is pulled after, and a
+/// subscription there through the rule stays current. Cross-target: the
+/// client runs on native and in the browser against the provisioned S3.
+#[dialog_common::test]
+async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> {
+    use dialog_query::concept::query::ConceptQuery;
+    use dialog_query::query::Output as _;
+    use dialog_query::rule::body::format_of;
+    use dialog_query::types::Any;
+    use dialog_query::{
+        ConceptConclusion, ConceptDescriptor, DeductiveRule, MapPattern, Parameters, Pattern,
+        Premise, Proposition, Term, the,
+    };
+    use futures_util::TryStreamExt as _;
+
+    let text = |value: &str| Value::String(value.into());
+    let concept = |field: &str, relation: &str, value_type: &str| -> Result<ConceptDescriptor> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": relation, "as": value_type, "cardinality": "many" } }
+        }))?)
+    };
+    // heading(this, heading) :- payload(this, {"title": heading, ...}).
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.set(
+        "payload".into(),
+        Pattern::Map(
+            MapPattern::new([(text("title"), Pattern::Term(Term::var("heading")))])?
+                .with_rest(Term::<Any>::blank()),
+        ),
+    );
+    let rule = DeductiveRule::new(
+        concept("heading", "note/heading", "text:")?,
+        vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("payload", "note/payload", "composite:map")?,
+            terms,
+        }))],
+    )?;
+    let headings = || -> Result<ConceptQuery> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("heading".into(), Term::var("heading"));
+        Ok(ConceptQuery {
+            predicate: concept("heading", "note/heading", "text:")?,
+            terms,
+        })
+    };
+    let titles = |rows: &[ConceptConclusion]| -> Vec<(dialog_corpus::Entity, Value)> {
+        let mut titles: Vec<_> = rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.entity().clone(),
+                    row.source().value_of("heading")?.clone(),
+                ))
+            })
+            .collect();
+        titles.sort_by(|a, b| a.0.cmp(&b.0));
+        titles
+    };
+    let payload = |title: &str| -> Result<dialog_corpus::Composite> {
+        Ok(dialog_corpus::Composite::map([(
+            text("title"),
+            text(title),
+        )])?)
+    };
+    let milk: dialog_corpus::Entity = "id:milk".parse()?;
+    let call: dialog_corpus::Entity = "id:call".parse()?;
+
+    // Alice installs the rule beside a payload and pushes.
+    let (alice_operator, alice_profile) = test_session_with_peer().await;
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&alice_operator, &alice_profile, &s3, "pattern-rule-a").await?;
+    #[allow(deprecated)]
+    alice_branch
+        .transaction()
+        .assert(&rule)
+        .assert(
+            the!("note/payload")
+                .of(milk.clone())
+                .is(payload("Buy milk")?),
+        )
+        .commit()
+        .publish()
+        .perform(&alice_operator)
+        .await?;
+    assert!(
+        alice_branch
+            .push()
+            .perform(&alice_operator)
+            .await?
+            .is_some()
+    );
+
+    // Bob pulls from the same remote.
+    let (bob_operator, bob_profile) = test_session_with_peer().await;
+    let bob_repo = bob_profile
+        .space(unique_name("pattern-rule-b"))
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_site = s3_site_address(&s3);
+    bob_profile
+        .secrets()
+        .site(&bob_site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&bob_profile)
+        .await?;
+    let bob_origin = connect("origin", bob_site, alice_repo.did(), &bob_operator).await?;
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_remote = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(bob_remote)
+        .perform(&bob_operator)
+        .await?;
+    assert!(
+        bob_branch
+            .pull(crate::Download::MinimalRanges)
+            .perform(&bob_operator)
+            .await?
+            .is_some()
+    );
+
+    // The rule arrived, as format 5, and fires on Bob's side.
+    let sources: Vec<Fact> = bob_branch
+        .claims()
+        .select(
+            Selector::new()
+                .of(rule.this())
+                .the("dialog.rule/source".parse()?),
+        )
+        .to_owned()
+        .perform(&bob_operator)
+        .await?
+        .try_collect()
+        .await?;
+    let [source] = sources.as_slice() else {
+        anyhow::bail!("one body pulled, found {}", sources.len());
+    };
+    assert!(
+        matches!(&source.is, Value::Bytes(bytes)
+            if format_of(bytes) == Some(5)),
+        "the pulled body is in format 5"
+    );
+    let mut subscription = bob_branch.subscribe(headings()?);
+    let first = subscription
+        .poll(&bob_operator)
+        .await?
+        .expect("the initial poll evaluates");
+    assert_eq!(
+        titles(&first.asserted),
+        vec![(milk.clone(), text("Buy milk"))]
+    );
+
+    // Alice writes another payload; once Bob pulls it the rule derives
+    // its heading there and the subscription reports it.
+    #[allow(deprecated)]
+    alice_branch
+        .transaction()
+        .assert(
+            the!("note/payload")
+                .of(call.clone())
+                .is(payload("Call mum")?),
+        )
+        .commit()
+        .publish()
+        .perform(&alice_operator)
+        .await?;
+    assert!(
+        alice_branch
+            .push()
+            .perform(&alice_operator)
+            .await?
+            .is_some()
+    );
+    bob_branch
+        .pull(crate::Download::MinimalRanges)
+        .perform(&bob_operator)
+        .await?;
+    let delta = subscription
+        .poll(&bob_operator)
+        .await?
+        .expect("the pulled payload is a delta");
+    assert_eq!(titles(&delta.asserted), vec![(call, text("Call mum"))]);
+    assert!(delta.retracted.is_empty());
+    let rows = bob_branch
+        .query()
+        .select(headings()?)
+        .perform(&bob_operator)
+        .try_vec()
+        .await?;
+    assert_eq!(rows.len(), 2);
     Ok(())
 }

@@ -54,7 +54,7 @@ async fn build<D: Distribution>(size: usize) -> (PersistentTree<[u8; 16], Vec<u8
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(node.buffer().expect("a sealed node has its block").clone());
         }
     }
     (tree, storage)

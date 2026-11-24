@@ -2,15 +2,36 @@
 //! envelope that names the format it is written in.
 //!
 //! ```text
-//! { "format": 3, "rule": { "deduce": ..., "when": [...] } }
+//! { "format": 5, "rule": { "deduce": ..., "when": [...] } }
 //! ```
 //!
-//! Format 3 writes the rule's canonical spelling (see
-//! [`canonical`](crate::rule::canonical)): the locals and the head's
-//! fields renamed by the labeling, a premise's fields named by what
-//! they read, the premises sorted, and no descriptions. The body then
-//! holds exactly what the rule's identity holds, so every spelling of
-//! one rule stores the same bytes, and a rule's body is found by
+//! Format 5 is format 4 with a pattern where a parameter stands: a map
+//! or a list of terms, written under `match` (see
+//! [`Pattern`](crate::Pattern)). A body is written in the lowest format
+//! that can say it, so a rule that holds a pattern is written in format
+//! 5 and every other rule in format 4 ([`TERMS_FORMAT`]), byte for byte
+//! as the release before wrote it. A stored rule then keeps its body,
+//! is found and retracted by encoding the rule, and is read by a
+//! release that reads up to format 4. Only a rule that holds a pattern
+//! is refused by such a release, by the number of its format, and is
+//! inert there. A body in a format below 5 that holds a pattern is not
+//! one any release wrote, and is refused when it is decoded.
+//!
+//! Format 4 writes the rule's canonical spelling with each attribute
+//! under its cardinality (`one`, unwritten, or `many`). Format 3 wrote the
+//! same spelling with each attribute under a `pick`, which this release
+//! refuses by name (see
+//! [`AttributeDescriptor`](crate::attribute::AttributeDescriptor)), so a
+//! format 3 body spelling one decodes to an error and the rule is inert
+//! until `Branch::upgrade_rules` rewrites it. A format 3 body spelling no
+//! pick decodes as it was written.
+//!
+//! Format 3 wrote the rule's canonical spelling, as formats 4 and 5 do
+//! (see [`canonical`](crate::rule::canonical)): the locals and the
+//! head's fields renamed by the labeling, a premise's fields named by
+//! what they read, the premises sorted, and no descriptions. The body
+//! then holds exactly what the rule's identity holds, so every spelling
+//! of one rule stores the same bytes, and a rule's body is found by
 //! encoding the rule. What the author wrote is not stored.
 //!
 //! Format 2 wrote the authored descriptor, with every constant tagged
@@ -18,10 +39,10 @@
 //! decodes as the type it was written as. Format 1 (0.2.0) and format
 //! 0 (the bare descriptor the release before formats wrote) wrote
 //! constants bare, and a bare constant reads as the first type its
-//! payload fits. All three are still read, and `Branch::upgrade_rules`
-//! rewrites them in format 3. A body in a later format than this
-//! release reads is refused by name rather than read as something it
-//! is not.
+//! payload fits. All three are still read, as format 3 is, and
+//! `Branch::upgrade_rules` rewrites them in format 4. A body in a later
+//! format than this release reads is refused by name rather than read
+//! as something it is not.
 //!
 //! dag-cbor holds integers of at most 64 bits and finite floats, so a
 //! rule whose constants exceed that is refused when it compiles (see
@@ -31,8 +52,13 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-/// The rule body format this release writes.
-pub const FORMAT: u64 = 3;
+/// The latest rule body format this release reads and writes: the one
+/// a rule that holds a pattern is written in.
+pub const FORMAT: u64 = 5;
+
+/// The format a rule that holds no pattern is written in: format 4, as
+/// the release before wrote it.
+pub const TERMS_FORMAT: u64 = 4;
 
 #[derive(Serialize)]
 struct Envelope<'a, T> {
@@ -52,13 +78,46 @@ struct Stamp {
     format: Option<u64>,
 }
 
-/// `rule`, a canonical descriptor, as a stored body in [`FORMAT`].
-pub(crate) fn encode<T: Serialize>(rule: &T) -> Option<Vec<u8>> {
+/// The format a stored body names, `0` for the bare descriptor the
+/// release before formats wrote, or `None` when the bytes are no
+/// dag-cbor map.
+pub fn format_of(bytes: &[u8]) -> Option<u64> {
+    serde_ipld_dagcbor::from_slice::<Stamp>(bytes)
+        .ok()
+        .map(|stamp| stamp.format.unwrap_or(0))
+}
+
+/// The format a body is written in: [`FORMAT`] when the rule holds a
+/// pattern, and [`TERMS_FORMAT`] when it holds none.
+pub fn format_for(holds_pattern: bool) -> u64 {
+    if holds_pattern { FORMAT } else { TERMS_FORMAT }
+}
+
+/// `rule`, a canonical descriptor, as a stored body in the format
+/// [`format_for`] gives.
+pub(crate) fn encode<T: Serialize>(holds_pattern: bool, rule: &T) -> Option<Vec<u8>> {
     serde_ipld_dagcbor::to_vec(&Envelope {
-        format: FORMAT,
+        format: format_for(holds_pattern),
         rule,
     })
     .ok()
+}
+
+/// `rule` in `format`, as a release that wrote it stored it.
+#[cfg(test)]
+pub(crate) fn encode_as<T: Serialize>(format: u64, rule: &T) -> Option<Vec<u8>> {
+    serde_ipld_dagcbor::to_vec(&Envelope { format, rule }).ok()
+}
+
+/// Refuses a body that holds a pattern in a format that has none: only
+/// format 5 writes one.
+pub(crate) fn check_pattern(bytes: &[u8], held: Option<String>) -> Result<(), String> {
+    match (held, format_of(bytes)) {
+        (Some(pattern), Some(format)) if format < FORMAT => Err(format!(
+            "the rule body is in format {format}, which writes no pattern, and holds the pattern {pattern}"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The descriptor a stored body holds, in [`FORMAT`] or any earlier.
@@ -93,22 +152,23 @@ mod tests {
         }
     }
 
-    /// A body is written in the current format and read back, and the
-    /// bodies earlier releases wrote are still read: the format 2
-    /// envelope and the bare descriptor of format 0.
+    /// A body is written in format 5 when its rule holds a pattern and
+    /// in format 4 when it holds none, both are read back, and the
+    /// bodies earlier releases wrote are still read: the envelopes of
+    /// formats 3 and 2 and the bare descriptor of format 0.
     #[dialog_common::test]
     fn it_reads_every_format_up_to_its_own() {
-        let current = encode(&body()).expect("encodes");
-        let stamp: Stamp = serde_ipld_dagcbor::from_slice(&current).expect("stamped");
-        assert_eq!(stamp.format, Some(FORMAT));
-        assert_eq!(decode::<Body>(&current), Ok(body()));
+        for (holds_pattern, format) in [(true, FORMAT), (false, TERMS_FORMAT)] {
+            let current = encode(holds_pattern, &body()).expect("encodes");
+            assert_eq!(format_of(&current), Some(format));
+            assert_eq!(decode::<Body>(&current), Ok(body()));
+        }
+        assert_eq!((FORMAT, TERMS_FORMAT), (5, 4));
 
-        let earlier = serde_ipld_dagcbor::to_vec(&Envelope {
-            format: 2,
-            rule: &body(),
-        })
-        .expect("encodes");
-        assert_eq!(decode::<Body>(&earlier), Ok(body()));
+        for earlier in [3, 2] {
+            let earlier = encode_as(earlier, &body()).expect("encodes");
+            assert_eq!(decode::<Body>(&earlier), Ok(body()));
+        }
 
         let bare = serde_ipld_dagcbor::to_vec(&body()).expect("encodes");
         assert_eq!(decode::<Body>(&bare), Ok(body()));

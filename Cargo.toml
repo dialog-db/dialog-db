@@ -16,6 +16,7 @@ strip = "debuginfo"
 
 [workspace]
 members = [
+    "rust/dialog-chronicle",
     "rust/dialog-corpus",
     "rust/dialog-baseline",
     "rust/dialog-capability",
@@ -24,6 +25,7 @@ members = [
     "rust/dialog-common",
     "rust/dialog-effects",
     "rust/dialog-macros",
+    "rust/dialog-migration",
     "rust/dialog-diagnose",
     "rust/dialog-encoding",
     "rust/dialog-number",
@@ -44,6 +46,7 @@ members = [
     "rust/dialog-perf",
     "rust/dialog-repository",
     "rust/dialog-soak",
+    "rust/dialog-stack",
     "rust/dialog-varsig",
     "rust/merkle-reference",
     "rust/wbg-pool",
@@ -51,7 +54,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0-rc.7"
+version = "0.5.0"
 authors = ["The Meiosys Project Authors"]
 license = "MPL-2.0"
 edition = "2024"
@@ -69,6 +72,7 @@ aes-gcm = "0.10"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
+crc32fast = "1.5"
 brotli = "8"
 bytes = "1"
 chrono = "0.4"
@@ -87,6 +91,7 @@ futures-core = "0.3"
 flate2 = "1"
 futures-util = "0.3"
 hashbrown = "0.16"
+memmap2 = "0.9"
 hkdf = "0.12"
 hmac = "0.12"
 http-body-util = "0.1"
@@ -121,6 +126,8 @@ nom = "7"
 nom-unicode = "0.3"
 nonempty = "0.11"
 parking_lot = "0.12"
+papaya = "0.2"
+arc-swap = "1"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
@@ -205,61 +212,70 @@ zerocopy = "0.8"
 zerocopy-derive = "0.8"
 zmij = "1"
 
+[workspace.dependencies.dialog-chronicle]
+path = "./rust/dialog-chronicle"
+version = "0.5.0"
+
+[workspace.dependencies.dialog-migration]
+path = "./rust/dialog-migration"
+version = "0.5.0"
+
+
 [workspace.dependencies.dialog-corpus]
 path = "./rust/dialog-corpus"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-capability]
 path = "./rust/dialog-capability"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-credentials]
 path = "./rust/dialog-credentials"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-did-web]
 path = "./rust/dialog-did-web"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-number]
 path = "./rust/dialog-number"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.merkle-reference]
 path = "./rust/merkle-reference"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-csv]
 path = "./rust/dialog-csv"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-search-tree]
 path = "./rust/dialog-search-tree"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-effects]
 path = "./rust/dialog-effects"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-query]
 path = "./rust/dialog-query"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27
@@ -267,48 +283,52 @@ version = "0.4.0-rc.7"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-remote-ucan-s3]
 path = "./rust/dialog-remote-ucan-s3"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-remote-ucan]
 path = "./rust/dialog-remote-ucan"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-peer-iroh]
 path = "./rust/dialog-peer-iroh"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-identity]
 path = "./rust/dialog-identity"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-peer]
 path = "./rust/dialog-peer"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"
-version = "0.4.0-rc.7"
+version = "0.5.0"
+
+[workspace.dependencies.dialog-stack]
+path = "./rust/dialog-stack"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-ucan-core]
 path = "./rust/dialog-ucan-core"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-ucan]
 path = "./rust/dialog-ucan"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-network]
 path = "./rust/dialog-network"
-version = "0.4.0-rc.7"
+version = "0.5.0"
 
 [workspace.dependencies.dialog-varsig]
 path = "./rust/dialog-varsig"
-version = "0.4.0-rc.7"
+version = "0.5.0"

@@ -759,10 +759,19 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
         // case and preserve integer types (u128/i128 don't survive serde_json's
         // untagged enum deserialization for Value).
         let raw = serde_json::Value::deserialize(deserializer)?;
-        match &raw {
-            serde_json::Value::Object(map) if map.contains_key("?") => {
-                let var: VarInfo =
-                    serde_json::from_value(map["?"].clone()).map_err(DeserializeError::custom)?;
+        Term::from_json(raw).map_err(DeserializeError::custom)
+    }
+}
+
+impl<T: Typed> Term<T> {
+    /// The term `raw` is written as, read as [`Deserialize`](serde::Deserialize)
+    /// reads one, from a value already read. A [`Pattern`](crate::Pattern)
+    /// looks into what stands where a parameter does before it knows
+    /// whether it is a term, and reads it here without reading it again.
+    pub(crate) fn from_json(raw: serde_json::Value) -> Result<Self, serde_json::Error> {
+        match raw {
+            serde_json::Value::Object(mut map) if map.contains_key("?") => {
+                let var: VarInfo = serde_json::from_value(map.remove("?").unwrap_or_default())?;
                 Ok(Term::Variable {
                     name: var.name.map(Arc::from),
                     descriptor: <T as Typed>::Descriptor::from_kind(var.content_type),
@@ -776,12 +785,14 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
                 } else if let Some(f) = n.as_f64() {
                     Value::Float(f)
                 } else {
-                    return Err(DeserializeError::custom(format!("unsupported number: {n}")));
+                    return Err(serde_json::Error::custom(format!(
+                        "unsupported number: {n}"
+                    )));
                 };
                 Ok(Term::Constant(value))
             }
-            _ => {
-                let value: Value = serde_json::from_value(raw).map_err(DeserializeError::custom)?;
+            raw => {
+                let value: Value = serde_json::from_value(raw)?;
                 Ok(Term::Constant(value))
             }
         }

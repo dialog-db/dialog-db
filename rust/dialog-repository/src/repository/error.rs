@@ -579,6 +579,15 @@ pub enum CommitError {
     #[error("Failed to resolve during commit: {0}")]
     Resolve(#[from] ResolveError),
 
+    /// The transaction holds a statement that cannot be written as
+    /// facts: a rule that holds a pattern, which the stored rule format
+    /// has no way to write, for one. The refusal names the statement's
+    /// entity and carries the reason, typed (see
+    /// [`Refusal::reason`](dialog_corpus::Refusal::reason)). Nothing the
+    /// transaction holds is written.
+    #[error("The transaction cannot be committed: {0}")]
+    Refused(dialog_corpus::Refusal),
+
     /// Commit-time induction still emitted novelty or transients after
     /// the round bound — a self-feeding cascade (e.g. a transient
     /// ping-pong between two rules, or an unguarded rule deriving from
@@ -590,7 +599,7 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
-    /// A write succeeding a claim under a choosing pick could not
+    /// A write succeeding a claim under cardinality one could not
     /// read the claims of its cell to elect the one it succeeds.
     #[error("Succession failed: {0}")]
     Succession(String),
@@ -620,6 +629,50 @@ pub enum CommitError {
     /// [`Snapshot::commit`](crate::Snapshot::commit).
     #[error("A snapshot cannot be advanced through a reference; transact it instead")]
     Detached,
+
+    /// A placement declaration carries a value that is not a layer, or a
+    /// layer declaration one a stack cannot build: a `dialog.layer/type`
+    /// that names no layer type, or a durable layer not named
+    /// `memory:<name>`.
+    #[error("Placement of {attribute} names no layer: {value}")]
+    InvalidPlacement {
+        /// The attribute declared, such as `dialog.layer/type of <layer>`.
+        attribute: String,
+        /// The value found.
+        value: String,
+    },
+
+    /// A write is placed on a layer the stack does not hold: the
+    /// primary declares no such layer, or declares one the stack could
+    /// not build.
+    #[error("Attribute {attribute} is placed on layer {layer}, which this stack does not hold")]
+    UnboundLayer {
+        /// The attribute written.
+        attribute: String,
+        /// The layer its placement names.
+        layer: String,
+    },
+
+    /// A [`Backup`](crate::Backup) restored on a branch other than the
+    /// one whose stack took it ([`OpenStack::restore`](crate::OpenStack::restore)).
+    /// Refused before any layer is built: nothing is read or written.
+    #[error("A backup of branch {backup} cannot be restored on branch {branch}")]
+    ForeignBackup {
+        /// The branch entity the backup was taken of.
+        backup: String,
+        /// The branch entity of the stack it was restored on.
+        branch: String,
+    },
+
+    /// A read the body of a [`Stack::transact`](crate::Stack::transact)
+    /// made through the stack failed: the transaction writes nothing.
+    #[error("A read in the transaction's body failed: {0}")]
+    Read(#[from] dialog_query::EvaluationError),
+
+    /// The body of a [`Stack::transact`](crate::Stack::transact) gave
+    /// up, for the reason it gives: the transaction writes nothing.
+    #[error("The transaction's body gave up: {0}")]
+    Aborted(String),
 }
 
 /// Errors specific to a pull operation.
