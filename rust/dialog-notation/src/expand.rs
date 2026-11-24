@@ -840,6 +840,11 @@ pub struct Expander {
     asked: Vec<(Syntax, Position, usize)>,
     /// The trees of the document being expanded, as given.
     document: Vec<Syntax>,
+    /// The sites of the tree being expanded, each by its reference,
+    /// numbered in the order they are met: what a site's own variables
+    /// are named apart by. Begun again for each tree, so the numbers
+    /// are a function of that tree alone.
+    sites: BTreeMap<String, usize>,
     /// Which of them is being expanded.
     tree: usize,
     /// For each kernel rule of the last document, which tree it came of.
@@ -921,6 +926,7 @@ impl Expander {
                 let tree = &trees[at];
                 self.tree = at;
                 self.blame.clear();
+                self.sites.clear();
                 let mut rules = Vec::new();
                 match self.each(tree, &mut rules) {
                     Ok(()) => {
@@ -1399,8 +1405,10 @@ impl Expander {
     fn ask(&mut self, tree: &Syntax, position: Position) -> Result<Syntax, Error> {
         // What the template's own variables are named apart by: the
         // tree being expanded and where it stands, by reference, so the
-        // names do not move with how either is spelled.
-        let site = apply(
+        // names do not move with how either is spelled, and numbered in
+        // the order the tree's sites are met, so two sites are two
+        // numbers.
+        let key = apply(
             "site",
             vec![
                 tree.clone(),
@@ -1414,8 +1422,9 @@ impl Expander {
             ],
         )
         .reference()?
-        .to_string()[..4]
-            .to_string();
+        .to_string();
+        let next = self.sites.len();
+        let site = self.sites.entry(key).or_insert(next).to_string();
         // Of the rules that apply, the ones that name the most: a
         // pattern that leaves a part to its `...` gives way to one that
         // names it. `(?concept ... ?fields)` and
@@ -1905,6 +1914,29 @@ mod tests {
             .filter(|name| name.contains('.'))
             .collect();
         assert_eq!(own.len(), 2, "{rule}");
+        Ok(())
+    }
+
+    /// One form written twice in the same place of a rule is one site,
+    /// and its own variables are one; the prelude says so.
+    #[test]
+    fn it_names_the_own_variables_of_one_form_written_twice_alike() -> Result<(), Error> {
+        let rules = expanded(
+            "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
+            "(rule (xyz.out ?a other: ?b) (task ?a) (task ?b) (task ?a))",
+        )?;
+        let [rule] = rules.as_slice() else {
+            return Err(Error::Refused(format!("one rule: {rules:?}")));
+        };
+        let tree = crate::parse(rule)?;
+        let mut names = Vec::new();
+        tree[0].variables(&mut names);
+        let own: BTreeSet<String> = names
+            .into_iter()
+            .filter(|name| name.contains('.'))
+            .collect();
+        assert_eq!(own.len(), 2, "{rule}");
+        assert!(PRELUDE.contains("two sites of one rule never share it"));
         Ok(())
     }
 
