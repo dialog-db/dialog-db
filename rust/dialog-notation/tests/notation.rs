@@ -1210,39 +1210,64 @@ async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
     Ok(())
 }
 
-/// A concept's name is a name, `todo`, or a name and a `/`,
-/// `notebook/blocks`. A name with a `.` and no `/` is a domain, which a
-/// read applies as the kernel's: a concept declared under one would never
-/// be read, and the domain's own attributes would answer for it. It is
-/// refused, written or made by a macro, saying what a concept's name is,
-/// and nothing of the document is written.
+/// A concept's, a query's and a command's name is a name, `todo`, or a
+/// name and a `/`, `notebook/blocks`, and has no `.` anywhere: a name
+/// with a `.` is a domain, `xyz.memo`, or an attribute in one,
+/// `xyz.memo/note`, read directly (the maintainer). One declared under
+/// such a name is refused, written or made by a macro, saying so, and
+/// nothing of the document is written: the domain and the attribute go
+/// on answering for themselves, the attribute's two-term read too.
 #[dialog_common::test]
-async fn it_refuses_a_concept_named_as_a_domain() -> Result<()> {
+async fn it_refuses_a_concept_query_or_command_whose_name_has_a_dot() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit(r#"(assert (xyz.memo x:1 text: "the domain's own"))"#)
+        .submit(
+            r#"(assert (xyz.memo x:1 text: "the domain's own"))
+               (assert (xyz.memo/note of: x:2 is: "the attribute's own"))"#,
+        )
         .await?;
-    for text in [
-        "(concept (xyz.memo ?t text: ?x)
-           (xyz.other/text of: ?t is: ?x as: :text cardinality: :one))",
-        "(rule (syntax (concept (?name ?t text: ?x)
-             (xyz.other/text of: ?t is: ?x as: :text cardinality: :one)))
-           (expand (memo-kind ?name)))
-         (memo-kind xyz.memo)",
-    ] {
+    let line = "(xyz.other/text of: ?t is: ?x as: :text cardinality: :one)";
+    let mut texts: Vec<(String, &str)> = Vec::new();
+    for name in ["xyz.memo", "xyz.memo/note", "a.b/c", "a/b.c"] {
+        texts.push((format!("(concept ({name} ?t text: ?x) {line})"), name));
+        texts.push((
+            format!(
+                "(rule (syntax (concept (?name ?t text: ?x) {line}))
+                   (expand (memo-kind ?name)))
+                 (memo-kind {name})"
+            ),
+            name,
+        ));
+        texts.push((
+            format!("(query ({name} ?t is: ?x) (xyz.other ?t text: ?x))"),
+            name,
+        ));
+        texts.push((
+            format!(
+                "(concept ({name} subject: ?x)
+                   (xyz.go/subject of: ?c is: ?x as: :entity in: :control cardinality: :many))"
+            ),
+            name,
+        ));
+    }
+    for (text, name) in &texts {
         let refused = notebook
             .submit(text)
             .await
             .map_err(|error| error.downcast::<Error>());
         assert!(
             matches!(&refused, Err(Ok(Error::Refused(why)))
-                if why.contains("xyz.memo") && why.contains("concept's name")),
+                if why.contains(&format!("`{name}`")) && why.contains("has none")),
             "{text}: {refused:?}"
         );
     }
     assert_eq!(
         report(&mut notebook, "(select (xyz.memo ?t text: ?x))").await?,
         vec![r#"(xyz.memo x:1 text: "the domain's own")"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.memo/note ?t ?x))").await?,
+        vec![r#"(xyz.memo x:2 note: "the attribute's own")"#]
     );
     Ok(())
 }
