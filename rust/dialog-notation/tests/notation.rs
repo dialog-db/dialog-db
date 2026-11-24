@@ -1161,6 +1161,51 @@ async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> R
     Ok(())
 }
 
+/// Every attribute line of a concept or a command says its cardinality:
+/// one without `cardinality:` is refused at that form, saying to write
+/// `cardinality: :one` or `cardinality: :many`, and nothing of the
+/// document is declared. A line read in a rule's body or a select is a
+/// read, which takes every claim, and needs none.
+#[dialog_common::test]
+async fn it_refuses_a_concept_line_that_says_no_cardinality() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    for text in [
+        "(concept (memo ?t text: ?x)
+           (xyz.memo/text of: ?t is: ?x as: :text))",
+        "(concept (memo/add text: ?x)
+           (xyz.memo.add/text of: ?c is: ?x as: :text in: :control))",
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why)))
+                if why.contains("cardinality: :one") && why.contains("cardinality: :many")),
+            "{text}: {refused:?}"
+        );
+    }
+    let unknown = notebook
+        .submit("(select (memo ?t text: ?x))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&unknown, Err(Ok(Error::Unknown(_)))),
+        "{unknown:?}"
+    );
+    notebook
+        .submit(
+            r#"(assert (xyz.memo x:1 text: "a"))
+               (rule (xyz.out ?t v: ?x) (xyz.memo/text of: ?t is: ?x))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.out ?t v: ?x))").await?,
+        vec![r#"(xyz.out x:1 v: "a")"#]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
