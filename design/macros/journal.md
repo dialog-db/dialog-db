@@ -1895,3 +1895,11 @@ The measurement that came in after (next entry but one above) bears on this: wha
 **Backtracked.** From built to Designing, for what a bare name means. The build's other parts stand: content entities, source maps, bindings, the walk.
 
 **Decided.** Not decided. The agent's hypothesis: a bare name is the space's and "mine" is not in the language; a person's namespace is a name in the space like any other. Spellings by a reader round.
+
+## 2026-11-24, A paginated view has to stay expressible
+
+**Asked.** The maintainer, after talking with Chris about virtualized lists: no hurry to port sapling's pagination, but our views must not make it impossible to say.
+
+**Learned.** sapling pages by segments, ranges of an order key, each a live query, with layout kept in the front end and the next bound found by a read of the greatest keys below a key. A segment is a query with two parameters in our notation, and the window is session facts a collecting query reads, which is the maintainer's model and Chris's at once.
+
+**Decided.** Five things a view must keep true are written in [paginated-views.md](paginated-views.md). Two are facts today, two are hypotheses about the engine (a bound from a join reaching the scan, many small live queries being cheap), one is a read main does not have. Nothing is built.
