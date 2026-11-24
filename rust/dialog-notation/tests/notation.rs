@@ -1597,6 +1597,44 @@ async fn it_refuses_a_label_the_notation_names_or_one_of_another_domain() -> Res
     Ok(())
 }
 
+/// A line of a concept says its cardinality whatever else the body
+/// holds: beside a read of another concept, a line that says none is
+/// refused as one alone is. A body that is a read of a domain, not a
+/// line, says no cardinality and reads every claim: it is accepted, as
+/// the requirement is on lines.
+#[dialog_common::test]
+async fn it_refuses_a_line_with_no_cardinality_whatever_the_body_holds() -> Result<()> {
+    let alt = "(concept (alt ?t text: ?x)
+          (xyz.alt/text of: ?t is: ?x as: :text cardinality: :one))";
+    for mixed in [
+        "(concept (mix ?t text: ?x v: ?v) (alt ?t text: ?x) (xyz.b/v of: ?t is: ?v))",
+        "(concept (mix ?t text: ?x v: ?v) (xyz.b/v of: ?t is: ?v) (alt ?t text: ?x))",
+    ] {
+        let mut notebook = Notebook::open().await?;
+        let refused = notebook
+            .submit(&format!("{alt} {mixed}"))
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("says no cardinality")),
+            "{mixed}: {refused:?}"
+        );
+    }
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (m ?t text: ?x) (xyz.m ?t text: ?x))
+               (assert (xyz.m/text of: m:1 is: "a"))
+               (assert (xyz.m/text of: m:1 is: "b"))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (m ?t text: ?x))").await?,
+        vec![r#"(xyz.m m:1 text: "a")"#, r#"(xyz.m m:1 text: "b")"#]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
