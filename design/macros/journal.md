@@ -1953,3 +1953,24 @@ Node reads stay between 46 and 100 for every change, and no layer is evaluated w
 **Learned.** The engine's fold does not grow with the page and costs 1.5 to 1.7 times its own inner subscriptions. No change through the notation meets the bar the maintainer was offered (not growing, within 2 times plain), and at ten thousand the cost is the notation's own.
 
 **Decided.** Not decided. Nothing is made faster.
+
+## 2026-11-24, Building: what one change cost the notation, made to cost what it touches
+
+**Asked.** By the coordinating session, on the measurement above: fix what is the notation's, report what is the engine's.
+
+**Learned.**
+
+- `Maintainer::apply` counted a counted place and found an inserted instance's index by collecting every instance under the parent again, on every change. With each parent's instances kept in key order, one changed row costs 0.05 to 0.11 ms at a thousand and at ten thousand, where it cost 0.4 to 0.6 and 16 to 24 ms.
+- A view's count was folded by the selection's fold, which also builds the distinct set of the group's values. A count reads none of it; folded alone, a view needs no `distinct`.
+- What is left is the engine's: a fold's subscription folds a touched group again over all its kept rows, 28 to 34 ms for the one list of ten thousand. A running count for a group would remove it (decision 2 of [decisions-overnight.md](decisions-overnight.md)).
+- The cover of a row layer holds a range of the entity index for each to-do and attribute read, 10011 and 20010 at ten thousand, where one range of the attribute index would do. The engine's, reported on 2026-11-19.
+
+| one change, through `Live::watch` | N=1000 before | after | N=10000 before | after |
+|---|---|---|---|---|
+| rename | 3.3 ms | 2.9 | 56 | 33 |
+| to-do added | 3.7 | 3.0 | 62 | 28 |
+| tag added | 1.3 | 1.5 | 5.1 | 5.0 |
+
+[Output](rounds/cost-2026-11-24-after.txt).
+
+**Decided.** Not decided: whether a view's count stays on the fold while the fold refolds the group, or is counted from the layer's rows, which now costs one lookup.
