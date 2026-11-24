@@ -149,7 +149,7 @@ where
 {
     let version = head.version();
     let store = erased(env);
-    let catalog = branch.archive().index();
+    let subject = branch.subject();
     let unreadable = |error: dialog_corpus::DialogCorpusError| {
         PublishError::Storage(format!(
             "could not tell whether the revision holds branch {}'s head: {error}",
@@ -161,7 +161,7 @@ where
         &version,
         &branch.contexts(),
         &branch.records(),
-        &catalog,
+        &subject,
         &store,
     )
     .await
@@ -170,7 +170,7 @@ where
         return Ok(seen);
     }
     let history = branch.history(env);
-    let context = full_context(revision, &branch.contexts(), &catalog, &store, &history)
+    let context = full_context(revision, &branch.contexts(), &subject, &store, &history)
         .await
         .map_err(unreadable)?;
     Ok(context.observes(&version))

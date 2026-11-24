@@ -521,7 +521,8 @@ async fn it_keeps_the_top_of_a_partial_listing_equal_to_a_select() -> anyhow::Re
 }
 
 /// A `sum` is maintained per group: after its first poll no poll
-/// evaluates anything whole, and only the moved group is folded again.
+/// evaluates anything whole, and only the moved group is folded again,
+/// or stepped once it has a running value.
 /// A `last` over the same changes is evaluated afresh on each poll that
 /// moved a row, and folds no group from kept rows.
 #[dialog_common::test]
@@ -556,7 +557,10 @@ async fn it_maintains_a_sum_per_group_and_evaluates_a_last_afresh() -> anyhow::R
         }
     }
     assert_eq!(sum.recomputes(), 2, "every later poll was maintained");
-    assert_eq!(sum.refolds(), 4, "the one group, folded once per poll");
+    // The first poll folds the group, and so does the second, its first
+    // change, which gives it a running value: the next two step it.
+    assert_eq!(sum.refolds(), 2, "the one group, folded until it runs");
+    assert_eq!(sum.steps(), 2, "and stepped after");
     assert_eq!(
         last.recomputes(),
         2 + steps.len(),

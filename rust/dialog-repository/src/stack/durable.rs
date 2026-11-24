@@ -111,7 +111,10 @@ async fn cell(
     of: &Entity,
     store: &dyn TreeEnv,
 ) -> Result<Vec<(Value, Vec<Version>)>, DialogCorpusError> {
-    let tree = Index::at(archive.index(), NodeHash::from(*root.hash()));
+    let tree = Index::at(
+        Subject::from(archive.subject().clone()),
+        NodeHash::from(*root.hash()),
+    );
     let start = <AttributeKey<Key> as dialog_corpus::KeyViewConstruct>::min()
         .set_attribute(AttributeKeyPart::from(the))
         .set_entity(EntityKeyPart::from(of))
@@ -562,9 +565,9 @@ async fn descends<Env: TreeEnv>(
     env: &Env,
 ) -> Result<bool, CommitError> {
     let store = erased(env);
-    let catalog = archive.index();
-    let left = TreeHistory::from_root(catalog.clone(), ancestor.tree.hash(), store);
-    let right = TreeHistory::from_root(catalog, of.tree.hash(), store);
+    let subject = Subject::from(archive.subject().clone());
+    let left = TreeHistory::from_root(subject.clone(), ancestor.tree.hash(), store);
+    let right = TreeHistory::from_root(subject, of.tree.hash(), store);
     let met = common_ancestor(&ancestor.version(), &of.version(), &Both(&right, &left)).await?;
     Ok(met == Some(ancestor.version()))
 }
@@ -595,9 +598,9 @@ async fn replay<Env: TreeEnv>(
     env: &Env,
 ) -> Result<Changes, CommitError> {
     let store = erased(env);
-    let catalog = archive.index();
-    let mine = TreeHistory::from_root(catalog.clone(), ours.tree.hash(), store);
-    let theirs = TreeHistory::from_root(catalog, onto.tree.hash(), store);
+    let subject = Subject::from(archive.subject().clone());
+    let mine = TreeHistory::from_root(subject.clone(), ours.tree.hash(), store);
+    let theirs = TreeHistory::from_root(subject, onto.tree.hash(), store);
     let novel = novelty(&ours.version(), &mine, &theirs).await?;
     // What our revisions did to each cell: the values asserted and
     // retracted, and whether a write succeeded the cell's claims.

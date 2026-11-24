@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### Every identity generation a release computed is named, and the current one is a constant
 
+[#859](https://github.com/dialog-db/dialog-db/pull/859).
+
 `dialog_query::migration` now says, for attributes, concepts and rules,
 which identity each release computed and what it hashed, and exports a
 function for each generation an embedder can reproduce, named by its
@@ -57,6 +59,104 @@ had no way to tell that they had moved, nor a name for each generation
 it had to compute the old identity in. A test now pins this
 generation's identities beside the constant, so moving one means bumping
 it.
+
+### A tree names the subject whose nodes it reads, and holds no reader
+
+[#785](https://github.com/dialog-db/dialog-db/pull/785),
+[design/tree-node-reads.md](./design/tree-node-reads.md), a follow-up to
+[#755](https://github.com/dialog-db/dialog-db/pull/755); the
+[journal](./design/tree-node-reads/journal.md) records the two decisions
+and the inventory behind them.
+
+A tree is a root and a `Reading`: the subject whose nodes it reads, the
+priority its hydrations rank at, and whether it reads only this replica.
+Every operation is handed the environment it reads through and performs
+`nodes::Read` and `nodes::Preload` on it; nothing in the tree crate keeps
+an environment. The node requests name a subject instead of a catalog,
+and which block catalog a node is kept in, when it is kept as a block, is
+the translation layer's business.
+
+What this changes for you:
+
+- `Accessor` is gone. `Reading` carries the subject (`Reading { subject,
+  priority, local }`, `Reading::new(subject)`, `.ranked(priority)`,
+  `.locally()`), builds the requests (`read(&hash)`, `preload(&hash)`), and
+  reads a node a tree links to with `node(env, &hash)`, where absence is
+  an error. `Accessor::new(env, &catalog).get_node(&hash)` becomes
+  `tree.reading().node(env, &hash)`, or `Reading::new(subject).node(env,
+  &hash)`; a forced local read becomes `nodes::Read::new(subject,
+  hash).locally().perform(env)`.
+- The free `dialog_search_tree::load_node(env, &catalog, &hash)` is gone:
+  `nodes::Read::new(subject, hash).perform(env)` is the same read, `None`
+  for a node nobody can reach.
+- `nodes::Read`, `nodes::Preload` and `nodes::Write` carry `subject:
+  Subject` where they carried `catalog: CatalogScope`, and their `new`
+  takes the subject. `Read::load()` still hands the translation layer the
+  block load, in the subject's index catalog, and
+  `dialog_search_tree::nodes::blocks_of(&subject)` names that catalog for
+  a store that answers the node requests over blocks of its own, as the
+  single-file archive (`dialog-chronicle`) does.
+- The trees take a `Subject` where they took a `CatalogScope`:
+  `PersistentTree::empty_in`, `empty_with_manifest` and `at`,
+  `TransientTree::new`, `empty_with_manifest`, `with_manifest` and
+  `stitch`, `HitchhikerTree::empty`, and above them
+  `TreeHistory::from_root` and `empty` and
+  `dialog_corpus::tree::distribution::capture`. `catalog()` is
+  `subject()` on each tree and on `CorpusWriter`;
+  `PersistentTree::reading()` returns `&Reading`, and `TransientTree`
+  has one too.
+- An edit reads as the tree it was opened from, and the tree it persists
+  reads that way too. `tree.locally().edit()` reads only this replica and
+  fails with `DialogSearchTreeError::Node` on a node it lacks instead of
+  hydrating it; `tree.ranked(priority).edit()` ranks its hydrations at
+  that priority; `HitchhikerTree::open` inherits the same way. Before,
+  every edit read on demand and could hydrate, and the tree it persisted
+  read on demand whatever it was opened from.
+- For tests, `dialog_search_tree::helpers::test_subject()` names the test
+  trees' subject and `Blocks::subject()` a block store's;
+  `test_catalog()` is the block catalog beneath them.
+
+Nothing a replica stores or syncs changes: a node is still kept as a block
+in its subject's `index` catalog, and no data is rewritten.
+
+Why: after #755 the `Accessor` no longer owned the cache, and what was
+left bundled an environment with a catalog and a reading policy, which
+put a storage handle back into the tree's vocabulary and gave callers
+outside the crate a second way to read a node. The catalog name was
+always `index`, so the part of it that mattered was the subject; an
+environment serving several subjects (a peer, a query over lines of
+several repositories, a push reading one tree locally and forwarding
+another's blocks) routes, caches and hydrates by it. The edit's reading
+policy was dropped by accident, so a local tree could hydrate the nodes
+its edit rewrote.
+
+### A standing fold steps a group's value instead of folding the group again
+
+[#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is
+`design/fold-maintenance/design-fold-state.md` (#837), approach 2.
+
+`Branch::subscribe_fold` folded a group again over all its kept input rows
+whenever one of them moved: one to-do changed among 10,000 in one list cost
+the 10,000. Where every entry of the fold is `count`, `count-distinct`,
+`sum`, `min` or `max`, a group that has moved once now keeps a running value
+(`dialog_query::reduce::Running`): a count, an integer sum, the chosen
+extreme, or for `count-distinct` each distinct value with the number of rows
+holding it. A poll takes the rows it added and took away into it. A group is
+still folded again where a running value cannot be exact: a float sum, the
+last row holding a `min` or `max` taken away, a value that does not order, a
+moved group row, a group of no input rows or of two group rows, and `avg`.
+`last` and `top` are evaluated afresh as before.
+
+What this changes for you:
+
+- Nothing in the answers: every row and every delta is the one folding the
+  group again gives. This changes what a poll costs, not what it reports.
+- `FoldSubscription::refolds` counts fewer groups; `FoldSubscription::steps`
+  is new and counts the groups given by their running value.
+- New: `Reduce::runs` and `Running` in `dialog_query::reduce`.
+
+Why: a view keeps a count on a fold, and a change to one row has to cost
+that row, not the group it is in.
 
 ### A rule that holds a pattern is stored, in rule body format 5
 
@@ -833,7 +933,7 @@ and names the rule.
   induction writes can differ: the firings 0.5.0 missed happen from
   the first commit after the upgrade, and are not replayed for commits
   made before it. An embedder runs nothing.
-- A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
+- A rule an older release stored spells its attributes under picks (0.2.0 to 0.5.0) or under the older `cardinality` (0.1.0), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
   so every such rule is inert: it derives nothing, fires at no commit,

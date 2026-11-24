@@ -51,9 +51,9 @@ Three layers:
 
   | request | means | replaced |
   |---|---|---|
-  | `Read { catalog, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local`; a node the environment holds is answered at once (`Resume::now`) | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed, `Accessor::cached` |
-  | `Preload { catalog, name, priority }` | make this node cheap to read soon; returns nothing | `Accessor::warm`, `Accessor::keeps` |
-  | `Write { catalog, nodes }` | the nodes a persist made; the provider stores them and keeps them readable | the `NodeCache::of(..).insert` in persist, `Import` and `forget` in `archive::persist` |
+  | `Read { subject, name, priority, local }` | the node a name names, from anywhere (may hydrate), or from this replica only when `local`; a node the environment holds is answered at once (`Resume::now`) | `Accessor::load_node` / `get_node`, the free `load_node`, `Reading { local: true }` (`Load::locally`), the `Get` a difference's boundary side performed, `Accessor::cached` |
+  | `Preload { subject, name, priority }` | make this node cheap to read soon; returns nothing | `Accessor::warm`, `Accessor::keeps` |
+  | `Write { subject, nodes }` | the nodes a persist made; the provider stores them and keeps them readable | the `NodeCache::of(..).insert` in persist, `Import` and `forget` in `archive::persist` |
 
   A request is written at the node it is about (`Read<N>` for an
   `N: nodes::Node`, a sealed trait `PersistentNode<Key, Value>`
@@ -70,7 +70,7 @@ Three layers:
 `Volatile`, `FileSystem` and `IndexedDb` through the translation layer, in
 `dialog-search-tree` (the orphan rule allows it: the request type is the
 tree crate's). `Space` hands a request to its archive; `Storage` routes it
-to the space the catalog's subject is mounted as. A store with its own node
+to the space its subject is mounted as. A store with its own node
 form (the single file) implements the three commands itself, and the rest of
 the chain reaches it unchanged. This settles the plan's open question of how
 a node request reaches such a store: through the storage, as every other
@@ -84,7 +84,7 @@ An environment above the storage adds what the store cannot: the peer
 its storage, else hydrated through its `Hydrate` from the subject's routes,
 and keeps what it read (`dialog_repository::read_node_or_hydrate`,
 `preload_node_or_hydrate`, `write_nodes`). The query session (`QueryEnv`)
-tries each line's catalog in turn for a read against the wildcard subject,
+tries each line's subject in turn for a read against the wildcard subject,
 and no longer fills the cache itself. A batch's `DeltaOverlay` answers a
 read of a node the batch sealed and has not flushed with the staged node,
 decoding nothing. Test and measuring environments (`Counting`, `Metered`,
@@ -227,6 +227,24 @@ blocks or hold routes; those were not pruned.
 in tree code, the `Holds` bound on tree code, `Node::into_link`'s cache
 argument, and `archive::persist`'s `forget`. `NodeCache::of` stays as the
 environment's way to find its own cache.
+
+### 9. After #755: no reader, and a subject where the catalog was
+
+A follow-up the maintainer agreed to, built on #755's head; the journal's
+2026-11-10 entry has the inventory and the reasons.
+
+- `Accessor` and the free `load_node` are gone. `Reading` carries the
+  subject with the priority and locality, builds the requests, and reads a
+  linked node with `Reading::node`, where absence is an error. Operations
+  take the environment and the reading as two parameters.
+- The requests name a `Subject`, not a `CatalogScope`; the block catalog
+  is named only in the translation layer, as the subject's index. The
+  trees carry the subject inside their `Reading`.
+- An edit reads as the tree it was opened from, and the tree it persists
+  reads that way too.
+- Environments stay subject-agnostic (option b): the peer, the storage and
+  the query session answer several subjects through one environment, and a
+  subject-scoped environment would still need this request beneath it.
 
 ## How it was checked
 
