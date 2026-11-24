@@ -19,11 +19,11 @@ The branch was moved onto the engine as it will land: `feat/patterns` (#778) mer
 - Cardinality: a line's `cardinality:` reaches the attribute as written, a line with none reads every claim, an elector in a head, `status: (top ?s)`, or on a line, `is: (top ?s)`, is the field's pick, a variant's cases are listed. No `Pick` is left.
 - The driver, `dialog_notation::live`: `Live::select` and `Live::render` ask once through a query layer; `Live::standing` and `Live::watch` subscribe, with each read the engine folds on `Branch::subscribe_fold`.
 - A collecting read of one variable or one entry is lowered to the engine's `Fold` where its shape allows, and a view's count of what its own markup collects is kept on it. `Aggregator::Distinct` is added to `dialog-query` for it, in two commits that touch nothing else, so it can go to main on its own.
-- Tests: lib 123, `notation.rs` 44, `query.rs` 23, `view.rs` 14, all passing since format 5 (`feat/rule-format-5` at `1b62eb7`) was merged in.
+- Tests: lib 123, `notation.rs` 44, `query.rs` 23, `view.rs` 14, all passing since format 5 (#853) is on main and merged in.
 
 ## In the way
 
-1. Format 5 is merged in from `feat/rule-format-5`, not yet on main. A query whose row has more than one column beside its entity concludes it by a map pattern, so it is kept current only with format 5: 14 of 31 layers of the views in the sketches and tests, and every layer nested two levels deep.
+1. Format 5 is on main (#853). A query whose row has more than one column beside its entity concludes it by a map pattern, so it is kept current only with format 5: 14 of 31 layers of the views in the sketches and tests, and every layer nested two levels deep.
 2. The cost ([journal](journal.md), 2026-11-24, two entries): `Maintainer::apply` is flat since it keeps each parent's instances in order, and a view's count is folded alone. On the branch with format 5 in ([output](rounds/cost-2026-11-24-branch.txt)):
 
 | one change, `Live::watch` | N=1000 | N=10000 | times plain at 1000 | at 10000 | before the fixes, 1000 / 10000 |
@@ -54,7 +54,7 @@ The branch was moved onto the engine as it will land: `feat/patterns` (#778) mer
 ## Other pull requests
 
 - #778 (`feat/patterns`) is landing on main; once it has, main is merged here and not `feat/patterns`.
-- #799 is being ported onto #778 as format 5, `feat/rule-format-5`.
+- #853, format 5, is on main; main is merged in at `2b12204`.
 - tonk-labs/tonk#1338: the notation in tonk, pinned to a revision older than all of the above.
 
 ## To build here
