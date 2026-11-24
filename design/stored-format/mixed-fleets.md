@@ -1,6 +1,9 @@
 # Two replicas of one space on two releases
 
 O is a replica on 0.5.0, the latest tag. N is one on the next release.
+v0.3.0 to v0.5.0 are one identity generation (C, [inventory](inventory.md)),
+so O stands for any of them, and for any tonk client from v0.7.0-rc.1
+on: they all compute the same identities.
 Both sync one space. What each reads, fires and writes, and the three
 hazards the brief named: a rule firing twice, a rule retracted under a
 replica that still needs it, a rule coming back after a retraction.

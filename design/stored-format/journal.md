@@ -209,3 +209,17 @@ gate before any format change; the fence is set last in one publish that
 carries the embedder's reinstall, its rekey and `upgrade_rules`; a tree
 with no rules is fenced at its first write; a pull rewrites rules that
 arrive after the fence (U3 closed).
+
+## 2026-11-24, Directing: identity generations corrected
+
+**Learned.** From the step 1 worker, partly checked here: identities come
+in four generations, A (v0.1.0), B (v0.2.0), C (v0.3.0 to v0.5.0) and D
+(main). `_v0` is A, not 0.2 as the inventory and `migration.rs`'s doc
+said; B is reproduced by nothing, and no tonk space was written by it.
+v0.3.0 to v0.5.0 being one generation means every O device computes the
+same identities, which the mixed-fleet note now says.
+
+**Decided.** By the maintainer for step 1, relayed: generation numbers
+follow the existing names (0 = A, 1 = C, 2 = main), B documented and not
+exported, no rule function for C, `_v2` wrappers for the current one.
+Inventory corrected; nothing else in the plan changes.
