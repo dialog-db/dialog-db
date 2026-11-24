@@ -71,7 +71,7 @@
         "aggregate": {
           "type": "string",
           "enum": ["last", "max", "min", "top"],
-          "description": "The selective aggregator the field reads one of its relation's claims per entity with: 'last' the newest, 'max' the greatest value, 'min' the least, 'top' the value listed last in the attribute's listed `as`, which ranks its values least first. 'max', 'min' and 'top' read a cardinality-many attribute; 'top' needs a listed `as`. Declaring one changes the concept's identity."
+          "description": "The selective aggregator the field reads one of its relation's claims per entity with: 'last' the newest, 'max' the greatest value, 'min' the least. A listed `as` is a scale written least first: over it 'max' reads the value listed last and 'min' the value listed first, and a value the list does not hold loses to every listed one. 'max' and 'min' read a cardinality-many attribute, and need a listed `as` or a type with an order. 'top' is deprecated and goes in the next version: it reads the first listed value present, which is 'min' over the same list; a list written least first is read with 'max'. Declaring one changes the concept's identity."
         }
       },
       "required": [

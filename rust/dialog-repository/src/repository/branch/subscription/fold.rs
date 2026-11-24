@@ -55,14 +55,15 @@
 //! with the number of rows holding it, no more entries than the group
 //! has input rows.
 //!
-//! A fold with an entry that orders by standing (`last`, `top`; see
-//! [`Aggregator::orders_by_standing`]) is not folded again from the
+//! A fold with an entry that orders by standing (`last`, `top`, and
+//! `max` or `min` over a listing; see
+//! [`ReduceEntry::orders_by_standing`]) is not folded again from the
 //! rows kept here, which carry no standing: a poll in which a row of
 //! either query moved evaluates the whole fold afresh, as a `select`
 //! does, and reports how its rows differ from the ones last reported.
 //! Each such evaluation counts as a recompute.
 //!
-//! [`Aggregator::orders_by_standing`]: dialog_query::reduce::Aggregator::orders_by_standing
+//! [`ReduceEntry::orders_by_standing`]: dialog_query::reduce::ReduceEntry::orders_by_standing
 //!
 //! An inner subscription reports a row once, however many derivations
 //! it has, so the rows kept here are a set: a query whose evaluation
@@ -83,7 +84,7 @@ use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Application;
-use dialog_query::reduce::{Reduce, Running};
+use dialog_query::reduce::{Reduce, ReduceEntry, Running};
 use dialog_query::selection::Match;
 use dialog_query::{Conclusion, Fold, FoldConclusion};
 use dialog_search_tree::nodes;
@@ -193,7 +194,7 @@ impl<G: Application, Q: Application> FoldSubscription<G, Q> {
             .reduce()
             .entries
             .iter()
-            .any(|entry| entry.aggregator.orders_by_standing());
+            .any(ReduceEntry::orders_by_standing);
         let runs = !afresh && fold.reduce().runs();
         Self {
             fold,

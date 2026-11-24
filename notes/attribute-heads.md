@@ -19,9 +19,13 @@
 > attribute is a relation, a type and a **cardinality**: under one a
 > read returns the cell's newest claim (what `last` read) and a write
 > succeeds it, under many a read returns every claim (what `all` read)
-> and a write adds one. A read under `top`, `max` or `min` is now a
-> concept field with that `pick` over a cardinality-many attribute, a
-> listed `as` ranking its values best first; a chain of
+> and a write adds one. A read under `max` or `min` is now a concept
+> field with that `pick` over a cardinality-many attribute, a listed
+> `as` a scale written least first that both rank by; `top`, the first
+> listed value present, is deprecated (it is `min` over the same list).
+> Every such read compares all of a cell's claims: none stops early at
+> a listed value, and the early stop this note describes for listed
+> relations went with them. A chain of
 > relations is a rule deriving one relation from each (see
 > [`aggregation.md`](./aggregation.md#selective-aggregators-on-concept-fields)). Where this note speaks of
 > a choosing pick, read cardinality one; of `all`, cardinality many. Its

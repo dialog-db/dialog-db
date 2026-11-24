@@ -78,7 +78,8 @@ pub struct ConceptFieldDescriptor {
 pub const FIELD_PICK_REFUSED: &str = "a field's `pick` is `last`, `all`, `max`, `min` or \
      `top`: `last` reads the newest claim of a cardinality-one attribute, `all` every claim \
      of a cardinality-many one, and `max`, `min` and `top` one claim of a cardinality-many \
-     one, `top` ranking the values `as` lists best first";
+     one, ranking the values `as` lists least first where it lists any: `top` reads the \
+     first listed, as `min` does";
 
 /// A field's `pick` as its wire form spells it.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,6 +89,8 @@ enum PickName {
     All,
     Max,
     Min,
+    /// Deprecated, and gone in the next version: `min` over the same
+    /// list reads the same claim. Still read, and written back as read.
     Top,
 }
 
@@ -279,10 +282,12 @@ impl ConceptFieldDescriptor {
     /// This field reading its claim with `pick`. A ranking pick (`max`,
     /// `min`, `top`) reads a cardinality-many attribute, whose cell
     /// keeps every claim to rank; `top` ranks by the values the
-    /// attribute lists, best first; `max` and `min` need a comparable
-    /// type; and a keyed collection, whose entries are each their own
-    /// claim, picks nothing. `last` over a cardinality-one attribute is
-    /// what the field reads anyway, so it declares nothing.
+    /// attribute lists, reading the first; `max` and `min` rank by that
+    /// listing, least first, where there is one, and need a comparable
+    /// type where there is none; and a keyed collection, whose entries
+    /// are each their own claim, picks nothing. `last` over a
+    /// cardinality-one attribute is what the field reads anyway, so it
+    /// declares nothing.
     pub fn picking(mut self, pick: Selective) -> Result<Self, TypeError> {
         self.aggregate = Some(pick);
         self.check_aggregate()?;
@@ -330,12 +335,15 @@ impl ConceptFieldDescriptor {
                 "`top` ranks by the values the attribute's `as` lists, and it lists none",
             );
         }
-        if aggregate.compares()
+        if aggregate.compares(self.descriptor.among())
             && self
                 .content_type()
                 .is_some_and(|kind| !Primitive::COMPARABLE.contains(kind))
         {
-            return refuse("`max` and `min` compare values, and the attribute's type has no order");
+            return refuse(
+                "`max` and `min` compare values where the attribute lists none, and its type \
+                 has no order",
+            );
         }
         Ok(())
     }

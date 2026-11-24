@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### `max` and `min` over a listed type rank by the listing, least first
+
+[#858](https://github.com/dialog-db/dialog-db/pull/858).
+
+A listed `as` is a scale written least first, `[low, medium, high]`. A
+concept field picking `max` over an attribute that lists its values now
+reads the claim holding the last listed value present, and `min` the
+first, whatever the values' own order; before, both compared the values,
+so listed symbols ranked by their bytes. A value the listing does not
+hold loses to every listed one, claims holding one value fall to the
+newest, and a cell holding no listed value reads its newest claim, as
+under `top`. Over an attribute that lists nothing, `max` and `min` are
+unchanged. `top` reads as it did: the first listed value present, which
+is now also what `min` reads.
+
+What this changes for you:
+
+- A field with `pick: max` or `pick: min` over a listed attribute reads
+  a different claim wherever the listing's order and the values' order
+  disagree: over `[low, medium, high]`, `max` reads `high` where it read
+  `medium`, and `min` reads `low` where it read `high`. A subscription or
+  a rule reading such a field follows.
+- `max` and `min` over a listing are accepted whatever the listed values'
+  type: `TypeError::SelectiveAggregate`'s "type has no order" refusal
+  applies only to an attribute that lists nothing.
+- `Selective::compares` takes the listing (`compares(listed)`) and is
+  false for `max` and `min` over one.
+- Deprecated: `pick: top` (`Selective::Top`). It reads the first listed
+  value present, which is `min` over the same list; a list written least
+  first is read with `max`. It is still read and keeps its identity, is
+  marked deprecated in `notes/notation/schema.json`, and goes in the next
+  version.
+- Removed: `Selective::bounds`, which nothing called.
+- `ReduceEntry::try_listed` builds an entry ranking by a listing, and
+  `ReduceEntry::orders_by_standing` says whether a fold over it is
+  evaluated afresh: true for a `max` or `min` over a listing, as for
+  `top`.
+
+Why: a list written top to bottom read as "best first" only for `top`,
+and `max` over the same list, the reading a scale invites, ranked by
+bytes nobody chose. A listing written least first gives `max` and `min`
+the order its author wrote.
+
 ### A tree names the subject whose nodes it reads, and holds no reader
 
 [#785](https://github.com/dialog-db/dialog-db/pull/785),
@@ -475,6 +518,15 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- `max` and `min` over a listed type: nothing stored is rewritten and no
+  identity moves, an attribute's, a concept's or a rule's: a stored list
+  keeps its order and `top` keeps its name. What a stored concept field
+  with `pick: max` or `pick: min` over a listed attribute reads changes,
+  as above. An older release reading the same descriptor ranks by value.
+  A stored field with `pick: top` reads as before; `top` is deprecated
+  and goes in the next version, so such a field is to be rewritten as
+  `min` over the same list, which changes that concept's identity.
+  Nothing is rewritten automatically. An embedder runs nothing.
 - Rule body format 5: what a replica holds is unchanged. A rule that
   holds no pattern is written in format 4 as before, under the entity it
   had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`

@@ -428,9 +428,9 @@ pub fn analyze_with(
             None => spec.of.kind(),
         }
         .unwrap_or_else(|| Kind::from(Primitive::ALL));
-        let mut entry = ReduceEntry::try_new(field.clone(), spec.apply, spec.of, &input_type)
-            .map_err(|error| AnalysisError::Reduce(Box::new(error)))?;
-        entry.listed = spec.listed;
+        let entry =
+            ReduceEntry::try_listed(field.clone(), spec.apply, spec.of, spec.listed, &input_type)
+                .map_err(|error| AnalysisError::Reduce(Box::new(error)))?;
         let output = entry
             .output_type(&input_type)
             .expect("a checked entry has an output type by construction");
