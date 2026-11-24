@@ -632,4 +632,62 @@ mod safety {
             assert!(read(text).is_ok(), "{text}: {:?}", read(text));
         }
     }
+
+    /// What the third review got past the denylist: an element outside
+    /// the table of HTML elements a view may make (svg, math, every
+    /// animation element, anything unlisted), a namespaced attribute
+    /// written with `/`, `xml/base`, and the URL attributes of older
+    /// HTML. One case each.
+    #[test]
+    fn it_refuses_what_got_past_the_list_of_elements() {
+        for (text, part) in [
+            (
+                "[:svg [:a [:set {:attributeName \"href\" :to ?url}]]]",
+                "svg",
+            ),
+            (
+                "[:svg [:animate {:attributeName \"href\" :values ?url}]]",
+                "svg",
+            ),
+            ("[:div [:set {:attributeName \"href\" :to ?url}]]", "set"),
+            (
+                "[:div [:animate {:attributeName \"href\" :values ?url}]]",
+                "animate",
+            ),
+            ("[:math [:mi ?x]]", "math"),
+            ("[:marquee ?x]", "marquee"),
+            ("[:template [:p ?x]]", "template"),
+            ("[:font-face]", "font-face"),
+            ("[:a {:xlink/href ?u}]", "xlink/href"),
+            ("[:a {:xml/base ?u}]", "xml/base"),
+            ("[:a {:xml/base \"https://example.org/\"}]", "xml/base"),
+            ("[:img {:lowsrc ?u}]", "lowsrc"),
+            ("[:img {:dynsrc ?u}]", "dynsrc"),
+            ("[:img {:longdesc ?u}]", "longdesc"),
+            ("[:img {:usemap ?u}]", "usemap"),
+            ("[:div {:codebase ?u}]", "codebase"),
+            ("[:div {:classid ?u}]", "classid"),
+            ("[:div {:profile ?u}]", "profile"),
+            ("[:div {:archive ?u}]", "archive"),
+            ("[:a {:xlink/onclick \"x\"}]", "xlink/onclick"),
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Unsafe(said)) if said.contains(part)),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        // The elements the fixtures and tonk's tour make, custom ones
+        // among them.
+        for text in [
+            "[:div [:section [:article [:h2 ?t] [:p ?x] [:ul [:li [:span ?s]]] [:ol [:li ?y]]]]]",
+            "[:a {:href [\"/n/\" ?n]} [:img {:src [\"/i/\" ?n] :alt ?t}]]",
+            "[:form [:button {:on/click (todo/add text: ?t)} \"Add\"]]",
+            "[:table [:tr [:td ?x]]]",
+            "[:video {:poster [\"/p/\" ?n]}]",
+            "[:tonk-notebook [:notebook-save] [:view-source ?s] [:tonk-table] [:tonk-notebook-index]]",
+        ] {
+            assert!(read(text).is_ok(), "{text}: {:?}", read(text));
+        }
+    }
 }
