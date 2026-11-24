@@ -2842,14 +2842,12 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
 /// Whether `branch`'s replica holds, without asking any remote, the leaf a
 /// lookup of `head`'s own revision record starts at: the leaf a commit on
 /// `head` reads to carry the skip links along.
-async fn holds_the_leaf_of_its_record<Env>(
+async fn holds_the_leaf_of_its_record(
     branch: &Branch,
     head: &Revision,
-    env: &Env,
-) -> Result<bool>
-where
-    Env: Provider<nodes::Read<CorpusNode>> + dialog_common::ConditionalSync,
-{
+    env: &Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+) -> Result<bool> {
+    use dialog_corpus::tree::CorpusNode;
     use dialog_corpus::{
         AttributeKey, AttributeKeyPart, EntityKeyPart, KeyViewConstruct, KeyViewMut as _, Relation,
         history::REVISION_ATTRIBUTE,
@@ -2862,7 +2860,7 @@ where
         .set_entity(EntityKeyPart::from(&head.version().entity()))
         .into_key();
     let reading = Reading::new(branch.subject()).locally();
-    let mut at = NodeHash::from(*head.tree.hash());
+    let mut at = dialog_common::Blake3Hash::from(*head.tree.hash());
     loop {
         let Some(node) = reading.read::<CorpusNode>(&at).perform(env).await? else {
             return Ok(false);
