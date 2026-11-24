@@ -68,3 +68,16 @@ is [#831](https://github.com/dialog-db/dialog-db/pull/831)).
 - `results/2026-11-16/`: every report behind the journal's numbers:
   `answers/` (one sweep, each dataset and variant), `tonk-bench/`,
   `browser.json`, and the charts and `charts.md` drawn from them.
+
+## `research/benchmark-dataset/`
+
+`se-transform.py`, which turns an extracted Stack Exchange site dump into
+the transaction-ordered fact log the SE replay benchmarks read
+(`txn,at,the,of,as,is`, rows sharing a `txn` one commit; the format is
+`notes/benchmark-dataset.md` on `main`). It was `scripts/se-transform.py`
+on `main` (added in #715, last in the tree of `v0.5.0`), moved here
+unchanged:
+
+```sh
+python3 research/benchmark-dataset/se-transform.py <extracted-dump-dir> <output.csv> [--limit N]
+```
