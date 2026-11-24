@@ -259,14 +259,10 @@ impl Expander {
             return Err(asks(tree));
         };
         // A domain or a stored attribute is read, not defined.
-        let stored = match Kind::of(name) {
-            Kind::Domain | Kind::Entity | Kind::Operator => true,
-            Kind::Attribute => name
-                .split_once('/')
-                .is_some_and(|(domain, _)| domain.contains('.')),
-            Kind::Name => false,
-        };
-        if stored || !operand.terms.contains_key("is") {
+        if name.contains('.') {
+            return Err(crate::syntax::undeclarable(head, "query", name));
+        }
+        if !crate::syntax::declarable(name) || !operand.terms.contains_key("is") {
             return Err(asks(tree));
         }
         let name = name.to_string();

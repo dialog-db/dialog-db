@@ -1649,16 +1649,14 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
-            // A name with a `.` is a domain, read directly, and a
-            // concept's name has none: that is how the two are told apart
-            // (the maintainer, 2026-11-24).
-            if Kind::of(&declared.name) == Kind::Domain {
-                return Err(Error::Refused(format!(
-                    "{pattern} declares a concept named `{}`, which is a domain's name: a \
-                     name with a `.` is a domain, read directly, and a concept's name has none, \
-                     `todo` or `notebook/blocks`; that is how the two are told apart",
-                    declared.name
-                )));
+            // A name with a `.` is stored, read directly, and a
+            // concept's or a command's name has none.
+            if !syntax::declarable(&declared.name) {
+                let what = match items(&pattern).is_empty() {
+                    true => "command",
+                    false => "concept",
+                };
+                return Err(syntax::undeclarable(&pattern, what, &declared.name));
             }
             // A name rules of an earlier document read or concluded as
             // a derived attribute stays one: those rules are installed,
@@ -2309,7 +2307,7 @@ impl Expander {
             if !declared
                 && let Some(word) = word
                     .as_deref()
-                    .filter(|word| Kind::of(word) == Kind::Attribute)
+                    .filter(|word| Kind::of(word) == Kind::Attribute && syntax::declarable(word))
             {
                 self.misread.push((self.tree, word.to_string()));
                 if let Some((concept, _)) = word.split_once('/')
@@ -2318,11 +2316,28 @@ impl Expander {
                     self.misread.push((self.tree, concept.to_string()));
                 }
             }
+            // A derived attribute is named as a concept is, with no `.`:
+            // `my/list.count` under the concept `my` would be a stored
+            // name.
+            if !declared
+                && let Some(word) = word.as_deref().filter(|word| {
+                    Kind::of(word) == Kind::Attribute
+                        && !syntax::declarable(word)
+                        && word
+                            .split_once('/')
+                            .is_some_and(|(concept, _)| self.concepts.contains(concept))
+                })
+            {
+                let word = word.to_string();
+                return self.about(&tree, |_| {
+                    Err(syntax::undeclarable(&tree, "derived attribute", &word))
+                });
+            }
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
             if !declared
                 && let Some((concept, name)) = word.as_deref().and_then(|word| {
-                    (Kind::of(word) == Kind::Attribute)
+                    (Kind::of(word) == Kind::Attribute && syntax::declarable(word))
                         .then(|| word.split_once('/'))
                         .flatten()
                 })

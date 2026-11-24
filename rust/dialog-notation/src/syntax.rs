@@ -170,6 +170,26 @@ pub fn unwritten(name: &str) -> bool {
     name.contains('[')
 }
 
+/// Whether `name` may be declared: the name of a concept, a query or a
+/// command, `todo` or `notebook/blocks`. One with a `.` anywhere is a
+/// domain, `xyz.todo`, or an attribute in one, `xyz.todo/text`, read
+/// directly; that is how the two are told apart (the maintainer,
+/// 2026-11-24). Every place that decides whether a name is declared or
+/// stored asks this.
+pub fn declarable(name: &str) -> bool {
+    !name.contains('.') && matches!(Kind::of(name), Kind::Name | Kind::Attribute)
+}
+
+/// The refusal of `form`, which declares `name` as `what` though it
+/// cannot be declared.
+pub fn undeclarable(form: &dyn std::fmt::Display, what: &str, name: &str) -> Error {
+    Error::Refused(format!(
+        "{form} declares a {what} named `{name}`, which is a stored name: a name with a `.` is a \
+         domain or an attribute in one, read directly, and the name of a concept, a query or a \
+         command has none, `todo` or `notebook/blocks`; that is how the two are told apart"
+    ))
+}
+
 /// The variable the notation names `name` with `tag`: `x[3]`.
 pub fn tagged(name: &str, tag: &str) -> String {
     format!("{name}[{tag}]")

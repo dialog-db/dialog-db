@@ -735,9 +735,9 @@ mod tests {
                 "(rule (syntax (concept (?name ?t is: ?x) \
                  (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one))) \
                  (expand (memo-kind ?name)))",
-                "(memo-kind xyz.memo/note)",
-                "(rule (xyz.out ?t v: ?x) (xyz.memo/note ?t is: ?x))",
-                "(select (xyz.memo/note ?t is: ?x))",
+                "(memo-kind memo/note)",
+                "(rule (xyz.out ?t v: ?x) (memo/note ?t is: ?x))",
+                "(select (memo/note ?t is: ?x))",
             ],
             // An attribute named under a concept a macro's expansion
             // declares.
@@ -745,8 +745,8 @@ mod tests {
                 "(rule (syntax (concept (?name ?t name: ?x) \
                  (xyz.list/name of: ?t is: ?x as: :text cardinality: :one))) \
                  (expand (list-kind ?name)))",
-                "(list-kind xyz.list)",
-                "(rule (xyz.out ?t v: ?x) (xyz.list/count ?t ?x))",
+                "(list-kind list)",
+                "(rule (xyz.out ?t v: ?x) (list/count ?t ?x))",
             ],
             // Two concepts of one name and other labels: an entry field
             // under one, a plain field under the other.
@@ -1265,11 +1265,9 @@ mod tests {
     }
 
     /// The names the notation makes from what a document writes are one
-    /// name for one input. A derived attribute's relation is its
-    /// concept's name, a dot, and the attribute's: a concept named as a
-    /// domain, `my.list`, is refused, so a concept's name holds no dot and
-    /// `my/list.count` derives the one name `my.list.count` that no other
-    /// accepted concept and attribute spell. A head's key of an entry, `entry/key`,
+    /// name for one input. A concept named with a dot, `my.list`, is
+    /// refused, and so is a derived attribute, `my/list.count`: neither
+    /// is declared with a `.`, so no two declared names hash alike. A head's key of an entry, `entry/key`,
     /// is refused where a field of the same head is named so.
     #[test]
     fn it_refuses_two_inputs_that_would_make_one_name() -> Result<(), Error> {
@@ -1290,14 +1288,13 @@ mod tests {
             &format!("{my} (rule (my/list.count ?l ?n) (my ?l name: ?n))"),
         );
         assert!(
-            checked.refusals().next().is_none(),
+            checked.refusals().any(|refused| matches!(&refused.refusal,
+                Some(Error::Refused(why)) if why.contains("`my/list.count`") && why.contains("has none"))),
             "{:?}",
             checked.diagnostics
         );
-        let said = format!("{:?}", checked.steps);
+        // What the dotted forms would spell alike is two names.
         let named = crate::syntax::derived("my", "list.count")?;
-        assert!(said.contains(&format!("{named}/is")), "{said}");
-        // What the dotted form spelled alike is two names now.
         assert_ne!(named, crate::syntax::derived("my.list", "count")?);
         assert_ne!(
             crate::syntax::derived("a", "b.c")?,

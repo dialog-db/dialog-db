@@ -1282,15 +1282,12 @@ async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<
     let kind = "(rule (syntax (concept (?name ?t is: ?x)
                   (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one)))
                 (expand (memo-kind ?name)))";
-    let rule = "(rule (xyz.out ?t v: ?x) (xyz.memo/note ?t is: ?x))";
-    let declare = "(memo-kind xyz.memo/note)";
+    let rule = "(rule (xyz.out ?t v: ?x) (memo/note ?t is: ?x))";
+    let declare = "(memo-kind memo/note)";
     let open = || async {
         let mut notebook = Notebook::open().await?;
         notebook
-            .submit(
-                r#"(assert (xyz.memo/note x:2 is: "an attribute of that name"))
-                   (assert (xyz.memo/text x:1 is: "the concept's"))"#,
-            )
+            .submit(r#"(assert (xyz.memo/text x:1 is: "the concept's"))"#)
             .await?;
         anyhow::Ok(notebook)
     };
@@ -1301,7 +1298,7 @@ async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<
         .map_err(|error| error.downcast::<Error>());
     assert!(
         matches!(&refused, Err(Ok(Error::Refused(why)))
-            if why.contains("xyz.memo/note") && why.contains("declare")),
+            if why.contains("memo/note") && why.contains("declare")),
         "{refused:?}"
     );
     assert!(
@@ -1327,24 +1324,33 @@ async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> R
     let kind = "(rule (syntax (concept (?name ?t name: ?x)
                   (xyz.list/name of: ?t is: ?x as: :text cardinality: :one)))
                 (expand (list-kind ?name)))";
-    let rule = "(rule (xyz.out ?t v: ?x) (xyz.list/count ?t ?x))";
-    let declare = "(list-kind xyz.list)";
+    let rule = "(rule (xyz.out ?t v: ?x) (list/count ?t ?x))";
+    let declare = "(list-kind list)";
     let open = || async {
         let mut notebook = Notebook::open().await?;
-        notebook
-            .submit(r#"(assert (xyz.list/count x:1 is: "raw"))"#)
-            .await?;
         anyhow::Ok(notebook)
     };
+    // Read first, it read the stored `list/count`: refused by the
+    // mechanism this is about, saying to declare the concept above.
     let mut notebook = open().await?;
     let refused = notebook
         .submit(&[kind, rule, declare].join("\n"))
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("xyz.list")),
+        matches!(&refused, Err(Ok(Error::Refused(why)))
+            if why.contains("`list`") && why.contains("declare the concept above")),
         "{refused:?}"
     );
+    assert!(
+        report(&mut notebook, "(select (xyz.out ?t v: ?x))")
+            .await?
+            .is_empty()
+    );
+    // Declared above, it is the concept's derived attribute, which no
+    // rule concludes: the stored value is not read.
+    let mut notebook = open().await?;
+    notebook.submit(&[kind, declare, rule].join("\n")).await?;
     assert!(
         report(&mut notebook, "(select (xyz.out ?t v: ?x))")
             .await?
