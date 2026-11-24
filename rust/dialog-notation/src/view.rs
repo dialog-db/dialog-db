@@ -581,4 +581,33 @@ mod safety {
             assert!(read(text).is_ok(), "{text}: {:?}", read(text));
         }
     }
+
+    /// A `srcset` is a list of URLs, each after a comma, so a value
+    /// written anywhere in it could start one: it is refused whenever a
+    /// variable is written into it, and a constant keeps the check of its
+    /// start. A fixed start that is a path, a query or a fragment
+    /// settles that no scheme follows.
+    #[test]
+    fn it_refuses_a_srcset_a_value_is_written_into() {
+        for text in [
+            "[:img {:srcset [\"/a.png 1x, \" ?url]}]",
+            "[:img {:srcset [\"/image/\" ?n \" 1x\"]}]",
+            "[:img {:srcset \"javascript:go() 1x\"}]",
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Unsafe(said)) if said.contains("srcset")),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        for text in [
+            "[:img {:srcset \"/a.png 1x, /b.png 2x\"}]",
+            "[:a {:href [\"/notebook/\" ?n]}]",
+            "[:a {:href [\"#\" ?id]}]",
+            "[:a {:href [\"?page=\" ?n]}]",
+            "[:img {:src [\"/image/\" ?n]}]",
+        ] {
+            assert!(read(text).is_ok(), "{text}: {:?}", read(text));
+        }
+    }
 }
