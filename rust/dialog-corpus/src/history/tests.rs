@@ -2608,3 +2608,114 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
 
     Ok(())
 }
+
+/// A record buffered on the route to its slot that does not verify does not
+/// stand in for the record: the reader falls back to the walk, which finds
+/// the valid one in the leaf the replica holds, past the failing candidate.
+///
+/// A revision's record is read from a buffer above the leaf when one there
+/// verifies, so a record minted a moment ago is read without the leaf. A
+/// candidate there that fails verification (a hostile peer can plant a
+/// second, garbage-signed record at a genuine slot) must not end the read.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_reads_past_a_buffered_record_that_does_not_verify() -> Result<()> {
+    use base58::ToBase58 as _;
+    use dialog_search_tree::{HitchhikerTree, NoveltyOp};
+    use ed25519_dalek::Signer as _;
+
+    let store = Blocks::new();
+    let key = signing_key(7);
+    let did_key = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+    let signed_for = |branch: Entity| -> Result<RevisionRecord> {
+        let mut record = RevisionRecord {
+            format: super::REVISION_RECORD_FORMAT,
+            branch,
+            issuer: did_key.clone(),
+            authority: "did:web:example.com".to_string(),
+            parents: Vec::new(),
+            skips: Vec::new(),
+            signature: Vec::new(),
+        };
+        record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
+        Ok(record)
+    };
+
+    // Enough records that the tree's root is an index, with buffers, and
+    // the valid one among them, in a leaf.
+    let signed = signed_for(Entity::new()?)?;
+    let mut tree = Corpus::empty_in(test_subject());
+    let mut delta = ArchiveDelta::zero();
+    let manifest = dialog_search_tree::Manifest::default();
+    tree.record(&store, &mut delta, signed.entries(&manifest)?)
+        .await?;
+    for _ in 0..2000 {
+        tree.record(
+            &store,
+            &mut delta,
+            signed_for(Entity::new()?)?.entries(&manifest)?,
+        )
+        .await?;
+    }
+    delta.flush_into(&store);
+
+    // A candidate at the same slot that does not verify, in a buffer on
+    // the route to it.
+    let forged = RevisionRecord {
+        signature: vec![0; 64],
+        ..signed.clone()
+    };
+    assert_eq!(forged.version(), signed.version(), "the same slot");
+    let mut buffered = HitchhikerTree::open(&tree).with_op_buf_size(64);
+    for (entry, state) in forged.entries(&manifest)?.entries {
+        buffered = buffered.insert(entry, state, &store).await?;
+    }
+    let mut delta = dialog_search_tree::Delta::zero();
+    let root = buffered.persist(&mut delta)?;
+    store.flush(&mut delta);
+    let tree = Corpus::at(test_subject(), root);
+
+    let version = signed.version();
+    let (start, end) = {
+        use crate::{
+            AttributeKey, AttributeKeyPart, EntityKeyPart, Key, KeyViewConstruct, KeyViewMut as _,
+        };
+        let the = Relation::from_str(super::REVISION_ATTRIBUTE)?;
+        let of = version.entity();
+        (
+            <AttributeKey<Key> as KeyViewConstruct>::min()
+                .set_attribute(AttributeKeyPart::from(&the))
+                .set_entity(EntityKeyPart::from(&of))
+                .into_key(),
+            <AttributeKey<Key> as KeyViewConstruct>::max()
+                .set_attribute(AttributeKeyPart::from(&the))
+                .set_entity(EntityKeyPart::from(&of))
+                .into_key(),
+        )
+    };
+    let mut buffered = 0;
+    tree.first_buffered(&start, &end, &store, |_, op| {
+        if matches!(op, NoveltyOp::Assert(_)) {
+            buffered += 1;
+        }
+        None::<()>
+    })
+    .await?;
+    assert_eq!(
+        buffered, 1,
+        "the fixture's layout moved: the failing candidate, and it alone, \
+         is buffered on the route to the slot"
+    );
+
+    let history = TreeHistory::new(tree, store);
+    assert_eq!(
+        history.revision_record(&version).await?,
+        Some(signed),
+        "the valid record in the leaf is read past the failing candidate"
+    );
+    Ok(())
+}

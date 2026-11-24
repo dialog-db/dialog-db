@@ -12,9 +12,11 @@ use crate::Value;
 use crate::tree::CorpusExt as _;
 use crate::tree::{Corpus, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache};
 use crate::{
-    DialogCorpusError, Entity, Key, Relation, State, history_claim_range, history_key_version,
+    AttributeKey, AttributeKeyPart, DialogCorpusError, Entity, EntityKeyPart, Fact, Key,
+    KeyViewConstruct, KeyViewMut as _, Relation, State, history_claim_range, history_key_version,
     history_region_range, history_version_range,
 };
+use dialog_search_tree::NoveltyOp;
 
 use super::{Claim, History, REVISION_ATTRIBUTE, Record, RevisionRecord, Version};
 
@@ -107,6 +109,49 @@ where
     /// store keeps.
     pub fn from_root(subject: Subject, root: &Blake3Hash, store: S) -> Self {
         Self::new(Corpus::at(subject, NodeHash::from(*root)), store)
+    }
+
+    /// The record of `version` among the ops still buffered on the route
+    /// to it, when one there verifies: read from what this replica holds,
+    /// never from a leaf ([`PersistentTree::first_buffered`]).
+    ///
+    /// Only the newest buffered op of each key is considered, so a record
+    /// a newer op retracted is not found here. A candidate that does not
+    /// verify, or whose value spilled out of its key and would need a load
+    /// to read, is passed over, and the walk to the leaf decides.
+    ///
+    /// [`PersistentTree::first_buffered`]: dialog_search_tree::PersistentTree::first_buffered
+    async fn buffered_record(
+        &self,
+        version: &Version,
+    ) -> Result<Option<RevisionRecord>, DialogCorpusError> {
+        let the = Relation::from_str(REVISION_ATTRIBUTE)?;
+        let of = version.entity();
+        let start = <AttributeKey<Key> as KeyViewConstruct>::min()
+            .set_attribute(AttributeKeyPart::from(&the))
+            .set_entity(EntityKeyPart::from(&of))
+            .into_key();
+        let end = <AttributeKey<Key> as KeyViewConstruct>::max()
+            .set_attribute(AttributeKeyPart::from(&the))
+            .set_entity(EntityKeyPart::from(&of))
+            .into_key();
+        let found = self
+            .tree
+            .first_buffered(&start, &end, &self.storage, |key, op| {
+                let NoveltyOp::Assert(State::Added(datum)) = op else {
+                    return None;
+                };
+                let fact =
+                    Fact::from_key_datum_with_value(&Key::from(key.to_vec()), &datum, None).ok()?;
+                let Value::Record(bytes) = &fact.is else {
+                    return None;
+                };
+                let record = RevisionRecord::try_from_bytes(bytes).ok()?;
+                record.verify(version).ok()?;
+                Some(record)
+            })
+            .await?;
+        Ok(found)
     }
 
     /// Attach a shared verified-record memo (see the `records` field).
@@ -268,6 +313,17 @@ where
             .get_or_fetch::<_, DialogCorpusError>(version, async |_| Ok(None))
             .await?
         {
+            return Ok(Some(record));
+        }
+
+        // A record minted a moment ago rides a buffer on the route to its
+        // key, above a leaf this replica may never have read: a commit
+        // writes its record there, and only a flush pushes it down into a
+        // leaf (which the flush then holds). One there that verifies is
+        // the record of this version, since two valid records cannot share
+        // one, so the leaf need not be read.
+        if let Some(record) = self.buffered_record(version).await? {
+            self.records.insert(*version, record.clone());
             return Ok(Some(record));
         }
 

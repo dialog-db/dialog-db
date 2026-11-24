@@ -47,7 +47,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Load as BlobLoad, Read as BlobRead};
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::nodes;
+use dialog_search_tree::{NoveltyOp, nodes};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use parking_lot::RwLock;
 
@@ -212,6 +212,11 @@ pub(crate) async fn revision_of(
     // or the `did:key:z6Mk` name an older release wrote. Read the
     // pointer's own name first, then the other.
     let current = Version::current_of(&pointed.revision);
+    if let Some(current) = &current
+        && let Some(record) = buffered_record(archive, pointed, &the, current, store).await?
+    {
+        return revision_from(record, pointed);
+    }
     let mut records = cell(archive, &pointed.tree, &the, &pointed.revision, store).await?;
     if records.is_empty() {
         let other = match &current {
@@ -234,24 +239,79 @@ pub(crate) async fn revision_of(
         if !named || record.verify(&version).is_err() {
             continue;
         }
-        let issuer: Did = record.issuer.parse().map_err(|_| {
-            CommitError::Induction(format!("revision {version} names an issuer that is no DID"))
-        })?;
-        return Ok(Revision {
-            branch: record.branch.clone(),
-            issuer,
-            tree: pointed.tree.clone(),
-            edition: record.edition(),
-            context: None,
-            region: true,
-            count: None,
-            signature: Vec::new(),
-        });
+        return revision_from(record, pointed);
     }
     Err(CommitError::Induction(format!(
         "the tree {:?} holds no record of the revision {} the primary points at",
         pointed.tree, pointed.revision
     )))
+}
+
+/// The revision `pointed` names, from `record`, its verified record.
+fn revision_from(record: RevisionRecord, pointed: &Pointed) -> Result<Revision, CommitError> {
+    let version = record.version();
+    let issuer: Did = record.issuer.parse().map_err(|_| {
+        CommitError::Induction(format!("revision {version} names an issuer that is no DID"))
+    })?;
+    Ok(Revision {
+        edition: record.edition(),
+        branch: record.branch,
+        issuer,
+        tree: pointed.tree.clone(),
+        context: None,
+        region: true,
+        count: None,
+        signature: Vec::new(),
+    })
+}
+
+/// The record of the revision named `entity`, among the ops still
+/// buffered on the route to it in `pointed`'s tree, when one there
+/// verifies: read from what this replica holds, never from a leaf
+/// ([`first_buffered`](dialog_search_tree::PersistentTree::first_buffered)).
+///
+/// A write into a layer records its revision into a buffer of the layer's
+/// tree, above a leaf the replica may never have read, so reading back
+/// the revision it wrote would otherwise wait on that leaf. One there that
+/// verifies, under the name the pointer gives, is that revision's record,
+/// since two valid records cannot share a version. Anything else (a
+/// record a newer op retracted, one that does not verify, one whose value
+/// spilled out of its key) is left to the walk.
+async fn buffered_record(
+    archive: &ArchiveScope,
+    pointed: &Pointed,
+    the: &Relation,
+    entity: &Entity,
+    store: &dyn TreeEnv,
+) -> Result<Option<RevisionRecord>, DialogCorpusError> {
+    let tree = Index::at(
+        Subject::from(archive.subject().clone()),
+        NodeHash::from(*pointed.tree.hash()),
+    );
+    let start = <AttributeKey<Key> as dialog_corpus::KeyViewConstruct>::min()
+        .set_attribute(AttributeKeyPart::from(the))
+        .set_entity(EntityKeyPart::from(entity))
+        .into_key();
+    let end = <AttributeKey<Key> as dialog_corpus::KeyViewConstruct>::max()
+        .set_attribute(AttributeKeyPart::from(the))
+        .set_entity(EntityKeyPart::from(entity))
+        .into_key();
+    let storage = store;
+    Ok(tree
+        .first_buffered(&start, &end, &storage, |key, op| {
+            let NoveltyOp::Assert(State::Added(datum)) = op else {
+                return None;
+            };
+            let fact =
+                Fact::from_key_datum_with_value(&Key::from(key.to_vec()), &datum, None).ok()?;
+            let Value::Record(bytes) = fact.is else {
+                return None;
+            };
+            let record = RevisionRecord::try_from_bytes(&bytes).ok()?;
+            let version = record.version();
+            (version.entity() == *entity && record.verify(&version).is_ok()).then_some(record)
+        })
+        .await?)
 }
 
 /// Where a stack's durable layers stand, as last read from the primary:
