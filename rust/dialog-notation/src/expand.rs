@@ -103,6 +103,10 @@ pub const ONCE: &str = "once";
 /// The words that make a rule's head a write or an answer.
 const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
 
+/// How many times one form may be rewritten on its way to the kernel,
+/// counted along the path from the top-level form.
+pub(crate) const STEPS: usize = 64;
+
 /// What the two writes were called while a mark told what is kept from
 /// what holds one round. Unrefused, either would be read as a name that
 /// nothing gives a meaning, and said to be unknown.
@@ -1892,6 +1896,93 @@ mod tests {
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
         Ok(kernel.iter().map(Syntax::to_string).collect())
+    }
+
+    /// What a document expands to, or its refusal, given a few
+    /// seconds: an expansion that never ends fails the test instead of
+    /// hanging it.
+    fn expanded_soon(setup: &str, text: &str) -> Result<Vec<String>, Error> {
+        let (sent, received) = std::sync::mpsc::channel();
+        let (setup, written) = (setup.to_string(), text.to_string());
+        std::thread::spawn(move || {
+            let _ = sent.send(expanded(&setup, &written));
+        });
+        received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| Err(Error::Refused(format!("{text} did not finish expanding"))))
+    }
+
+    /// A definition that expands a form to itself again, directly or
+    /// through others, is refused naming the form and the definitions on
+    /// the way; one that grows the form each time, or names its own
+    /// variable anew each time, is refused past the expander's bounds.
+    /// A chain of definitions under the bound expands.
+    #[test]
+    fn it_refuses_an_expansion_that_never_ends() {
+        let cycles = [
+            (
+                "(rule (syntax (loop ?x)) (expand (loop ?x)))",
+                "(rule (xyz.out ?a) (loop ?a))",
+                1,
+            ),
+            (
+                "(rule (syntax (pong ?x)) (expand (ping ?x))) (rule (syntax (ping ?x)) (expand (pong ?x)))",
+                "(rule (xyz.out ?a) (ping ?a))",
+                2,
+            ),
+            (
+                "(rule (syntax (all (echo ?x) (xyz.a ?x))) (expand (echo ?x)))",
+                "(rule (xyz.out ?a) (echo ?a))",
+                1,
+            ),
+            ("(rule (syntax (again)) (expand (again)))", "(again)", 1),
+        ];
+        for (setup, text, through) in cycles {
+            match expanded_soon(setup, text) {
+                Err(Error::Cycle(form, definitions)) => {
+                    assert!(!form.is_empty(), "{text}");
+                    assert_eq!(definitions.len(), through, "{text}: {definitions:?}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let endless = [
+            (
+                "(rule (syntax (spin ?y)) (expand (spin ?x)))",
+                "(rule (xyz.out ?a) (spin ?a))",
+                "steps",
+            ),
+            (
+                "(rule (syntax (grow (w ?x))) (expand (grow ?x)))",
+                "(rule (xyz.out ?a) (grow ?a))",
+                "steps",
+            ),
+            (
+                "(rule (syntax (twice [?x ?x])) (expand (twice ?x)))",
+                "(rule (xyz.out ?a) (twice ?a))",
+                "parts",
+            ),
+        ];
+        for (setup, text, bound) in endless {
+            match expanded_soon(setup, text) {
+                Err(Error::Endless(_, past, definitions)) => {
+                    assert!(past.contains(bound), "{text}: {past}");
+                    assert!(!definitions.is_empty(), "{text}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        // A chain as long as the bound allows, ending in a read.
+        let chain: String = (1..STEPS)
+            .map(|at| format!("(rule (syntax (step{} ?x)) (expand (step{at} ?x)))", at + 1))
+            .chain([format!(
+                "(rule (syntax (xyz.a ?x)) (expand (step{STEPS} ?x)))"
+            )])
+            .collect();
+        assert_eq!(
+            expanded_soon(&chain, "(rule (xyz.out ?a) (step1 ?a))").unwrap(),
+            vec!["(rule (xyz.out ?a) (xyz.a ?a))"]
+        );
     }
 
     /// The variables a template names for itself at two sites of one

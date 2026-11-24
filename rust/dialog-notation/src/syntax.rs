@@ -483,6 +483,38 @@ impl Syntax {
         }
     }
 
+    /// How deep the tree nests and how many parts it has, itself among
+    /// them: what an expansion is bounded by. A leaf is 0 deep. It walks
+    /// the tree without recursing, so a tree of any depth is measured.
+    pub(crate) fn extent(&self) -> (usize, usize) {
+        let mut deepest = 0;
+        let mut parts = 0;
+        let mut open = vec![(self, 0)];
+        while let Some((tree, depth)) = open.pop() {
+            parts += 1;
+            deepest = deepest.max(depth);
+            match tree {
+                Syntax::Application(operator, operand) => {
+                    open.push((operator, depth + 1));
+                    open.extend(operand.items.iter().map(|item| (item, depth + 1)));
+                    open.extend(operand.terms.values().map(|term| (term, depth + 1)));
+                }
+                Syntax::Map(entries) => {
+                    for (key, value) in entries {
+                        open.push((key, depth + 1));
+                        open.push((value, depth + 1));
+                    }
+                }
+                Syntax::Tuple(items) => open.extend(items.iter().map(|item| (item, depth + 1))),
+                Syntax::Variable(_)
+                | Syntax::Blank
+                | Syntax::Constant(_)
+                | Syntax::Reference(_) => {}
+            }
+        }
+        (deepest, parts)
+    }
+
     /// What names the tree: the reference of the value it is kept as.
     /// Two forms that say one thing have one reference, whatever order
     /// their labels were written in, and no layout has a part in it.

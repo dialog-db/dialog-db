@@ -107,4 +107,12 @@ pub enum Error {
     /// A kernel form has no counterpart in Dialog-DB yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// A form expands to itself again, through the definitions named,
+    /// each by its pattern: its expansion would never end.
+    #[error("{form} expands to itself again, through {through}", form = .0, through = .1.join(", then "))]
+    Cycle(String, Vec<String>),
+    /// A form is still expanding past a bound the expander keeps, the
+    /// second part, through the definitions named, each by its pattern.
+    #[error("{form} is still expanding past {past}, through {through}", form = .0, past = .1, through = .2.join(", then "))]
+    Endless(String, String, Vec<String>),
 }
