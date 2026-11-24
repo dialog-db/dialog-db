@@ -94,6 +94,12 @@ What this changes for you:
   fixed text does not settle as `http`, `https` or `mailto`. It is no
   sanitizer: a back end still escapes every text and attribute value it
   serialises.
+- A set, `{: "errand" : "home"}`, is a value: an answer that holds one
+  reads back from its text and `Syntax::value` keeps it in the order of
+  its members, refusing a member twice. A set whose members are not all
+  constants, `{: ?a : 5}`, is refused with `Error::Unsupported` where it
+  would be matched or written, since a stored set is a list matched in
+  order.
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).

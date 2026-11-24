@@ -412,17 +412,32 @@ impl Syntax {
                     // entries are pairs. They are kept in the order of
                     // their keys and not as written, since a struct
                     // says the same in any order, and a key twice is
-                    // refused here as it would be in a map.
+                    // refused here as it would be in a map. A set's
+                    // keys are all the empty label: it is kept in the
+                    // order of its members, and a member twice is
+                    // refused.
                     {
+                        let set = crate::select::is_set(self);
                         let mut pairs = entries
                             .iter()
                             .map(|(key, value)| Ok((key.value()?, value.value()?)))
                             .collect::<Result<Vec<_>, Error>>()?;
-                        pairs.sort_by_key(|(key, _)| key.to_bytes());
-                        if let Some(pair) = pairs.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-                            let twice = Syntax::try_from(&pair[0].0)?;
+                        pairs.sort_by(|(a, x), (b, y)| {
+                            a.to_bytes()
+                                .cmp(&b.to_bytes())
+                                .then_with(|| x.to_bytes().cmp(&y.to_bytes()))
+                        });
+                        let same = |pair: &[(Value, Value)]| {
+                            pair[0].0 == pair[1].0 && (!set || pair[0].1 == pair[1].1)
+                        };
+                        if let Some(pair) = pairs.windows(2).find(|pair| same(pair)) {
+                            let (what, twice) = if set {
+                                ("member", Syntax::try_from(&pair[0].1)?)
+                            } else {
+                                ("key", Syntax::try_from(&pair[0].0)?)
+                            };
                             return Err(Error::Refused(format!(
-                                "{self} says the key {twice} twice"
+                                "{self} says the {what} {twice} twice"
                             )));
                         }
                         data::list(

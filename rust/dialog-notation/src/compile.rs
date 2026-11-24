@@ -772,16 +772,25 @@ fn shape(
             Syntax::Blank => name(None).into(),
             Syntax::Constant(value) => value.clone().into(),
             // A set, a map with no names, is kept in a record as a list:
-            // its members in the order of their values, each once.
+            // its members in the order of their values, each once. A
+            // list is matched member by member, in order, and a set has
+            // none, so a set of anything but constants is refused: it
+            // would be matched against one order of what is stored and
+            // miss every other.
             Syntax::Map(entries) if crate::select::is_set(node) => {
                 let mut members: Vec<&Syntax> = entries.iter().map(|(_, member)| member).collect();
-                if members
+                if let Some(member) = members
                     .iter()
-                    .all(|member| matches!(member, Syntax::Constant(_)))
+                    .find(|member| !matches!(member, Syntax::Constant(_)))
                 {
-                    members.sort_by(|a, b| crate::select::order(a, b));
-                    members.dedup();
+                    return Err(Error::Unsupported(format!(
+                        "{node}: a set whose member {member} is not a constant: a stored set is \
+                         a list in the order of its members, and a pattern over it would match \
+                         one order of them"
+                    )));
                 }
+                members.sort_by(|a, b| crate::select::order(a, b));
+                members.dedup();
                 ListPattern::new(
                     members
                         .into_iter()

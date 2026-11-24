@@ -167,7 +167,10 @@ async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
         let value = read[0]
             .value()
             .map_err(|error| anyhow::anyhow!("{answer}: {error}"))?;
-        assert_eq!(Syntax::try_from(&value)?, read[0], "{answer}");
+        // A map is kept in the order of its keys and a set in the order
+        // of its members, not as written: what is read back of the value
+        // says the same, and makes the same value.
+        assert_eq!(Syntax::try_from(&value)?.value()?, value, "{answer}");
     }
     // A set has no order and holds a member once.
     assert_eq!(
@@ -180,6 +183,40 @@ async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
     ));
     // The empty set and the empty map read back as one tree.
     assert_eq!(parse("{}")?, parse("{}")?);
+    Ok(())
+}
+
+/// A set of constants is stored as the list of its members in order,
+/// and is found whatever order it is written in. A set with a variable
+/// among its members is refused where it would be matched or written:
+/// a stored set is a list, matched member by member, and the pattern
+/// would match one order of what is stored and miss every other.
+#[dialog_common::test]
+async fn it_refuses_a_set_whose_members_are_not_constants() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(r#"(assert (xyz.s/v of: s:1 is: {: 5 : 1}))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.s/v of: ?e is: {: 1 : 5}))").await?,
+        vec!["(xyz.s s:1 v: [1 5])"]
+    );
+    for text in [
+        "(select (xyz.s/v of: ?e is: {: ?a : 5}))",
+        "(select (xyz.s/v of: ?e is: {: 5 : ?a}))",
+        "(rule (assert (xyz.s/w of: ?e is: ?a)) (xyz.s/v of: ?e is: {: ?a : 5}))",
+        "(rule (assert (xyz.s/w of: ?e is: {: ?a : 5})) (xyz.s/v of: ?e is: [?a 5]))",
+    ] {
+        assert!(
+            matches!(refused(&mut notebook, text).await, Error::Unsupported(why) if why.contains("not a constant")),
+            "{text}"
+        );
+    }
+    // Nothing was written by the refusals.
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.s/w of: ?e is: ?w))").await?,
+        Vec::<String>::new()
+    );
     Ok(())
 }
 
