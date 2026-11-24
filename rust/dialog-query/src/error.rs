@@ -303,13 +303,9 @@ pub enum TypeError {
     },
 
     /// A rule holds a pattern of a map or a list that a stored rule
-    /// body cannot hold. A map pattern is written with text keys (see
-    /// [`Pattern::unwritable`](crate::Pattern::unwritable)), so one with
-    /// another key, or with a key that reads as a variable, the rest or a
-    /// constant where a pattern is written, has no written form; and a
-    /// constant map or list inside a pattern is written as bytes a body
-    /// does not read back. The rule runs where it was built, and cannot
-    /// be installed.
+    /// body cannot hold: one with a constant map or list inside it, which
+    /// a body writes as bytes it does not read back. The rule runs where
+    /// it was built, and cannot be installed.
     #[error(
         "The rule holds the pattern {pattern} and cannot be stored in format {format} of a rule body: {reason}"
     )]

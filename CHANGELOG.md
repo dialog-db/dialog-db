@@ -23,18 +23,27 @@ A rule that holds a map or a list of terms ran only where it was built,
 in a query layer: the stored rule body had no way to write a pattern, so
 asserting one into a transaction or the session overlay was refused. Rule
 body format 5 writes one. Where a parameter holds a map or a list, the
-body writes it under the one key `match`, a map as a map and a list as a
-list, at any depth; `...` takes the rest of a map or the run of a list,
-and a constant inside is written under the name of its type:
+body writes it under the one key `match` as a composite value is written
+for a human reader: a map as its entries, each a pair of a key and a
+pattern, and a list as its items, with what takes the rest beside them
+under `...`. Inside a pattern a map or a list is `{"map": ..}` or
+`{"list": ..}` again, a key is any value a map holds as a key (text, a
+symbol, a number), and a constant is written under the name of its type.
+Every pattern has one encoding, its entries in the order the map holds
+them:
 
 ```json
-{ "match": { "title": { "?": { "name": "heading" } }, "...": { "?": {} } } }
-{ "match": [ { "?": { "name": "first" } }, { "...": { "?": { "name": "more" } } } ] }
+{ "match": { "map": [[{ "text:": "title" }, { "?": { "name": "heading" } }]], "...": { "?": {} } } }
+{ "match": { "list": [{ "?": { "name": "first" } }], "...": { "?": { "name": "more" } } } }
 ```
 
 A body is written in the lowest format that can say it: format 5 for a
 rule that holds a pattern, and format 4, byte for byte as before, for
-every other rule. A pattern rule is now installed like any rule: it
+every other rule. This departs from the stamping note of the earlier
+draft (#799), which wrote every body in the newest format: a rule of
+terms means what it did, so it keeps its bytes, an embedder's stored
+rules are not migrated a second time for patterns, and a rule already
+stored is still found and retracted by encoding it. A pattern rule is now installed like any rule: it
 commits, is read back from the branch, fires, replicates, and is held in
 the session overlay, so a subscription or a fold over the concept it
 concludes stays current. Rule identity does not move: a rule of terms
@@ -48,16 +57,13 @@ What this changes for you:
   `CommitError::Refused`, and `Ephemeral::apply` lands it where it
   returned `DialogCorpusError::Refused`.
 - Still refused, with `TypeError::UnstorablePattern`, which now carries a
-  `reason`: a rule whose map pattern names a key that is not text (a
-  symbol, as a record proper is keyed, a number, a boolean), or a text
-  key that reads as something else under `match` (`?`, `...`, the name of
-  a type such as `text:` or `composite:map`); and a rule holding a constant
-  map or list inside a pattern, which a body holds as bytes it does not
-  read back. `Pattern::unwritable` says why a pattern has no written form.
+  `reason`: a rule holding a constant map or list inside a pattern. A
+  composite is written in dag-cbor as its bytes, which a rule body's terms
+  are not read back from, so the rule would be stored and inert. A map
+  pattern keyed by any value is stored.
 - `Parameters` and `Pattern` serialize a map or a list of terms under
-  `match`, and read it back, in JSON and dag-cbor; a pattern with no written
-  form still fails to serialize, and so does a `Changes` that holds a
-  refusal. A `ConceptQuery` writes a name that holds a pattern as that
+  `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
+  a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
   pattern in its `where`, where it wrote the variable standing for the
   whole value, and reads it back: a negated premise keeps its pattern in
   the concept application, so a rule negating one was written without it.

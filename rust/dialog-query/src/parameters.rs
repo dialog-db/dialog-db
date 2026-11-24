@@ -91,8 +91,7 @@ impl Held {
 }
 
 /// Each name with what it holds: a term as a term is written, and a
-/// map or a list of terms as a [`Pattern`] is, under `match`. A pattern
-/// that has no written form ([`Pattern::unwritable`]) is refused.
+/// map or a list of terms as a [`Pattern`] is, under `match`.
 impl Serialize for Parameters {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.has_shapes() {

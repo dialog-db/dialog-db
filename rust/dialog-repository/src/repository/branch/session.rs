@@ -6022,17 +6022,23 @@ mod transient_pattern_tests {
         .expect("a concept")
     }
 
-    /// A rule whose map pattern is keyed by the symbol `note/title`,
-    /// which a stored body cannot write: a query layer holds it as it is.
+    /// A rule whose map pattern holds a constant map, which a stored
+    /// body writes as bytes it does not read back, so it has no body: a
+    /// query layer holds it as it is.
     fn heading_rule() -> Result<DeductiveRule> {
         let title: dialog_corpus::Relation = "note/title".parse()?;
+        let meta: dialog_corpus::Relation = "note/meta".parse()?;
+        let empty: Value = Composite::map(Vec::<(Value, Value)>::new())?.into();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.set(
             "payload".into(),
             Pattern::Map(
-                MapPattern::new([(Value::Symbol(title), Pattern::Term(Term::var("heading")))])?
-                    .with_rest(Term::<Any>::blank()),
+                MapPattern::new([
+                    (Value::Symbol(title), Pattern::Term(Term::var("heading"))),
+                    (Value::Symbol(meta), Pattern::Term(Term::Constant(empty))),
+                ])?
+                .with_rest(Term::<Any>::blank()),
             ),
         );
         let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
@@ -6058,6 +6064,10 @@ mod transient_pattern_tests {
             (
                 "note/done".parse::<dialog_corpus::Relation>()?,
                 Value::Boolean(false),
+            ),
+            (
+                "note/meta".parse::<dialog_corpus::Relation>()?,
+                Composite::map(Vec::<(Value, Value)>::new())?.into(),
             ),
         ])?;
         let milk: Entity = "id:milk".parse()?;
