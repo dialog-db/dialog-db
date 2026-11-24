@@ -14,174 +14,70 @@ says how to cut a release.
 
 ## Unreleased
 
-### The notation keeps a selection or a view current on a branch itself
-
-[#773](https://github.com/dialog-db/dialog-db/pull/773).
-
-`dialog_notation::live` is a driver: `Live::new(branch)` lays the rules
-a selection's or a view's queries read on the branch's session overlay,
-subscribes to each, polls them, and hands back the answers or the
-view's patches. A read Dialog-DB folds is a `FoldSubscription`, every
-other query a `Subscription`. It is behind the crate's `repository`
-feature, on by default; without it the crate does not depend on
-`dialog-repository`.
-
-What this changes for you:
-
-- New: `Live::select(&selection, env)`, the answers asked once, each
-  query with its rules laid for it alone; `Live::render(&plan, entity,
-  env)`, a view rendered once.
-- New: `Live::standing(selection)`, a `Standing` whose `poll(env)` gives
-  the answers again when a row moved, and `Live::watch(plan, entity)`, a
-  `Watched` whose `poll(env)` gives the view's patches, the first poll
-  each root inserted first. `recomputes()` on both says how often a query
-  was evaluated whole.
-- New: the `Reader` trait, the env a poll reads through, and `LiveError`.
-- A view's count of a read its own query collects, grouped by the entity
-  the query answers of, is kept by Dialog-DB: `Live::watch` subscribes
-  to the fold the selection's lowering gives that read
-  (`Plan::folds`, a `FoldedCount` each) in place of the count's layer,
-  and gives the `Maintainer` the counts, `Maintainer::apply_counted` with
-  `Counts`, and no row of that layer. The patches are those the layer's
-  rows give. A count of a query collected into the markup, of an entry,
-  or of a read the lowering leaves in memory is counted from its layer's
-  rows as before.
-- New: `Plan::folding`, `Count::whole`, `Selection::folded` (a
-  `FoldedPart` each), `Maintainer::given`, `Maintainer::rows`,
-  `Watched::maintainer` and `Watched::folded`.
-
-Why: each caller laid the rules, created and polled the subscriptions and
-fed the maintainer by hand, and the notation is the interface that knows
-which queries a selection or a view is made of.
-
-### A query can fold, and `distinct` gives the set of a group's values
+### Dialog-DB has a notation: concepts, rules, queries and views written as forms, in `dialog-notation`
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
-[design/named-fold/design-no-domain.md](./design/named-fold/design-no-domain.md),
-its "Inline" column.
+[design/macros/design-queries.md](./design/macros/design-queries.md) and
+[design/macros/slotting-cardinality.md](./design/macros/slotting-cardinality.md).
 
-`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
-folds the rows of `inputs` with a `Reduce`, one row for each row of
-`groups`, joined on the grouping fields of the `Reduce`. A group no input
-joins is folded over inputs all absent, so `count` gives 0 for it.
-`Aggregator::Distinct` gives the distinct present values of a group as a
-list in the order of their bytes, and the empty list over none. A fold is
-selected and subscribed to as any query is; it has no name and installs
-no rule, so an authored deductive rule still cannot fold.
+`dialog-notation` reads a Lisp-like notation and compiles it to
+Dialog-DB's own descriptors. A small kernel (`rule`, the application of
+a relation or a formula, and the writes) is all that is compiled; every
+other form is a macro written as a rule about syntax, in a prelude the
+crate reads. `(concept (todo ?t title: ?x) line…)` declares a concept, a
+line being one attribute: `(xyz.todo/title of: ?t is: ?x as: :text
+cardinality: :one)`. `(rule head premise…)` derives or writes.
+`(query (name ?e … is: ?answer) condition… (is ?answer shape))` defines
+a query that nests and collects, and `(view ?answer template)` in its
+body makes its answer markup. Asking is `(select …)`.
 
-What this changes for you:
-
-- New: `Fold`, `FoldConclusion` and `Aggregator::Distinct`, shown as
-  `distinct`, typed a record.
-- A match on `Aggregator` must name `Distinct`.
-- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
-  give a `FoldSubscription`, polled as a `Subscription` is and giving
-  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
-  two queries and the rows they report, and folds again in memory only the
-  groups a change moved a row of: a group whose row changed reports the
-  old row retracted and the new one asserted, and what it reports adds up
-  to what a select of the fold gives. Both inner subscriptions are polled
-  at one state of the branch.
-- `Branch::subscribe(fold)` still works, and still asks the whole fold
-  again on each poll that touches what it read.
-- New: `Application::bindings`, with a default of `None`: the bindings a
-  conclusion was realized from. Attribute queries, concept queries and
-  folds give them, and a `FoldSubscription` needs them of both its
-  queries; one over a query that gives none fails to poll.
-- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
-  (the fold of a set of groups, which a select and a `FoldSubscription`
-  both fold with) and `Reduce::fold_rows`.
-
-Why: a fold the notation asks for is Dialog-DB's to give, and a query
-that has no name cannot have a stored value read beside its own. Asked
-again whole, one changed fact cost a fold of every group (105 ms among
-1000 groups); kept, it costs the two inner polls and the one group.
-
-#### Compatibility and migration
-
-- Nothing stored or synced changes: a fold is a query asked in memory and
-  nothing of it is written. Nothing is rewritten on upgrade, and an older
-  release reads what this one writes.
-
-### A view is a query whose answer is markup, and the `(view concept :name …)` form is gone
-
-[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
-[design/macros/design-queries.md](./design/macros/design-queries.md).
-
-`(view ?x template)` in a query's body says its answer is markup. A query
-it collects, `(todo/chip ?t is: (collect ?chips))`, stands where its
-variable is put in the template, as children in the order of their keys.
-`(select …)` of such a query compiles to a `Plan` of layers, each a
-Dialog-DB query, and the `Maintainer` keeps it current from their rows as
-before.
+A query's reads run as Dialog-DB queries, each reporting its rows under
+the entity they are about. A read that collects one variable or one
+entry is folded by Dialog-DB's `Fold` where its shape allows; a collected
+call to another query, the shapes built in an answer and the joins
+between queries are put together by the crate from the rows. A view
+compiles to a `Plan` of layers, each one Dialog-DB query, and the
+`Maintainer` turns the rows that arrive and leave into patches of the
+rendered tree. `dialog_notation::live` keeps a selection or a view
+current on a branch: `Live::select` asks once, `Live::standing` and
+`Live::watch` subscribe and give the answers or the patches on each
+poll.
 
 What this changes for you:
 
-- `(view concept :name template condition…)`, its call
-  `(view concept :name of: …)` and `{:view …}` in a template are refused,
-  each with a message that names the query form.
-- `Plan::of` takes the analyzed `select.query` tree; `Plan::repeating`,
-  `Plan::single`, `Plan::called` and `Plan::source` are gone, and so are
-  `View`, `Call`, `Nested`, `Mount`, `Content::View`, `Patch::SetView` and
-  `Case`. `Plan::row` takes the layer.
-- `Declaration::View` is `Declaration::Query { description, name, markup }`.
-- A query named under a declared concept and defined by no document is
-  shown as its source, a `view-source` element.
-- A read of a collection written `key: ?k block: ?b` is no longer read as
-  the entry: write `block: {?k ?b}`.
+- A new crate, `dialog-notation`, with a `repository` feature, on by
+  default, that brings the driver (`live`) and depends on
+  `dialog-repository`. Without it the crate is the reader, the analyzer
+  and the compiler, and does not depend on the repository.
+- `Live::select(&selection, env)` gives the answers asked once and
+  `Live::render(&plan, entity, env)` a view rendered once, each query's
+  rule laid over a query layer for it alone. `Live::standing(selection)`
+  gives a `Standing` and `Live::watch(plan, entity)` a `Watched`, whose
+  `poll(env)` gives the answers again when a row moved, or the view's
+  patches; their rules are laid on the branch's session overlay, and
+  `recomputes()` says how often a query was evaluated whole. `Reader` is
+  the env a poll reads through, and `LiveError` what fails.
+- `check(analyzer, text)` gives, form by form, what a document compiles
+  to, its diagnostics, and its declarations as data
+  (`Declaration::Concept`, `Declaration::Query`).
+- A line's `cardinality:` is the attribute's; a line that says none
+  reads every claim. An elector in a concept's head, `status: (top
+  ?s)`, or on a line's value, `is: (top ?s)`, is the concept field's
+  `pick`; a variant's cases, `as: [:open :done]`, are the attribute's
+  listed values, best first. A listed `as:` with no elector chooses
+  nothing.
+- A view's `(count ?x)` of what its own markup collects is kept by
+  `Branch::subscribe_fold`.
+- Refused, each with what to write instead or why: a fold in a rule
+  that derives, a query applied by a rule or a concept, `collect` outside
+  a query, a query that calls itself, a retract of a command, and the
+  other forms listed by `Error::Unsupported`.
 
-Why: one form for what is asked and what is shown, and the empty case
-that the view form could not give, a to-do with no tag and a list with
-nothing on it, follows from `collect`.
-
-### The notation asks with `select`, and `query` defines a query that collects
-
-[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
-[design/macros/design-queries.md](./design/macros/design-queries.md).
-
-`dialog-notation` has a second layer above concepts and rules. `(query
-(todo/card ?t is: ?card) condition… (is ?card shape))` defines a query:
-a head like a concept's, its answer under `is:`, and conditions. A term
-of a read written `(collect ?x)` binds `?x` to the whole of that field,
-one row with a map, `{}` for none. Asking is `(select …)`.
-
-What this changes for you:
-
-- `(query condition…)` as a question is refused, with a message naming
-  `select`. Write `(select condition…)`.
-- A collection's field in a concept head is one entry, `block: {?k ?b}`.
-  A head that gives the key a field of its own, `key: ?k block: ?b`, is
-  refused.
-- `{: 1 : 2}` reads: a set is a map with no names. A record keeps it as a
-  list, its members in order, each once.
-- `collect` in a rule, a concept or a write, and a rule or concept that
-  applies a query, are refused.
-- `Step::Select` holds a `Selection`: the Dialog-DB queries to run, the
-  `Fold`s it asks Dialog-DB for (`Selection::folds`), and
-  `Selection::answer`, which puts their rows together.
-- A read that collects is folded by Dialog-DB where its read and the
-  conditions every answer needs are each one query: the whole of a
-  variable as its distinct values, and of an entry `{?k ?v}` as the
-  distinct records of the rows it was read from, counted by their keys.
-  A part read through several definitions is one query too: each
-  definition's rule derives the one relation the part is named by. What
-  is not folded is put together in memory from the rows: a collected
-  call, and a read that shares a term with the rest beside its entity
-  while more than one of its columns is not the entity.
-- New: `Selection::read`, which of `Selection::queries` the answers read;
-  a query only a fold reads may be given no rows.
-- Each query a selection runs reports its rows under the entity its
-  reads are about, each column a field `c0`, `c1` and on, and, where more
-  than one column is not that entity, the whole row as one record under
-  `row` too. A subscription of one is maintained for the entity whose
-  facts changed: a tag added to one to-do among 200 reads about 20 tree
-  nodes, as among 20, where a row reported under an entity made of its
-  values read 94 and took time that grew with the to-dos.
-
-Why: no Dialog-DB rule can state a fold, and a rule that reads one could
-feed itself. A query is read only by whoever asks and by another query,
-so it collects freely, and what it collects Dialog-DB folds where it can
-say it as a query.
+Why: a form costs a release when its meaning is in code. A notation
+whose forms are rules about syntax can grow without one, and the same
+text means the same to a person, an agent and a replica. Queries and
+views are the second layer because no rule may read a fold; the engine
+folds, and the notation evaluates only what the engine cannot yet state.
 
 ### A rule can name an entity it did not read
 
@@ -213,6 +109,25 @@ but the bindings can name it.
 Its two cells are a stand-in, and this entry is not to be released as it
 reads: the formula is to take one record once a rule can build one, and
 the entities it names will change with it.
+
+### A fold can give the set of a group's values
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773).
+
+`Aggregator::Distinct` folds a group to its distinct present values, a
+composite list in the order of their bytes, each value once; a group
+whose inputs are all absent gives the empty list. It is what a folding
+query (`Fold`, `Branch::subscribe_fold`) gives for the whole of a field.
+
+What this changes for you:
+
+- `dialog_query::reduce::Aggregator` has a `Distinct` case. A `match`
+  over it that lists every case needs one more arm.
+- No rule's `reduce` spells it: `"distinct"` does not deserialize as an
+  aggregator, as `top` does not.
+
+Why: #839 left it out because a list had no value to be on main; the
+composite value is that value now.
 
 ### A parameter can hold a pattern: a map or a list of terms, taken apart or built
 
@@ -788,6 +703,11 @@ and names the rule.
 
 ### Compatibility and migration
 
+- The notation stores nothing of its own: what it writes are concepts'
+  facts and rules in the formats this release writes. A rule that uses
+  the formula `entity/derive` is read by no older release, which does
+  not know the formula; nothing an older release wrote is rewritten.
+  `Aggregator::Distinct` is never stored. Nothing an embedder has to run.
 - Composites: nothing an existing space holds is rewritten or read
   differently, and opaque `record:` values keep their encoding and identity.
   No release up to and including 0.5.0 wrote a composite (the draft #812 was
