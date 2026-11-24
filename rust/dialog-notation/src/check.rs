@@ -631,6 +631,61 @@ mod tests {
         Ok(())
     }
 
+    /// A concept's lines are declared as the kernel reads them, however
+    /// their wrappers are written: a cardinality, `(:one (:text ?x))`,
+    /// an elector, a variant's cases and an entry of a collection each
+    /// give the line its type, its cardinality and its label, and the
+    /// value under them is what it is.
+    #[test]
+    fn it_declares_every_line_as_the_kernel_reads_it() -> Result<(), Error> {
+        let checked = check(
+            &mut Analyzer::new()?,
+            r#"(concept (todo ?t text: ?x state: ?s list: ?l)
+                 (xyz.todo ?t text: (:one (:text ?x))
+                              state: (:many (:among (:entity ?s) cases: [:open :done]))
+                              list: (:last (:entity ?l))))
+               (concept (account ?a status: (top ?s))
+                 (xyz.account/status of: ?a is: ?s as: [:suspended :active] cardinality: :many))"#,
+        );
+        assert!(
+            checked.refusals().next().is_none(),
+            "{:?}",
+            checked.diagnostics
+        );
+        let [Declaration::Concept(todo), Declaration::Concept(account)] =
+            checked.declarations.as_slice()
+        else {
+            panic!("two concepts: {:?}", checked.declarations);
+        };
+        let line = |concept: &crate::Concept, label: &str| {
+            concept
+                .lines
+                .iter()
+                .find(|line| line.label.as_deref() == Some(label))
+                .cloned()
+                .unwrap_or_else(|| panic!("a line labelled {label}: {:?}", concept.lines))
+        };
+        let text = line(todo, "text");
+        assert_eq!(text.is, Syntax::Variable("x".into()));
+        assert_eq!(text.kind.map(|kind| kind.to_string()), Some(":text".into()));
+        assert_eq!(text.cardinality.as_deref(), Some("one"));
+        assert!(text.descriptor.is_some());
+        let state = line(todo, "state");
+        assert_eq!(state.is, Syntax::Variable("s".into()));
+        assert_eq!(state.cardinality.as_deref(), Some("many"));
+        assert_eq!(
+            state.kind.map(|kind| kind.to_string()),
+            Some("[:open :done]".into())
+        );
+        let list = line(todo, "list");
+        assert_eq!(list.is, Syntax::Variable("l".into()));
+        assert_eq!(list.cardinality.as_deref(), Some("one"));
+        let status = line(account, "status");
+        assert_eq!(status.is, Syntax::Variable("s".into()));
+        assert_eq!(status.cardinality.as_deref(), Some("many"));
+        Ok(())
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the
