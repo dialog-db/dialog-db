@@ -256,7 +256,7 @@ impl Live {
             selection,
             feeds,
             folds,
-            polled: false,
+            moved: true,
         })
     }
 
@@ -293,6 +293,7 @@ impl Live {
         }
         Ok(Watched {
             delivered: vec![0; layers.len()],
+            taken: (0..layers.len()).map(|_| Taken::default()).collect(),
             maintainer,
             plan,
             entity,
@@ -312,6 +313,35 @@ fn applied<C: PartialEq>(rows: &mut Vec<C>, delta: Delta<C>) {
     rows.extend(delta.asserted);
 }
 
+/// `later`, a delta taken after `into`, added to it: a row one brought
+/// and the other took away is in neither.
+fn merged<C: PartialEq>(into: &mut Delta<C>, later: Delta<C>) {
+    for gone in later.retracted {
+        match into.asserted.iter().position(|row| *row == gone) {
+            Some(at) => {
+                into.asserted.swap_remove(at);
+            }
+            None => into.retracted.push(gone),
+        }
+    }
+    for come in later.asserted {
+        match into.retracted.iter().position(|row| *row == come) {
+            Some(at) => {
+                into.retracted.swap_remove(at);
+            }
+            None => into.asserted.push(come),
+        }
+    }
+}
+
+/// `delta` kept in `slot` until it is applied, after what is kept there.
+fn kept<C: PartialEq>(slot: &mut Option<Delta<C>>, delta: Delta<C>) {
+    match slot {
+        Some(into) => merged(into, delta),
+        None => *slot = Some(delta),
+    }
+}
+
 /// A selection kept current on a branch. Made by [`Live::standing`].
 pub struct Standing {
     selection: Selection,
@@ -324,7 +354,9 @@ pub struct Standing {
     folds: Vec<FoldSubscription<ConceptQuery, ConceptQuery>>,
     /// The rows each one has reported.
     folded: Vec<Vec<FoldConclusion>>,
-    polled: bool,
+    /// Whether rows moved since the answers were last given: kept across
+    /// a poll that failed, so the next one gives them.
+    moved: bool,
 }
 
 impl Standing {
@@ -362,24 +394,27 @@ impl Standing {
     /// Poll every subscription. `Ok(None)` when none reported a change
     /// since the last poll; otherwise the answers, put together from the
     /// rows every subscription has reported. The first poll gives them.
+    /// A poll that fails gives nothing, and the next that does not gives
+    /// the answers, whatever moved since they were last given.
     pub async fn poll<E: Reader>(&mut self, env: &E) -> Result<Option<Vec<Syntax>>, LiveError> {
-        let mut moved = !self.polled;
+        // A subscription's rows are kept as it reports them, and whether
+        // any moved is kept until the answers are given: a poll that
+        // fails part way leaves both for the next.
         for (feed, rows) in self.feeds.iter_mut().zip(&mut self.rows) {
             if let Some(feed) = feed
                 && let Some(delta) = feed.poll(env).await?
             {
-                moved = true;
+                self.moved = true;
                 applied(rows, delta);
             }
         }
         for (fold, rows) in self.folds.iter_mut().zip(&mut self.folded) {
             if let Some(delta) = fold.poll(env).await? {
-                moved = true;
+                self.moved = true;
                 applied(rows, delta);
             }
         }
-        self.polled = true;
-        if !moved {
+        if !self.moved {
             return Ok(None);
         }
         let results = self
@@ -400,7 +435,9 @@ impl Standing {
             .zip(&self.folded)
             .map(|(fold, rows)| rows.iter().map(|row| fold.values(row)).collect())
             .collect::<Vec<Vec<BTreeMap<String, Value>>>>();
-        Ok(Some(self.selection.answer(&results, &folded)?))
+        let answers = self.selection.answer(&results, &folded)?;
+        self.moved = false;
+        Ok(Some(answers))
     }
 }
 
@@ -421,7 +458,18 @@ pub struct Watched {
     maintainer: Maintainer,
     /// The rows each layer delivered at the last poll, come and gone.
     delivered: Vec<usize>,
+    /// What each layer's subscription reported and the tree has not
+    /// been given yet: a poll that fails part way keeps what it took
+    /// here, and the next gives it.
+    taken: Vec<Taken>,
     polled: bool,
+}
+
+/// What a layer's subscription reported, by its kind.
+#[derive(Default)]
+struct Taken {
+    rows: Option<Delta<ConceptConclusion>>,
+    counted: Option<Delta<FoldConclusion>>,
 }
 
 impl Watched {
@@ -474,22 +522,41 @@ impl Watched {
     /// Poll every layer and give the patches what came and went makes.
     /// The first poll gives first what stands with no row, each root
     /// inserted.
+    ///
+    /// A poll that fails gives nothing and loses nothing: what the layers
+    /// reported before it failed is given by the next poll that does not.
+    /// A row the plan cannot read fails every poll after it, and the view
+    /// is watched again.
     pub async fn poll<E: Reader>(&mut self, env: &E) -> Result<Vec<Patch>, LiveError> {
+        // Take what every layer reports first, keeping it: a layer that
+        // fails leaves what the others took for the next poll.
+        for (at, taken) in self.layers.iter_mut().zip(&mut self.taken) {
+            match at {
+                None => {}
+                Some(Feed::Counted(counted)) => {
+                    if let Some(delta) = counted.1.poll(env).await? {
+                        kept(&mut taken.counted, delta);
+                    }
+                }
+                Some(Feed::Rows(rows)) => {
+                    if let Some(delta) = rows.1.poll(env).await? {
+                        kept(&mut taken.rows, delta);
+                    }
+                }
+            }
+        }
+        // Then read it all as rows, and only once every row is read is
+        // anything let go of.
         let mut changes = Vec::new();
         let mut counts = Vec::new();
-        self.delivered.iter_mut().for_each(|rows| *rows = 0);
-        for (layer, at) in self.layers.iter_mut().enumerate() {
-            let (query, feed) = match at {
-                None => continue,
-                Some(Feed::Counted(counted)) => {
-                    let (folded, feed) = &mut **counted;
-                    let Some(delta) = feed.poll(env).await? else {
-                        continue;
-                    };
-                    self.delivered[layer] = delta.asserted.len() + delta.retracted.len();
-                    let place = self.plan.counts[folded.count].place;
+        let mut delivered = vec![0; self.layers.len()];
+        for (layer, (at, taken)) in self.layers.iter().zip(&self.taken).enumerate() {
+            match (at, &taken.rows, &taken.counted) {
+                (Some(Feed::Counted(counted)), _, Some(delta)) => {
+                    let folded = &counted.0;
+                    delivered[layer] = delta.asserted.len() + delta.retracted.len();
                     counts.push(Counts {
-                        place,
+                        place: self.plan.counts[folded.count].place,
                         arrived: delta
                             .asserted
                             .iter()
@@ -501,25 +568,26 @@ impl Watched {
                             .map(|row| tallied(folded, row))
                             .collect::<Result<_, _>>()?,
                     });
-                    continue;
                 }
-                Some(Feed::Rows(rows)) => {
-                    let (query, feed) = &mut **rows;
-                    (query, feed)
+                (Some(Feed::Rows(rows)), Some(delta), _) => {
+                    let query = &rows.0;
+                    delivered[layer] = delta.asserted.len() + delta.retracted.len();
+                    let row = |row: &ConceptConclusion| {
+                        self.plan.row(layer, query, row, self.entity.as_ref())
+                    };
+                    changes.push(Change {
+                        layer,
+                        arrived: delta.asserted.iter().map(row).collect::<Result<_, _>>()?,
+                        left: delta.retracted.iter().map(row).collect::<Result<_, _>>()?,
+                    });
                 }
-            };
-            let Some(delta) = feed.poll(env).await? else {
-                continue;
-            };
-            self.delivered[layer] = delta.asserted.len() + delta.retracted.len();
-            let row =
-                |row: &ConceptConclusion| self.plan.row(layer, query, row, self.entity.as_ref());
-            changes.push(Change {
-                layer,
-                arrived: delta.asserted.iter().map(row).collect::<Result<_, _>>()?,
-                left: delta.retracted.iter().map(row).collect::<Result<_, _>>()?,
-            });
+                _ => {}
+            }
         }
+        self.taken
+            .iter_mut()
+            .for_each(|taken| *taken = Taken::default());
+        self.delivered = delivered;
         let mut patches = Vec::new();
         if !self.polled {
             for (index, instance) in self.maintainer.tree().roots.into_iter().enumerate() {
