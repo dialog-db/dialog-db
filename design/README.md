@@ -99,3 +99,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
+- [A folded value is recomputed for its subscriber, not maintained](fold-maintenance.md):
+  **Delimiting.** A fold in reach makes a subscription ask its whole query
+  again, so a view that counts pays for its page on every change. A
+  statement of that is proposed, with a hypothesis: fold what a
+  subscription of the inner query already reports.
