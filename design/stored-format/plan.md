@@ -29,10 +29,16 @@ to be on main before the next tag, or a live space moves twice.
    go; every body is written in 5. The upgrade rewrites a format 4 body
    too. If the maintainer moves identities (open question 1), it is
    here, once, with the reproduction of the format 4 identity added to
-   `dialog_query::migration` for the upgrade. The upgrade reverses every
-   listed `as` in a body below format 5 and makes every `top` a `max`
-   ([listed order](listed-order.md)), after `feat/listed-type-order`
-   lands. Releasable: no release has written format 4.
+   `dialog_query::migration` for the upgrade. `top` stays: deprecated in
+   words, written and read in format 5, absent from the new notation
+   (the maintainer, 2026-11-24, [listed order](listed-order.md)).
+   Nothing is reversed automatically. `max` and `min` over a listed type
+   go by the listing, least first, as `feat/listed-type-order` makes
+   them. Releasable: no release has written format 4.
+
+   Whether the upgrade of this version also offers the reversal, as a
+   step an owner opts into, or the reversal belongs to the next
+   version's upgrade, is open question 5 in the top story.
 
 5. **A new vocabulary.** Rule facts and the transient marker are
    written and read under new attribute names. Every read path reads
@@ -49,7 +55,11 @@ to be on main before the next tag, or a live space moves twice.
 
    *The next tag goes here.*
 
-7. **The release after: delete the upgrade's readers.** Formats 0 to 4,
+7. **The release after: `top` is removed, and the upgrade's readers.**
+   By then every listed `as` a space holds has to be least first, with
+   every `top` a `max`, by a migration its owner ran (the coordinator's
+   reading of the maintainer's words, open question 5). A space whose
+   owner did not migrate holds `top` fields this release refuses. Formats 0 to 4,
    `dialog_query::migration`, the old attribute names. What a space
    still holds under them then stays inert and is listed by the
    embedder's prune. Releasable: a replica that skipped a release

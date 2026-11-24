@@ -17,6 +17,20 @@ Irakli, 2026-11-24, relayed by the coordinator:
   the migration, whether a ranked field reads it or not, and every `top`
   becomes `max`.
 
+- And later the same day: "We can keep top just deprecate it and not
+  have it in notation, we can remove top in the next version allowing
+  anyone wishing to migrate to do so".
+
+So, this version: `top` stays in the engine and in what is stored,
+deprecated in words; `max` and `min` over a listed type go by the
+listing, least first (`feat/listed-type-order`); the new notation has no
+`top`; nothing is reversed automatically. Next version: `top` is
+removed. The coordinator reads "allowing anyone wishing to migrate to do
+so" as: the reversal and `top` becoming `max` have to have happened for
+a space by then, by a migration its owner runs. That reading is the
+coordinator's, not the maintainer's words, and when the reversal runs is
+open question 5 in the top story.
+
 Overruled, the coordinator's opinion of 2026-11-24: a list no ranked
 field reads may already have been written least first, by an author who
 found that order natural (`[todo, doing, done]`), and reversing it
@@ -25,6 +39,17 @@ changes no answer and makes it read worse.
 `top` itself is being removed, and `max` and `min` made to go by the
 listing, on `feat/listed-type-order`. That work is not redone here; this
 note is about what the migration does to what is stored.
+
+## A list read by a deprecated `top` and by `max`, meanwhile
+
+Until a space migrates, its lists stay as written, best first. `top`
+picks the first listed value present; `max` by the listing picks the
+last listed present, `min` the first. So `top` over a list is `min` over
+the same list, whichever order the list is in, and a concept with one
+field of each is well defined: the two read opposite ends. What can
+mislead is the author's intent: over a list written best first, `max`
+picks the worst value. A field picking `max` over a list that some
+`top` field also reads is a sign the list is still best first.
 
 ## What the decision has going for it
 
@@ -85,7 +110,10 @@ listing tonk stores as several values would not show there; T10.
    every rule's that concludes or reads such a concept, and every
    transient marker keyed by such a concept. The identities move before
    the next tag in any case ([claims](claims.md)), so this adds no second
-   move if it lands in the same release. The upgrade's reproduction of
+   move if it lands in the same release. If the reversal waits for the
+   next version, a space with a listed `as` moves those identities a
+   second time then, with the same work as this release's upgrade
+   (markers, index facts, the embedder's records). The upgrade's reproduction of
    the earlier identity has to reverse too, or it will not find a marker.
 3. **`top` becomes `max` in the same rewrite, and a `{ "top:": [..] }`
    ranking is reversed before it is written under `as`.** Main's

@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Five approaches and a matrix; E recommended by the agent. |
-| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the four open questions in the top story.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the five open questions in the top story, question 5 (when the reversal runs) first.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -96,3 +96,24 @@ please"), overruling the coordinator's opinion that an unranked list may
 already be least first. It keeps one relation to one order. Recorded in
 the ledger and [listed order](listed-order.md); it holds in every
 approach of the matrix.
+
+## 2026-11-24, Directing: `top` is deprecated this version, removed in the next
+
+**Asked.** Relayed by the coordinator, the maintainer: "We can keep top
+just deprecate it and not have it in notation, we can remove top in the
+next version allowing anyone wishing to migrate to do so".
+
+**Learned.** Meanwhile a list can be read by a deprecated `top` and by a
+`max` field: `top` is `min` over the same list, so the read is defined,
+and over a list still best first `max` picks the worst value. If the
+reversal waits for the next version's upgrade, every attribute with a
+listed `as` and everything embedding it moves identity a second time.
+
+**Decided.** By the maintainer: `top` stays this version, deprecated,
+not in the new notation, removed in the next; nothing reversed
+automatically now. Plan steps 4 and 7 reworked. Not decided: whether the
+reversal is a step of this version's upgrade or the next one's (open
+question 5); the coordinator reads the maintainer's words as "by a
+migration the owner runs before the next version", and that reading is
+the coordinator's. Open question 1 restated as what an identity is a
+hash of once there is one format.

@@ -25,6 +25,9 @@ The maintainer, Irakli, 2026-11-24:
   reads: "No lets reverse all please". Decided: every listed `as` is
   reversed to least first and every `top` becomes `max`
   ([listed order](stored-format/listed-order.md)).
+- "We can keep top just deprecate it and not have it in notation, we can
+  remove top in the next version allowing anyone wishing to migrate to
+  do so".
 
 And 2026-11-18, in the rule-format ledger: a release should read the
 format it writes and no other, with a migration that keeps the earlier
@@ -76,11 +79,16 @@ and all of it before the next tag, so a live space moves once.
 
 Open questions for the maintainer:
 
-1. **What moves in an identity, and why?** No identity holds the format
-   number, so writing format 5 moves no identity by itself. One moves
-   only if the identity function changes. Which part should change? If
-   none changes in meaning, a rule keeps its entity and only its body is
-   rewritten, which E's new names keep apart from the old one anyway.
+1. **What is an identity a hash of, once there is one format?** Today a
+   rule is a hash of its head concept's reference, its premises and its
+   reduce; a concept of its fields' attribute references and options; an
+   attribute of its relation, cardinality, type and listed values
+   ([inventory](stored-format/inventory.md)). No identity holds the
+   format number, so writing format 5 moves no identity by itself. One
+   moves only if this function changes. Which part should change, and
+   why? If none changes in meaning, a rule keeps its entity and only its
+   body is rewritten, which E's new names keep apart from the old one
+   anyway.
 2. **Keep and prune, or retract?** Main's upgrade retracts; the decision
    of 2026-11-18 says keep and delete on a flag. The matrix assumes keep.
 3. **Refuse a key a descriptor does not know?** Without that, removing a
@@ -88,3 +96,10 @@ Open questions for the maintainer:
    (`pick` on an attribute would be ignored and read as cardinality one).
 4. **Formats 0 to 2.** Delete now, or with 3? It turns on whether any
    live space holds one (T7).
+5. **Is reversing the listed `as` a step of this version's upgrade, or
+   of the next one's?** `top` stays, deprecated, this version and is
+   removed in the next (the maintainer, 2026-11-24); the reversal has to
+   have run before then. In this version's upgrade, as a step an owner
+   opts into, it rides the identity move a space makes anyway. In the
+   next one's, a space with a listed `as` moves those identities a second
+   time ([listed order](stored-format/listed-order.md)).
