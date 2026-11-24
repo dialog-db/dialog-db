@@ -166,7 +166,8 @@ async fn install(
         transaction = transaction.assert(Transient(concept.clone()));
     }
     for rule in rules {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .commit()
@@ -522,10 +523,12 @@ async fn observe(scenario: Scenario, named: bool) -> Result<Observed> {
         .branch
         .transaction()
         .assert(Transient(concept))
-        .assert(rule);
+        .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     if !scenario.install_with_write {
         for deduce in &scenario.deductive {
-            transaction = transaction.assert(deduce.clone());
+            transaction = transaction.assert(
+                dialog_query::StorableRule::try_from(deduce.clone()).expect("a storable rule"),
+            );
         }
     }
     transaction
@@ -541,16 +544,16 @@ async fn observe(scenario: Scenario, named: bool) -> Result<Observed> {
     let (before, concept) = watch("cmd.before/kind", scenario.read, scenario.many, named)?;
     let mut install = Changes::new();
     install.assert(Transient(concept));
-    install.assert(before);
+    install.assert(dialog_query::StorableRule::try_from(before).expect("a storable rule"));
     let before = under(&commit(&world, install).await?, "cmd.before/kind");
 
     let (after, concept) = watch("cmd.after/kind", scenario.read, scenario.many, named)?;
     let mut changes = scenario.written;
     changes.assert(Transient(concept));
-    changes.assert(after);
+    changes.assert(dialog_query::StorableRule::try_from(after).expect("a storable rule"));
     if scenario.install_with_write {
         for deduce in scenario.deductive {
-            changes.assert(deduce);
+            changes.assert(dialog_query::StorableRule::try_from(deduce).expect("a storable rule"));
         }
     }
     let emitted = commit(&world, changes).await?;
@@ -979,8 +982,8 @@ async fn it_leaves_an_untouched_entity_when_no_rule_derives_what_is_written() ->
     world
         .branch
         .transaction()
-        .assert(mirror()?)
-        .assert(record)
+        .assert(dialog_query::StorableRule::try_from(mirror()?).expect("a storable rule"))
+        .assert(dialog_query::StorableRule::try_from(record).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&world.operator)

@@ -545,7 +545,12 @@ mod tests {
         let state: Entity = "session:state".parse()?;
         declare(&branch, &operator, &state).await?;
         let stack = branch.stack().perform(&operator).await?;
-        stack.assert(watch_primary()?).perform(&operator).await?;
+        stack
+            .assert(
+                dialog_query::StorableRule::try_from(watch_primary()?).expect("a storable rule"),
+            )
+            .perform(&operator)
+            .await?;
         let primary = stack
             .branch_of(&memory_layer())
             .expect("the primary's branch")

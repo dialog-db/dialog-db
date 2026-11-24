@@ -671,7 +671,7 @@ async fn it_induces_on_commit() -> Result<()> {
     let counter: Entity = "ctr:1".parse()?;
     branch
         .transaction()
-        .assert(increment)
+        .assert(dialog_query::StorableRule::try_from(increment).expect("a storable rule"))
         .assert(the!("counter/count").of(counter.clone()).is(1u64))
         .commit()
         .publish()
@@ -757,11 +757,14 @@ async fn it_resolves_rules_pending_in_the_transaction() -> Result<()> {
     };
     let employee = rule.conclusion().clone();
     let alice: Entity = "id:alice".parse()?;
-    let transaction = snapshot.transaction().assert(&rule).assert(
-        the!("org/person-name")
-            .of(alice.clone())
-            .is("Alice".to_string()),
-    );
+    let transaction = snapshot
+        .transaction()
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
+        .assert(
+            the!("org/person-name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
 
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("this"));

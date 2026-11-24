@@ -75,7 +75,7 @@ use dialog_query::migration::{
 };
 use dialog_query::rule::body::{TERMS_FORMAT, format_of};
 use dialog_query::rule::statement::source_attr;
-use dialog_query::rule::{DeductiveRule, InductiveRule};
+use dialog_query::rule::{DeductiveRule, InductiveRule, StorableRule};
 use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
 use dialog_search_tree::nodes;
 use futures_util::TryStreamExt as _;
@@ -173,17 +173,12 @@ impl Decoded {
         }
     }
 
-    fn identity(&self) -> Option<Entity> {
+    /// The rule with its identity and the body this release writes, or
+    /// `None` for a rule with no stored form.
+    fn storable(&self) -> Option<StorableRule> {
         match self {
-            Decoded::Deductive(rule) => rule.try_this(),
-            Decoded::Inductive(rule) => rule.try_this(),
-        }
-    }
-
-    fn encode(&self) -> Option<Vec<u8>> {
-        match self {
-            Decoded::Deductive(rule) => rule.try_encode(),
-            Decoded::Inductive(rule) => rule.try_encode(),
+            Decoded::Deductive(rule) => StorableRule::try_from(rule).ok(),
+            Decoded::Inductive(rule) => StorableRule::try_from(rule).ok(),
         }
     }
 
@@ -257,9 +252,10 @@ impl UpgradeRules<'_> {
                     continue;
                 }
             };
-            let Some(identity) = rule.identity() else {
+            let Some(storable) = rule.storable() else {
                 continue;
             };
+            let identity = storable.this().clone();
             if !conclusions
                 .iter()
                 .any(|known| known.this() == rule.conclusion().this())
@@ -270,7 +266,7 @@ impl UpgradeRules<'_> {
                 // Under its identity: rewritten if its body is in an
                 // earlier format, which is any body other than the one
                 // this release writes.
-                if rule.encode().as_deref() == Some(bytes.as_slice()) {
+                if storable.body() == bytes.as_slice() {
                     continue;
                 }
                 transaction = transaction.retract(statement(
@@ -278,10 +274,7 @@ impl UpgradeRules<'_> {
                     stored.of.clone(),
                     stored.is.clone(),
                 ));
-                transaction = match &rule {
-                    Decoded::Deductive(rule) => transaction.assert(rule),
-                    Decoded::Inductive(rule) => transaction.assert(rule),
-                };
+                transaction = transaction.assert(&storable);
                 if !upgraded.rewritten.contains(&stored.of) {
                     upgraded.rewritten.push(stored.of.clone());
                 }
@@ -310,10 +303,7 @@ impl UpgradeRules<'_> {
                 }
                 transaction = transaction.retract(statement(fact.the, fact.of, fact.is));
             }
-            transaction = match &rule {
-                Decoded::Deductive(rule) => transaction.assert(rule),
-                Decoded::Inductive(rule) => transaction.assert(rule),
-            };
+            transaction = transaction.assert(&storable);
             upgraded.reinstalled.push((stored.of.clone(), identity));
         }
         // A transient marker under a concluded concept's earlier

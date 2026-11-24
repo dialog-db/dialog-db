@@ -407,8 +407,14 @@ async fn a_concept_the_pick_release_marked_transient_stays_transient_once_upgrad
     branch
         .transaction()
         .assert(Transient(stage.clone()))
-        .assert(rule("cmd.start/target", "cmd.stage/target")?)
-        .assert(rule("cmd.stage/target", "result/target")?)
+        .assert(
+            dialog_query::StorableRule::try_from(rule("cmd.start/target", "cmd.stage/target")?)
+                .expect("a storable rule"),
+        )
+        .assert(
+            dialog_query::StorableRule::try_from(rule("cmd.stage/target", "result/target")?)
+                .expect("a storable rule"),
+        )
         .commit()
         .publish()
         .perform(&operator)

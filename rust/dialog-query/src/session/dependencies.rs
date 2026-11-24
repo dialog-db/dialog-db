@@ -1237,11 +1237,11 @@ mod tests {
         assert_eq!(
             analysis.quarantined(),
             &[Quarantine {
-                rule: closing.this(),
+                rule: closing.try_this().expect("a storable rule"),
                 concept: ProgramAnalysis::node(&a),
                 cycle,
                 tested: Some(Tested {
-                    by: Some(negating.this()),
+                    by: Some(negating.try_this().expect("a storable rule")),
                     target: ProgramAnalysis::node(&a),
                     absence: Absence::Negated,
                 }),
@@ -1270,7 +1270,7 @@ mod tests {
                 .iter()
                 .map(|set_aside| set_aside.rule.clone())
                 .collect::<Vec<_>>(),
-            vec![negating.this()],
+            vec![negating.try_this().expect("a storable rule")],
             "registered last, the negating rule goes"
         );
     }

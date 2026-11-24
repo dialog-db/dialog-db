@@ -1053,13 +1053,16 @@ async fn a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside() -> anyh
     let [set_aside] = analysis.quarantined() else {
         anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
     };
-    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(set_aside.rule, decides.try_this().expect("a storable rule"));
     assert_eq!(
         set_aside
             .tested
             .as_ref()
             .map(|tested| (&tested.by, tested.absence)),
-        Some((&Some(decides.this()), Absence::Decided)),
+        Some((
+            &Some(decides.try_this().expect("a storable rule")),
+            Absence::Decided
+        )),
         "the record says which rule decided, and that it did"
     );
     let source = TestEnv::new(&branch, &operator, inside);
@@ -1316,7 +1319,7 @@ async fn a_rule_deciding_on_a_concepts_field_inside_its_cycle_is_set_aside() -> 
     let [set_aside] = analysis.quarantined() else {
         anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
     };
-    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(set_aside.rule, decides.try_this().expect("a storable rule"));
     assert_eq!(
         set_aside.tested.as_ref().map(|tested| tested.absence),
         Some(Absence::Decided)

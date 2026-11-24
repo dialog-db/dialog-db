@@ -98,7 +98,8 @@ fn it_refuses_constants_a_body_cannot_carry() {
         (Value::Float(f64::MAX), "float:"),
     ] {
         let rule = try_rule_matching(value.clone(), Some(kind)).expect("compiles");
-        let stored = DeductiveRule::decode(&rule.encode()).expect("decodes");
+        let stored =
+            DeductiveRule::decode(&rule.try_encode().expect("a storable rule")).expect("decodes");
         assert_eq!(constant_of(&stored), value);
     }
 }
@@ -108,8 +109,12 @@ fn it_refuses_constants_a_body_cannot_carry() {
 #[dialog_common::test]
 fn it_keeps_a_text_constant_text_through_storage() {
     let text = Value::String("https://example.com".into());
-    let stored = DeductiveRule::decode(&rule_matching(text.clone(), Some("text:")).encode())
-        .expect("decodes");
+    let stored = DeductiveRule::decode(
+        &rule_matching(text.clone(), Some("text:"))
+            .try_encode()
+            .expect("a storable rule"),
+    )
+    .expect("decodes");
     assert_eq!(constant_of(&stored), text);
 }
 
@@ -119,7 +124,10 @@ fn it_keeps_a_text_constant_text_through_storage() {
 fn it_tells_rules_apart_by_the_type_of_their_constants() {
     let text = rule_matching(Value::String("foo:".into()), None);
     let entity = rule_matching(Value::Entity("foo:".parse().expect("an entity")), None);
-    assert_ne!(text.this(), entity.this());
+    assert_ne!(
+        text.try_this().expect("a storable rule"),
+        entity.try_this().expect("a storable rule")
+    );
 }
 
 /// `page/rank`, an integer, matched against `rank`, and `page/slug`, text,

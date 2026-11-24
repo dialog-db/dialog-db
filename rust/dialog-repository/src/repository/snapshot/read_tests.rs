@@ -531,7 +531,7 @@ async fn it_resolves_committed_rules() -> Result<()> {
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(&rule)
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .assert(
             the!("org/person-name")
                 .of(alice.clone())

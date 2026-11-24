@@ -404,7 +404,7 @@ async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -
     }))?;
     branch
         .transaction()
-        .assert(paid)
+        .assert(dialog_query::StorableRule::try_from(paid).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&operator)
@@ -490,7 +490,7 @@ async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     branch
         .transaction()
-        .retract(&rule)
+        .retract(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&operator)
@@ -532,8 +532,14 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient_once_up
     branch
         .transaction()
         .assert(Transient(stage.clone()))
-        .assert(rule("cmd.start/target", "cmd.stage/target")?)
-        .assert(rule("cmd.stage/target", "result/target")?)
+        .assert(
+            dialog_query::StorableRule::try_from(rule("cmd.start/target", "cmd.stage/target")?)
+                .expect("a storable rule"),
+        )
+        .assert(
+            dialog_query::StorableRule::try_from(rule("cmd.stage/target", "result/target")?)
+                .expect("a storable rule"),
+        )
         .commit()
         .publish()
         .perform(&operator)
@@ -638,7 +644,9 @@ async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -
         .map_err(anyhow::Error::msg)?;
     let forged: Entity = "rule:forged".parse()?;
     let mut changes = Changes::new();
-    (&rule).assert(&mut changes);
+    dialog_query::StorableRule::try_from(&rule)
+        .expect("a storable rule")
+        .assert(&mut changes);
     let facts: Vec<AttributeStatement> = changes
         .iter()
         .filter_map(|(_, the, change)| match change {
@@ -677,11 +685,11 @@ async fn an_upgraded_rule_is_stored_in_the_current_format() -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     assert_eq!(
         stored(&branch, &operator, "dialog.rule/source", &identity).await?,
-        vec![Value::Bytes(main.encode())],
+        vec![Value::Bytes(main.try_encode().expect("a storable rule"))],
         "one body, in the current format"
     );
     assert_ne!(
-        main.encode(),
+        main.try_encode().expect("a storable rule"),
         source_from_main("salary_from_bonus"),
         "main's body is in an earlier format"
     );
@@ -700,7 +708,7 @@ async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
     let alice: Entity = "id:alice".parse()?;
     let rule = DeductiveRule::decode(&source_from_main("salary_from_bonus"))
         .map_err(anyhow::Error::msg)?;
-    let identity = rule.this();
+    let identity = rule.try_this().expect("a storable rule");
     // Format 2 wrote the authored descriptor in the dag-cbor envelope.
     let format2 = serde_ipld_dagcbor::to_vec(&json!({
         "format": 2,
@@ -708,7 +716,7 @@ async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
     }))?;
     branch
         .transaction()
-        .assert(&rule)
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&operator)
@@ -719,7 +727,7 @@ async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
         .retract(statement(
             "dialog.rule/source",
             &identity,
-            Value::Bytes(rule.encode()),
+            Value::Bytes(rule.try_encode().expect("a storable rule")),
         ))
         .assert(statement(
             "dialog.rule/source",
@@ -741,7 +749,7 @@ async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
     assert!(upgraded.reinstalled.is_empty());
     assert_eq!(
         stored(&branch, &operator, "dialog.rule/source", &identity).await?,
-        vec![Value::Bytes(rule.encode())],
+        vec![Value::Bytes(rule.try_encode().expect("a storable rule"))],
         "the format 2 body is gone and the current one is stored"
     );
     commit(
@@ -785,12 +793,12 @@ async fn a_respelled_rule_shares_its_body() -> Result<()> {
         }))?)
     };
     let (first, second) = (spelled("b")?, spelled("bonus")?);
-    let identity = first.this();
-    assert_eq!(second.this(), identity);
+    let identity = first.try_this().expect("a storable rule");
+    assert_eq!(second.try_this().expect("a storable rule"), identity);
     for rule in [&first, &second] {
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -799,12 +807,12 @@ async fn a_respelled_rule_shares_its_body() -> Result<()> {
     }
     assert_eq!(
         stored(&branch, &operator, "dialog.rule/source", &identity).await?,
-        vec![Value::Bytes(first.encode())],
+        vec![Value::Bytes(first.try_encode().expect("a storable rule"))],
         "one body for both spellings"
     );
     branch
         .transaction()
-        .retract(&first)
+        .retract(dialog_query::StorableRule::try_from(&first).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&operator)

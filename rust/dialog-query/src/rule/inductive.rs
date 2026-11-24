@@ -189,23 +189,6 @@ impl InductiveRule {
         self.try_this().as_ref() == Some(entity)
     }
 
-    /// This rule's stored body, panicking if the rule has no
-    /// encodable body. Use on the storage path where the rule is known
-    /// to be storable (concept/formula bodies); prefer
-    /// [`try_encode`](Self::try_encode) otherwise.
-    pub fn encode(&self) -> Vec<u8> {
-        self.try_encode()
-            .expect("rule body must encode in formal notation")
-    }
-
-    /// Content-addressed identity, panicking if the rule has no
-    /// encodable body. Use on the storage path; prefer
-    /// [`try_this`](Self::try_this) otherwise.
-    pub fn this(&self) -> Entity {
-        self.try_this()
-            .expect("storable rule must have a content-addressed identity")
-    }
-
     /// Rebuild a rule from a stored body, in this release's format or an
     /// earlier one, in its canonical spelling. `Err` carries a
     /// human-readable reason: the body did not decode, or its descriptor
@@ -368,12 +351,18 @@ mod tests {
         }))
         .expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let bytes = blake3::hash(&rule.try_encode().expect("a storable rule"))
+            .as_bytes()
+            .to_vec();
         let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
             .parse()
             .expect("an entity");
-        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
-        assert!(rule.stored_as(&rule.this()));
+        assert_ne!(
+            legacy,
+            rule.try_this().expect("a storable rule"),
+            "the byte hash is not the identity"
+        );
+        assert!(rule.stored_as(&rule.try_this().expect("a storable rule")));
         assert!(!rule.stored_as(&legacy));
         let other: Entity = "rule:forged".parse().expect("an entity");
         assert!(!rule.stored_as(&other));
@@ -402,16 +391,33 @@ mod tests {
         };
         let a = spelled("assert!", "t");
         let b = spelled("assert!", "u");
-        assert_eq!(a.encode(), b.encode());
-        assert_eq!(a.this(), b.this());
-        let decoded = InductiveRule::decode(&a.encode()).expect("the body decodes");
-        assert_eq!(decoded.this(), a.this());
+        assert_eq!(
+            a.try_encode().expect("a storable rule"),
+            b.try_encode().expect("a storable rule")
+        );
+        assert_eq!(
+            a.try_this().expect("a storable rule"),
+            b.try_this().expect("a storable rule")
+        );
+        let decoded = InductiveRule::decode(&a.try_encode().expect("a storable rule"))
+            .expect("the body decodes");
+        assert_eq!(
+            decoded.try_this().expect("a storable rule"),
+            a.try_this().expect("a storable rule")
+        );
 
         let retracting = spelled("retract!", "t");
-        assert_ne!(retracting.encode(), a.encode());
-        let decoded = InductiveRule::decode(&retracting.encode()).expect("the body decodes");
+        assert_ne!(
+            retracting.try_encode().expect("a storable rule"),
+            a.try_encode().expect("a storable rule")
+        );
+        let decoded = InductiveRule::decode(&retracting.try_encode().expect("a storable rule"))
+            .expect("the body decodes");
         assert_eq!(decoded.polarity(), Polarity::Retract);
-        assert_eq!(decoded.this(), retracting.this());
+        assert_eq!(
+            decoded.try_this().expect("a storable rule"),
+            retracting.try_this().expect("a storable rule")
+        );
     }
 
     #[dialog_common::test]

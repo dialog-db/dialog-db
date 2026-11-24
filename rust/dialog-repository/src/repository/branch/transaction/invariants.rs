@@ -120,7 +120,9 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(&salary_from_bonus()?)
+        .assert(
+            dialog_query::StorableRule::try_from(&salary_from_bonus()?).expect("a storable rule"),
+        )
         .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
         .publish()
@@ -355,7 +357,9 @@ async fn a_transaction_reads_a_last_write_as_succeeding_the_stored_claim_under_a
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(&salary_from_bonus()?)
+        .assert(
+            dialog_query::StorableRule::try_from(&salary_from_bonus()?).expect("a storable rule"),
+        )
         .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
         .publish()
@@ -398,7 +402,9 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(&salary_from_bonus()?)
+        .assert(
+            dialog_query::StorableRule::try_from(&salary_from_bonus()?).expect("a storable rule"),
+        )
         .assert(write("org/bonus", &alice, 900, Cardinality::One))
         .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
@@ -504,7 +510,10 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
         let branch = repo.branch(&name).open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(&salary_from_bonus()?)
+            .assert(
+                dialog_query::StorableRule::try_from(&salary_from_bonus()?)
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)

@@ -57,6 +57,7 @@ pub use deductive::descriptor::DeductiveRuleDescriptor;
 pub use inductive::InductiveRule;
 pub use inductive::descriptor::InductiveRuleDescriptor;
 pub use premises::*;
+pub use statement::StorableRule;
 pub use types::{DeadOptionality, Narrowing, TypeEnv};
 pub use when::*;
 

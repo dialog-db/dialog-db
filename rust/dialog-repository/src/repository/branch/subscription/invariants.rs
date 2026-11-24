@@ -89,7 +89,9 @@ async fn a_rule_landing_on_a_subscribed_attribute_wakes_the_subscription() -> an
     }))?;
     branch
         .transaction()
-        .assert(&descriptor.compile()?)
+        .assert(
+            dialog_query::StorableRule::try_from(&descriptor.compile()?).expect("a storable rule"),
+        )
         .commit()
         .publish()
         .perform(&operator)
@@ -158,10 +160,10 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
     };
     branch
         .transaction()
-        .assert(&rule("x/src1")?)
-        .assert(&rule("x/src2")?)
-        .assert(&rule("x/src3")?)
-        .assert(&rule("x/a")?)
+        .assert(dialog_query::StorableRule::try_from(&rule("x/src1")?).expect("a storable rule"))
+        .assert(dialog_query::StorableRule::try_from(&rule("x/src2")?).expect("a storable rule"))
+        .assert(dialog_query::StorableRule::try_from(&rule("x/src3")?).expect("a storable rule"))
+        .assert(dialog_query::StorableRule::try_from(&rule("x/a")?).expect("a storable rule"))
         .assert(source("x/src1", "v"))
         .commit()
         .publish()
@@ -1261,10 +1263,12 @@ async fn move_rule(
     let to = (toggle.at + 1 + rng.below(count - 1)) % count;
     let mut transaction = branch.transaction();
     for rule in &toggle.variants[toggle.at].1 {
-        transaction = transaction.retract(rule);
+        transaction = transaction
+            .retract(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     for rule in &toggle.variants[to].1 {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction.commit().publish().perform(operator).await?;
     let described = format!(
@@ -1280,7 +1284,8 @@ async fn move_rule(
 async fn install(branch: &Branch, operator: &Operator, changes: Changes) -> anyhow::Result<()> {
     let mut transaction = branch.transaction();
     for rule in installed_rules()? {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .integrate(changes)
@@ -1706,7 +1711,8 @@ async fn an_overlay_value_outvoting_a_committed_one_retracts_what_it_derived_rec
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut transaction = branch.transaction();
     for rule in above_rules("manager")? {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .assert(Manager::of(person(1)).is(person(0)))
@@ -1748,7 +1754,10 @@ async fn an_overlay_value_outvoting_a_committed_one_retracts_a_row_read_through_
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
         .transaction()
-        .assert(&alone_by_mentors_badge_rule()?)
+        .assert(
+            dialog_query::StorableRule::try_from(&alone_by_mentors_badge_rule()?)
+                .expect("a storable rule"),
+        )
         .assert(Name::of(person(1)).is("N0".to_string()))
         .assert(Mentor::of(person(1)).is(person(0)))
         .assert(Badge::of(person(0)).is("B1".to_string()))
@@ -1789,7 +1798,8 @@ async fn retracting_a_committed_winner_restores_the_value_it_outvoted() -> anyho
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut transaction = branch.transaction();
     for rule in above_rules("manager")? {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .assert(Manager::of(person(1)).is(person(3)))
@@ -1869,7 +1879,8 @@ async fn a_recursive_rule_follows_a_badge_on_its_chain() -> anyhow::Result<()> {
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut transaction = branch.transaction();
     for rule in badged_above_rules()? {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .assert(Manager::of(person(1)).is(person(0)))
@@ -1950,7 +1961,9 @@ async fn a_rule_installed_through_the_overlay_moves_the_subscription() -> anyhow
     let initial = subscription.poll(&operator).await?.expect("initial");
     assert!(initial.asserted.is_empty(), "no rule yet, no rows");
 
-    branch.overlay().assert(&alone_by_own_badge_rule()?)?;
+    branch.overlay().assert(
+        dialog_query::StorableRule::try_from(&alone_by_own_badge_rule()?).expect("a storable rule"),
+    )?;
     let (maintained, fresh) =
         maintained_and_fresh::<Unvouched>(&mut subscription, &branch, &operator).await?;
     assert_eq!(fresh.len(), 1, "the session rule derives p1");
@@ -1961,7 +1974,9 @@ async fn a_rule_installed_through_the_overlay_moves_the_subscription() -> anyhow
         "a rule change recomputes"
     );
 
-    branch.overlay().retract(&alone_by_own_badge_rule()?)?;
+    branch.overlay().retract(
+        dialog_query::StorableRule::try_from(&alone_by_own_badge_rule()?).expect("a storable rule"),
+    )?;
     let (maintained, fresh) =
         maintained_and_fresh::<Unvouched>(&mut subscription, &branch, &operator).await?;
     assert!(fresh.is_empty());
@@ -2018,7 +2033,8 @@ async fn a_merge_leaving_two_claims_in_a_cell_keeps_a_recursive_subscription_fre
         .await?;
     let mut transaction = w1.transaction();
     for rule in above_rules("manager")? {
-        transaction = transaction.assert(rule);
+        transaction = transaction
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     }
     transaction
         .assert(Manager::of(person(1)).is(person(0)))

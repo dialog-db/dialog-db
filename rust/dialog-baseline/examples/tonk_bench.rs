@@ -481,12 +481,20 @@ mod native {
                 } => {
                     let mut transaction = owner_branch.transaction();
                     for bytes in inductive {
-                        transaction = transaction
-                            .assert(InductiveRule::decode(bytes).map_err(anyhow::Error::msg)?);
+                        transaction = transaction.assert(
+                            dialog_query::StorableRule::try_from(
+                                InductiveRule::decode(bytes).map_err(anyhow::Error::msg)?,
+                            )
+                            .expect("a storable rule"),
+                        );
                     }
                     for bytes in deductive {
-                        transaction = transaction
-                            .assert(DeductiveRule::decode(bytes).map_err(anyhow::Error::msg)?);
+                        transaction = transaction.assert(
+                            dialog_query::StorableRule::try_from(
+                                DeductiveRule::decode(bytes).map_err(anyhow::Error::msg)?,
+                            )
+                            .expect("a storable rule"),
+                        );
                     }
                     for concept in transient {
                         transaction = transaction.assert(Transient(Entity::from_str(concept)?));

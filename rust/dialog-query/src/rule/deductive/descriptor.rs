@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(name.descriptor().cardinality(), crate::Cardinality::One);
         assert_eq!(tags.descriptor().cardinality(), crate::Cardinality::Many);
         // Re-encoded, the rule never writes the older spelling back.
-        let again = rule.encode();
+        let again = rule.try_encode().expect("a storable rule");
         let decoded: serde_json::Value =
             serde_ipld_dagcbor::from_slice(&again).expect("the re-encoding is a map");
         assert!(

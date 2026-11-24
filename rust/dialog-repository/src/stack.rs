@@ -1035,7 +1035,7 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
-            .assert(increment)
+            .assert(dialog_query::StorableRule::try_from(increment).expect("a storable rule"))
             .commit()
             .publish()
             .perform(env)
@@ -1883,7 +1883,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(watch)
+            .assert(dialog_query::StorableRule::try_from(watch).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -1902,7 +1902,10 @@ mod tests {
         let seen_primary = || held(&memory, "seen/branch-revision", &primary);
 
         let installed_on = stack.primary().revision().expect("a head");
-        stack.assert(watch_primary).perform(&operator).await?;
+        stack
+            .assert(dialog_query::StorableRule::try_from(watch_primary).expect("a storable rule"))
+            .perform(&operator)
+            .await?;
         assert_eq!(
             seen_primary()?,
             vec![entity_text(&installed_on)],
@@ -2204,7 +2207,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(mark)
+            .assert(dialog_query::StorableRule::try_from(mark).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -2677,7 +2680,9 @@ mod tests {
                 }
             ]
         }))?;
-        let mut transaction = branch.transaction().assert(step);
+        let mut transaction = branch
+            .transaction()
+            .assert(dialog_query::StorableRule::try_from(step).expect("a storable rule"));
         for (index, (from, to)) in [(2u64, 3u64), (3, 4)].into_iter().enumerate() {
             let entity: Entity = format!("step:{index}").parse()?;
             transaction = transaction
@@ -2980,7 +2985,10 @@ mod tests {
                 { "assert": "==", "where": { "this": { "?": { "name": "selected" } }, "is": true } }
             ]
         }))?;
-        let mut transaction = branch.transaction().assert(spread).assert(follow);
+        let mut transaction = branch
+            .transaction()
+            .assert(dialog_query::StorableRule::try_from(spread).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(follow).expect("a storable rule"));
         for index in 1..4 {
             transaction = transaction.assert(
                 dialog_query::the!("doc/next")
@@ -3203,7 +3211,7 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
-            .assert(capture)
+            .assert(dialog_query::StorableRule::try_from(capture).expect("a storable rule"))
             .commit()
             .publish()
             .perform(env)
@@ -3248,8 +3256,14 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
-            .assert(capture(PROBED, PROBED_LOCAL)?)
-            .assert(capture(FETCHED, FETCHED_LOCAL)?)
+            .assert(
+                dialog_query::StorableRule::try_from(capture(PROBED, PROBED_LOCAL)?)
+                    .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(capture(FETCHED, FETCHED_LOCAL)?)
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(env)
@@ -3530,7 +3544,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(forward)
+            .assert(dialog_query::StorableRule::try_from(forward).expect("a storable rule"))
             .commit()
             .publish()
             .perform(env)
@@ -3880,7 +3894,7 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
-            .assert(increment)
+            .assert(dialog_query::StorableRule::try_from(increment).expect("a storable rule"))
             .commit()
             .publish()
             .perform(env)
@@ -4024,9 +4038,9 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
-            .assert(seen)
-            .assert(pong)
-            .assert(ponged)
+            .assert(dialog_query::StorableRule::try_from(seen).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(pong).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(ponged).expect("a storable rule"))
             .commit()
             .publish()
             .perform(env)
@@ -4941,7 +4955,10 @@ mod tests {
             .clone();
         // Installed through the stack: the metadata row is read on a
         // plain branch too, and installing evaluates the rule once.
-        stack.assert(watch).perform(&operator).await?;
+        stack
+            .assert(dialog_query::StorableRule::try_from(watch).expect("a storable rule"))
+            .perform(&operator)
+            .await?;
         stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
@@ -5760,22 +5777,38 @@ mod tests {
     async fn declare_lifecycle(branch: &Branch, env: &Operator) -> Result<()> {
         branch
             .transaction()
-            .assert(copy_rule(
-                "dialog.command/invoked",
-                "UnsignedInteger",
-                "log/invoked",
-            )?)
-            .assert(copy_rule(
-                "dialog.command/answered",
-                "Entity",
-                "log/answered",
-            )?)
-            .assert(copy_rule("dialog.command/failed", "Text", "log/failed")?)
-            .assert(copy_rule(
-                "dialog.command/unhandled",
-                "Boolean",
-                "log/unhandled",
-            )?)
+            .assert(
+                dialog_query::StorableRule::try_from(copy_rule(
+                    "dialog.command/invoked",
+                    "UnsignedInteger",
+                    "log/invoked",
+                )?)
+                .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(copy_rule(
+                    "dialog.command/answered",
+                    "Entity",
+                    "log/answered",
+                )?)
+                .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(copy_rule(
+                    "dialog.command/failed",
+                    "Text",
+                    "log/failed",
+                )?)
+                .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(copy_rule(
+                    "dialog.command/unhandled",
+                    "Boolean",
+                    "log/unhandled",
+                )?)
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(env)
@@ -7115,7 +7148,12 @@ mod tests {
             vec![entity_text(&head)],
             "one value at open"
         );
-        stack.assert(watch_primary()?).perform(&operator).await?;
+        stack
+            .assert(
+                dialog_query::StorableRule::try_from(watch_primary()?).expect("a storable rule"),
+            )
+            .perform(&operator)
+            .await?;
         let installed = stack.primary().revision().expect("a head");
         assert_eq!(
             primary_revision_of(&stack, &operator).await?,

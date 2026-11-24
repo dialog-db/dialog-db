@@ -291,6 +291,16 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A rule with no stored form, so no identity: its body reads an
+    /// attribute by a raw scan, as a concept's implicit rule does, which
+    /// no stored body can say. Such a rule can be evaluated but not
+    /// stored, so it is not a [`StorableRule`](crate::StorableRule).
+    #[error("A rule concluding {concept} has no stored form, so it cannot be stored")]
+    RuleWithoutIdentity {
+        /// The concept the rule concludes.
+        concept: String,
+    },
+
     /// A concept's field is named `this`, the name its entity has in
     /// every query and rule: the field and the entity would be one.
     #[error("A concept field cannot be named \"{field}\": that is the name of the entity")]

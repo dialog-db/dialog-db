@@ -688,7 +688,10 @@ mod tests {
     fn it_identifies_a_rule_by_its_body_not_its_variable_names() {
         let x = rule(vec![knows("this", "x"), knows("x", "friend")]);
         let a = rule(vec![knows("this", "a"), knows("a", "friend")]);
-        assert_eq!(x.this(), a.this());
+        assert_eq!(
+            x.try_this().expect("a storable rule"),
+            a.try_this().expect("a storable rule")
+        );
         assert_eq!(x.canonical_descriptor(), a.canonical_descriptor());
     }
 
@@ -698,7 +701,10 @@ mod tests {
     fn it_identifies_a_rule_regardless_of_its_head_field_names() {
         let friend = rule_headed("friend", vec![knows("this", "x"), knows("x", "friend")]);
         let buddy = rule_headed("buddy", vec![knows("this", "x"), knows("x", "buddy")]);
-        assert_eq!(friend.this(), buddy.this());
+        assert_eq!(
+            friend.try_this().expect("a storable rule"),
+            buddy.try_this().expect("a storable rule")
+        );
         assert_eq!(
             friend.conclusion().with().keys().collect::<Vec<_>>(),
             vec!["friend"],
@@ -715,7 +721,10 @@ mod tests {
     fn it_identifies_a_rule_regardless_of_premise_order() {
         let forward = rule(vec![knows("this", "x"), knows("x", "friend")]);
         let backward = rule(vec![knows("x", "friend"), knows("this", "x")]);
-        assert_eq!(forward.this(), backward.this());
+        assert_eq!(
+            forward.try_this().expect("a storable rule"),
+            backward.try_this().expect("a storable rule")
+        );
     }
 
     /// Two bodies with the same premises connected differently are two
@@ -734,7 +743,10 @@ mod tests {
             knows("y", "friend"),
             knows("y", "z"),
         ]);
-        assert_ne!(early.this(), late.this());
+        assert_ne!(
+            early.try_this().expect("a storable rule"),
+            late.try_this().expect("a storable rule")
+        );
     }
 
     /// Locals refinement cannot tell apart (two parallel paths) are
@@ -753,7 +765,10 @@ mod tests {
             knows("a", "friend"),
             knows("this", "a"),
         ]);
-        assert_eq!(xy.this(), ba.this());
+        assert_eq!(
+            xy.try_this().expect("a storable rule"),
+            ba.try_this().expect("a storable rule")
+        );
     }
 
     /// Which variable reaches the head is structure, not naming:
@@ -762,7 +777,10 @@ mod tests {
     fn it_keeps_the_head_binding_out_of_the_renaming() {
         let direct = rule(vec![knows("this", "friend"), knows("friend", "x")]);
         let indirect = rule(vec![knows("this", "x"), knows("x", "friend")]);
-        assert_ne!(direct.this(), indirect.this());
+        assert_ne!(
+            direct.try_this().expect("a storable rule"),
+            indirect.try_this().expect("a storable rule")
+        );
     }
 
     /// The author's spelling is what the rule shows; the canonical one
@@ -805,12 +823,20 @@ mod tests {
             "the canonical head is re-keyed: {:?}",
             canonical.deduce.with().keys().collect::<Vec<_>>()
         );
-        let decoded = DeductiveRule::decode(&authored.encode()).expect("stored bytes decode");
-        assert_eq!(decoded.this(), authored.this());
+        let decoded = DeductiveRule::decode(&authored.try_encode().expect("a storable rule"))
+            .expect("stored bytes decode");
+        assert_eq!(
+            decoded.try_this().expect("a storable rule"),
+            authored.try_this().expect("a storable rule")
+        );
         assert_eq!(decoded.canonical_descriptor(), canonical);
 
         let respelled = rule(vec![knows("this", "y"), knows("y", "friend")]);
-        assert_eq!(respelled.encode(), authored.encode(), "one body");
+        assert_eq!(
+            respelled.try_encode().expect("a storable rule"),
+            authored.try_encode().expect("a storable rule"),
+            "one body"
+        );
     }
 
     /// The canonical spelling is a fixed point: a rule compiled from it
@@ -821,7 +847,10 @@ mod tests {
         let authored = rule(vec![knows("x", "friend"), knows("this", "x")]);
         let canonical = authored.canonical_descriptor();
         let recompiled = canonical.clone().compile().expect("canonical compiles");
-        assert_eq!(recompiled.this(), authored.this());
+        assert_eq!(
+            recompiled.try_this().expect("a storable rule"),
+            authored.try_this().expect("a storable rule")
+        );
         assert_eq!(recompiled.canonical_descriptor(), canonical);
     }
 
@@ -839,7 +868,11 @@ mod tests {
             installed.conclusion().with().keys().collect::<Vec<_>>(),
             vec!["friend"]
         );
-        assert_eq!(installed.this(), buddy.this(), "the same rule");
+        assert_eq!(
+            installed.try_this().expect("a storable rule"),
+            buddy.try_this().expect("a storable rule"),
+            "the same rule"
+        );
         assert!(
             installed
                 .analysis()

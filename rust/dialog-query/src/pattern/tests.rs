@@ -1705,7 +1705,7 @@ fn it_installs_a_rule_that_holds_a_pattern() {
 
     let rule = card_rule([0, 1, 2]).expect("compiles");
     let mut changes = Changes::new();
-    changes.assert(&rule);
+    changes.assert(crate::StorableRule::try_from(&rule).expect("a storable rule"));
     assert_ne!(changes, Changes::new(), "the rule is staged");
     assert!(
         serde_json::to_string(&changes).is_ok(),
@@ -1713,7 +1713,10 @@ fn it_installs_a_rule_that_holds_a_pattern() {
     );
 
     let mut again = Changes::new();
-    again.assert(card_rule([2, 1, 0]).expect("compiles"));
+    again.assert(
+        crate::StorableRule::try_from(card_rule([2, 1, 0]).expect("compiles"))
+            .expect("a storable rule"),
+    );
     assert_eq!(again, changes, "under one name, with one body");
 }
 
@@ -1726,7 +1729,7 @@ fn it_stores_a_rule_that_builds_a_record_keyed_by_symbols() {
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("reads back");
-    assert!(decoded.stored_as(&rule.this()));
+    assert!(decoded.stored_as(&rule.try_this().expect("a storable rule")));
     assert_eq!(decoded.try_encode(), Some(stored));
 }
 
@@ -1739,7 +1742,10 @@ fn it_stores_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
-    assert!(decoded.stored_as(&rule.this()), "under its name");
+    assert!(
+        decoded.stored_as(&rule.try_this().expect("a storable rule")),
+        "under its name"
+    );
     assert_eq!(decoded.try_encode(), Some(stored));
 }
 
@@ -1751,7 +1757,7 @@ fn it_installs_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
 
     let rule = constant_rule();
     let mut changes = Changes::new();
-    changes.assert(&rule);
+    changes.assert(crate::StorableRule::try_from(&rule).expect("a storable rule"));
     assert!(!changes.is_empty(), "the rule is staged");
     assert!(
         serde_json::to_string(&changes).is_ok(),
@@ -2048,7 +2054,7 @@ fn it_stores_a_composite_constant_inside_a_pattern() {
         let stored = rule.try_encode().expect("a body");
         assert_eq!(body::format_of(&stored), Some(5), "{constant:?}");
         let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
-        assert!(decoded.stored_as(&rule.this()));
+        assert!(decoded.stored_as(&rule.try_this().expect("a storable rule")));
         assert_eq!(decoded.try_encode(), Some(stored));
     }
 }
@@ -2071,7 +2077,10 @@ fn it_stores_a_rule_that_negates_a_pattern() {
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("reads back");
-    assert!(decoded.stored_as(&rule.this()), "under its name");
+    assert!(
+        decoded.stored_as(&rule.try_this().expect("a storable rule")),
+        "under its name"
+    );
     assert_eq!(decoded.try_encode(), Some(stored));
 }
 
@@ -2141,7 +2150,7 @@ fn it_reads_back_a_rule_that_holds_a_composite_constant() {
             let stored = rule.try_encode().expect("a body");
             assert_eq!(body::format_of(&stored), Some(4), "no pattern is held");
             let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
-            assert!(decoded.stored_as(&rule.this()));
+            assert!(decoded.stored_as(&rule.try_this().expect("a storable rule")));
             assert_eq!(decoded.try_encode(), Some(stored));
         }
     }
@@ -2168,7 +2177,10 @@ fn it_reads_back_an_inductive_rule_that_holds_a_composite_constant() {
         .expect("compiles");
         let stored = rule.try_encode().expect("a body");
         let decoded = InductiveRule::decode(&stored).expect("the body reads back");
-        assert!(decoded.stored_as(&rule.this()), "{constant:?}");
+        assert!(
+            decoded.stored_as(&rule.try_this().expect("a storable rule")),
+            "{constant:?}"
+        );
         assert_eq!(decoded.try_encode(), Some(stored));
     }
 }
@@ -2288,12 +2300,12 @@ fn stored(rule: &Rule) -> (Vec<u8>, Entity, serde_json::Value) {
     let (body, this, written) = match rule {
         Rule::Deductive(rule) => (
             rule.try_encode().expect("a body"),
-            rule.this(),
+            rule.try_this().expect("a storable rule"),
             serde_json::to_value(rule.canonical_descriptor()).expect("JSON"),
         ),
         Rule::Inductive(rule) => (
             rule.try_encode().expect("a body"),
-            rule.this(),
+            rule.try_this().expect("a storable rule"),
             serde_json::to_value(rule.canonical_descriptor()).expect("JSON"),
         ),
     };

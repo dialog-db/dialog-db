@@ -709,11 +709,14 @@ mod tests {
         let employee = rule.conclusion().clone();
 
         let alice: Entity = "id:alice".parse()?;
-        let tx = branch.transaction().assert(&rule).assert(
-            the!("org/person-name")
-                .of(alice.clone())
-                .is("Alice".to_string()),
-        );
+        let tx = branch
+            .transaction()
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            );
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
@@ -779,7 +782,7 @@ mod tests {
         let bob: Entity = "id:bob".parse()?;
         let tx = branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(alice.clone()).is(3u32))
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
@@ -858,7 +861,7 @@ mod tests {
             };
             branch
                 .transaction()
-                .assert(&rule)
+                .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
                 .assert(relation("url")?.of(page.clone()).is(url.to_string()))
                 .assert(relation("title")?.of(page.clone()).is("Home".to_string()))
                 .commit()

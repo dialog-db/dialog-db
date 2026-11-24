@@ -884,7 +884,7 @@ mod tests {
         let rule: DeductiveRule = descriptor.compile()?;
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .assert(salary(&alice, 100))
             .assert(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32))
             .commit()
@@ -1193,7 +1193,7 @@ mod tests {
         let rule: DeductiveRule = descriptor.compile()?;
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .assert(last(&alice, 10))
             .assert(last(&alice, 10))
             .assert(last(&bob, 20))
@@ -1210,7 +1210,7 @@ mod tests {
         // writes are not one write repeated and settle here.
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .assert(last(&alice, 10))
             .assert(last(&bob, 20))
             .assert(last(&bob, 20))
@@ -1472,7 +1472,7 @@ mod tests {
         let rule: DeductiveRule = descriptor.compile()?;
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .assert(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32))
             .assert(salary(&alice, 150))
             .commit()

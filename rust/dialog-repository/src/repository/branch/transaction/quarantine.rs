@@ -82,7 +82,7 @@ async fn read(branch: &Branch, operator: &Operator, of: &Entity, name: &str) -> 
 async fn install(branch: &Branch, operator: &Operator, rule: DeductiveRule) -> Result<()> {
     branch
         .transaction()
-        .assert(rule)
+        .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(operator)
@@ -242,13 +242,13 @@ async fn it_reads_the_rules_it_sets_aside() -> Result<()> {
     install(&branch, &operator, closing.clone()).await?;
     assert_eq!(
         quarantined(&branch, &operator).await?,
-        vec![closing.this()],
+        vec![closing.try_this().expect("a storable rule")],
         "the closing rule is read as set aside"
     );
 
     branch
         .transaction()
-        .retract(&closing)
+        .retract(dialog_query::StorableRule::try_from(&closing).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&operator)

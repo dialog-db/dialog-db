@@ -498,7 +498,7 @@ async fn it_sets_aside_a_rule_deriving_what_its_own_election_reads() -> anyhow::
         .iter()
         .map(|set_aside| set_aside.rule.clone())
         .collect();
-    assert_eq!(quarantined, vec![rule.this()]);
+    assert_eq!(quarantined, vec![rule.try_this().expect("a storable rule")]);
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
         statuses(

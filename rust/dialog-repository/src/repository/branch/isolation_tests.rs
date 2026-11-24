@@ -166,7 +166,9 @@ fn summarize() -> InductiveRule {
 async fn fixture(operator: &Operator, profile: &Peer<VolatileSpace>) -> Result<Branch> {
     let repo = test_repo(operator, profile).await;
     let branch = repo.branch("main").open().perform(operator).await?;
-    let mut transaction = branch.transaction().assert(summarize());
+    let mut transaction = branch
+        .transaction()
+        .assert(dialog_query::StorableRule::try_from(summarize()).expect("a storable rule"));
     for index in 0..PEOPLE {
         transaction = transaction
             .assert(Name::of(person(index)).is(format!("p{index}")))

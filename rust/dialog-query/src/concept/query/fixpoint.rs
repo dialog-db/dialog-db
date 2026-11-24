@@ -2114,7 +2114,7 @@ mod tests {
                 .iter()
                 .map(|set_aside| set_aside.rule.clone())
                 .collect::<Vec<_>>(),
-            vec![even_rule.this()],
+            vec![even_rule.try_this().expect("a storable rule")],
             "the rule deriving what the negation reads is set aside"
         );
 

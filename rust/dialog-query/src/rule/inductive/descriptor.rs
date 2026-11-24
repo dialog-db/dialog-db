@@ -269,8 +269,14 @@ mod tests {
         assert_eq!(reparsed.polarity(), Polarity::Retract);
         // Equal stored bodies: same canonical spelling ⇒ same rule. (Full struct equality is too strict — the analysis'
         // narrowing diagnostics capture HashMap iteration order.)
-        assert_eq!(reparsed.encode(), rule.encode());
-        assert_eq!(reparsed.this(), rule.this());
+        assert_eq!(
+            reparsed.try_encode().expect("a storable rule"),
+            rule.try_encode().expect("a storable rule")
+        );
+        assert_eq!(
+            reparsed.try_this().expect("a storable rule"),
+            rule.try_this().expect("a storable rule")
+        );
     }
 
     #[dialog_common::test]

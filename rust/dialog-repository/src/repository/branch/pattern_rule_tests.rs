@@ -266,11 +266,17 @@ async fn committed<S: PeerSpace>(
         1,
         "the statement beside the rule was written"
     );
-    let body = stored(repo, name, session, &rule.this()).await?;
+    let body = stored(
+        repo,
+        name,
+        session,
+        &rule.try_this().expect("a storable rule"),
+    )
+    .await?;
     assert!(
         DeductiveRule::decode(&body)
             .map_err(anyhow::Error::msg)?
-            .stored_as(&rule.this())
+            .stored_as(&rule.try_this().expect("a storable rule"))
     );
     let milk: Entity = "id:milk".parse()?;
     assert_eq!(
@@ -297,17 +303,27 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
     #[allow(deprecated)]
     branch
         .transaction()
-        .assert(&rule)
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)
         .await?;
-    let body = stored(&repo, "main", session, &rule.this()).await?;
-    assert_eq!(body, rule.encode(), "the body is the rule's encoding");
+    let body = stored(
+        &repo,
+        "main",
+        session,
+        &rule.try_this().expect("a storable rule"),
+    )
+    .await?;
+    assert_eq!(
+        body,
+        rule.try_encode().expect("a storable rule"),
+        "the body is the rule's encoding"
+    );
     assert!(
         DeductiveRule::decode(&body)
             .map_err(anyhow::Error::msg)?
-            .stored_as(&rule.this())
+            .stored_as(&rule.try_this().expect("a storable rule"))
     );
     assert_eq!(
         derived(&repo, "main", session).await?,
@@ -326,27 +342,32 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
     #[allow(deprecated)]
     branch
         .transaction()
-        .retract(&rule)
+        .retract(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)
         .await?;
     assert!(
-        read(&repo, "main", Selector::new().of(rule.this()), session)
-            .await?
-            .is_empty(),
+        read(
+            &repo,
+            "main",
+            Selector::new().of(rule.try_this().expect("a storable rule")),
+            session
+        )
+        .await?
+        .is_empty(),
         "retracting the rule erases every fact of it"
     );
     assert!(derived(&repo, "main", session).await?.is_empty());
 
     // Beside other statements, through the batch a statement stages.
     let mut staged = Changes::new();
-    staged.assert(&rule);
+    staged.assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"));
     committed(&repo, "staged", session, &rule, staged).await?;
 
     // A query layer's changes carry the body, so a copy into a
     // transaction commits the rule.
-    let layer = branch.with(&rule);
+    let layer = branch.with(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"));
     committed(&repo, "layer", session, &rule, layer.changes().clone()).await?;
 
     // A copy asserted as a statement commits the same way.
@@ -360,7 +381,13 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
         .publish()
         .perform(session)
         .await?;
-    stored(&repo, "statement", session, &rule.this()).await?;
+    stored(
+        &repo,
+        "statement",
+        session,
+        &rule.try_this().expect("a storable rule"),
+    )
+    .await?;
     assert_eq!(
         derived(&repo, "statement", session).await?,
         vec![(milk.clone(), text("Buy milk"))]
@@ -372,12 +399,18 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
     #[allow(deprecated)]
     inducing
         .transaction()
-        .assert(&induced)
+        .assert(dialog_query::StorableRule::try_from(&induced).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)
         .await?;
-    stored(&repo, "induced", session, &induced.this()).await?;
+    stored(
+        &repo,
+        "induced",
+        session,
+        &induced.try_this().expect("a storable rule"),
+    )
+    .await?;
     write(&inducing, session, &call, "Call mum").await?;
     let written = read(
         &repo,
@@ -403,17 +436,27 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
     #[allow(deprecated)]
     holding
         .transaction()
-        .assert(&by_me)
+        .assert(dialog_query::StorableRule::try_from(&by_me).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)
         .await?;
-    let body = stored(&repo, "by-me", session, &by_me.this()).await?;
-    assert_eq!(body, by_me.encode(), "the body is the rule's encoding");
+    let body = stored(
+        &repo,
+        "by-me",
+        session,
+        &by_me.try_this().expect("a storable rule"),
+    )
+    .await?;
+    assert_eq!(
+        body,
+        by_me.try_encode().expect("a storable rule"),
+        "the body is the rule's encoding"
+    );
     assert!(
         DeductiveRule::decode(&body)
             .map_err(anyhow::Error::msg)?
-            .stored_as(&by_me.this())
+            .stored_as(&by_me.try_this().expect("a storable rule"))
     );
     let by: Value = Composite::map([(text("name"), text("me"))])?.into();
     #[allow(deprecated)]
@@ -473,11 +516,15 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     let milk: Entity = "id:milk".parse()?;
 
     let before = branch.overlay().revision();
-    branch.overlay().assert(&rule)?;
-    assert_ne!(branch.overlay().revision(), before, "the rule landed");
-    let sources = branch
+    branch
         .overlay()
-        .scan(&Selector::new().of(rule.this()).the(source_attr()));
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))?;
+    assert_ne!(branch.overlay().revision(), before, "the rule landed");
+    let sources = branch.overlay().scan(
+        &Selector::new()
+            .of(rule.try_this().expect("a storable rule"))
+            .the(source_attr()),
+    );
     let [source] = sources.as_slice() else {
         anyhow::bail!("one body, found {}", sources.len());
     };
@@ -491,11 +538,13 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     assert_eq!(titles(&rows), vec![(milk.clone(), text("Buy milk"))]);
 
     // Gone with its facts when it is retracted.
-    branch.overlay().retract(&rule)?;
+    branch
+        .overlay()
+        .retract(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))?;
     assert!(
         branch
             .overlay()
-            .scan(&Selector::new().of(rule.this()))
+            .scan(&Selector::new().of(rule.try_this().expect("a storable rule")))
             .is_empty()
     );
     let rows = branch
@@ -507,7 +556,7 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     assert!(rows.is_empty());
 
     // A query layer's changes apply.
-    let layer = branch.with(&rule);
+    let layer = branch.with(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"));
     branch.overlay().apply(layer.changes().clone())?;
     let rows = branch
         .query()
@@ -520,10 +569,14 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     // A rule that holds a constant map inside its pattern lands, its body
     // in format 5, which reads back as the rule.
     let by_me = by_me()?;
-    branch.overlay().assert(&by_me)?;
-    let sources = branch
+    branch
         .overlay()
-        .scan(&Selector::new().of(by_me.this()).the(source_attr()));
+        .assert(dialog_query::StorableRule::try_from(&by_me).expect("a storable rule"))?;
+    let sources = branch.overlay().scan(
+        &Selector::new()
+            .of(by_me.try_this().expect("a storable rule"))
+            .the(source_attr()),
+    );
     let [source] = sources.as_slice() else {
         anyhow::bail!("one body, found {}", sources.len());
     };
@@ -534,7 +587,7 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     assert!(
         DeductiveRule::decode(body)
             .map_err(anyhow::Error::msg)?
-            .stored_as(&by_me.this())
+            .stored_as(&by_me.try_this().expect("a storable rule"))
     );
     Ok(())
 }
@@ -572,12 +625,14 @@ async fn it_keeps_a_subscription_through_a_stored_pattern_rule_current() -> Resu
             .await?;
         seed(&branch, &session).await?;
         if overlay {
-            branch.overlay().assert(&rule)?;
+            branch
+                .overlay()
+                .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))?;
         } else {
             #[allow(deprecated)]
             branch
                 .transaction()
-                .assert(&rule)
+                .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
                 .commit()
                 .publish()
                 .perform(&session)
@@ -659,7 +714,7 @@ async fn it_keeps_a_fold_through_a_stored_pattern_rule_current() -> Result<()> {
     branch
         .transaction()
         .assert(the!("note/title").of(milk.clone()).is("Milk".to_string()))
-        .assert(&deductive()?)
+        .assert(dialog_query::StorableRule::try_from(&deductive()?).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&session)
@@ -817,17 +872,25 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
             .perform(&session)
             .await?;
         if overlay {
-            branch.overlay().assert(&rule)?;
+            branch
+                .overlay()
+                .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))?;
         } else {
             #[allow(deprecated)]
             branch
                 .transaction()
-                .assert(&rule)
+                .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
                 .commit()
                 .publish()
                 .perform(&session)
                 .await?;
-            stored(&repo, name, &session, &rule.this()).await?;
+            stored(
+                &repo,
+                name,
+                &session,
+                &rule.try_this().expect("a storable rule"),
+            )
+            .await?;
             let loaded = repo.branch(name).load().perform(&session).await?;
             let rows = loaded
                 .query()
@@ -930,7 +993,7 @@ async fn install_as<S: PeerSpace>(
     body: Vec<u8>,
 ) -> Result<()> {
     let mut staged = Changes::new();
-    staged.assert(rule);
+    staged.assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"));
     let instructions: Vec<_> = staged
         .into_instructions()
         .into_iter()
@@ -1021,13 +1084,19 @@ async fn it_rewrites_only_bodies_below_format_4_on_upgrade() -> Result<()> {
             }))
         }],
     )?;
-    assert_eq!(format_of(&plain.encode()), Some(4));
-    assert_eq!(format_of(&pattern.encode()), Some(5));
+    assert_eq!(
+        format_of(&plain.try_encode().expect("a storable rule")),
+        Some(4)
+    );
+    assert_eq!(
+        format_of(&pattern.try_encode().expect("a storable rule")),
+        Some(5)
+    );
     #[allow(deprecated)]
     branch
         .transaction()
-        .assert(&pattern)
-        .assert(&plain)
+        .assert(dialog_query::StorableRule::try_from(&pattern).expect("a storable rule"))
+        .assert(dialog_query::StorableRule::try_from(&plain).expect("a storable rule"))
         .commit()
         .publish()
         .perform(&session)
@@ -1036,30 +1105,50 @@ async fn it_rewrites_only_bodies_below_format_4_on_upgrade() -> Result<()> {
         &branch,
         &session,
         &earlier,
-        restamped(&earlier.encode(), 3)?,
+        restamped(&earlier.try_encode().expect("a storable rule"), 3)?,
     )
     .await?;
     assert_eq!(
-        format_of(&stored_bytes(&repo, &session, &earlier.this()).await?),
+        format_of(
+            &stored_bytes(
+                &repo,
+                &session,
+                &earlier.try_this().expect("a storable rule")
+            )
+            .await?
+        ),
         Some(3)
     );
 
     let upgraded = branch.upgrade_rules().perform(&session).await?;
-    assert_eq!(upgraded.rewritten, vec![earlier.this()]);
+    assert_eq!(
+        upgraded.rewritten,
+        vec![earlier.try_this().expect("a storable rule")]
+    );
     assert!(upgraded.reinstalled.is_empty());
     assert!(upgraded.undecodable.is_empty());
     assert_eq!(
-        stored_bytes(&repo, &session, &earlier.this()).await?,
-        earlier.encode(),
+        stored_bytes(
+            &repo,
+            &session,
+            &earlier.try_this().expect("a storable rule")
+        )
+        .await?,
+        earlier.try_encode().expect("a storable rule"),
         "rewritten into format 4"
     );
     assert_eq!(
-        stored_bytes(&repo, &session, &plain.this()).await?,
-        plain.encode()
+        stored_bytes(&repo, &session, &plain.try_this().expect("a storable rule")).await?,
+        plain.try_encode().expect("a storable rule")
     );
     assert_eq!(
-        stored_bytes(&repo, &session, &pattern.this()).await?,
-        pattern.encode()
+        stored_bytes(
+            &repo,
+            &session,
+            &pattern.try_this().expect("a storable rule")
+        )
+        .await?,
+        pattern.try_encode().expect("a storable rule")
     );
     branch.refresh(&session).await?;
     let again = branch.upgrade_rules().perform(&session).await?;
@@ -1107,7 +1196,13 @@ async fn it_leaves_a_body_in_a_later_format_inert() -> Result<()> {
     let branch = repo.branch("main").open().perform(&session).await?;
     seed(&branch, &session).await?;
     let rule = deductive()?;
-    install_as(&branch, &session, &rule, restamped(&rule.encode(), 6)?).await?;
+    install_as(
+        &branch,
+        &session,
+        &rule,
+        restamped(&rule.try_encode().expect("a storable rule"), 6)?,
+    )
+    .await?;
     assert!(
         derived(&repo, "main", &session).await?.is_empty(),
         "the rule derives nothing"
@@ -1115,7 +1210,7 @@ async fn it_leaves_a_body_in_a_later_format_inert() -> Result<()> {
     assert_eq!(
         invalid(&branch, &session).await?,
         vec![(
-            rule.this(),
+            rule.try_this().expect("a storable rule"),
             text("newer: the body is in format 6, and this release reads up to 5")
         )]
     );
@@ -1200,13 +1295,17 @@ async fn composite_scenario<S: PeerSpace>(
     #[allow(deprecated)]
     branch
         .transaction()
-        .assert(&rule)
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)
         .await?;
-    let body = stored_bytes(&repo, session, &rule.this()).await?;
-    assert_eq!(body, rule.encode(), "the body is the rule's encoding");
+    let body = stored_bytes(&repo, session, &rule.try_this().expect("a storable rule")).await?;
+    assert_eq!(
+        body,
+        rule.try_encode().expect("a storable rule"),
+        "the body is the rule's encoding"
+    );
     assert_eq!(format_of(&body), Some(4), "no pattern is held");
     let branch = repo.branch("main").load().perform(session).await?;
     assert_eq!(
@@ -1228,7 +1327,7 @@ async fn composite_scenario<S: PeerSpace>(
     #[allow(deprecated)]
     inducing
         .transaction()
-        .assert(&induced)
+        .assert(dialog_query::StorableRule::try_from(&induced).expect("a storable rule"))
         .commit()
         .publish()
         .perform(session)

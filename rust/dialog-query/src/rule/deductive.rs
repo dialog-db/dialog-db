@@ -552,23 +552,6 @@ impl DeductiveRule {
         }
     }
 
-    /// This rule's stored body, panicking if the rule has no encodable
-    /// body. Use on the storage path where the rule is known to be
-    /// storable (concept/formula bodies). Prefer
-    /// [`try_encode`](Self::try_encode) otherwise.
-    pub fn encode(&self) -> Vec<u8> {
-        self.try_encode()
-            .expect("rule body must encode in formal notation")
-    }
-
-    /// Content-addressed identity, panicking if the rule has no
-    /// encodable body. Use on the storage path; prefer
-    /// [`try_this`](Self::try_this) otherwise.
-    pub fn this(&self) -> Entity {
-        self.try_this()
-            .expect("storable rule must have a content-addressed identity")
-    }
-
     /// Rebuild a rule from a stored body, in this release's format or an
     /// earlier one. A body in the current format gives the rule in its
     /// canonical spelling. `Err` carries a human-readable reason: the
@@ -1166,12 +1149,18 @@ mod tests {
         let descriptor: DeductiveRuleDescriptor =
             serde_json::from_value(json).expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let bytes = blake3::hash(&rule.try_encode().expect("a storable rule"))
+            .as_bytes()
+            .to_vec();
         let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
             .parse()
             .expect("an entity");
-        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
-        assert!(rule.stored_as(&rule.this()));
+        assert_ne!(
+            legacy,
+            rule.try_this().expect("a storable rule"),
+            "the byte hash is not the identity"
+        );
+        assert!(rule.stored_as(&rule.try_this().expect("a storable rule")));
         assert!(!rule.stored_as(&legacy));
         let other: Entity = "rule:forged".parse().expect("an entity");
         assert!(!rule.stored_as(&other));
@@ -1203,20 +1192,32 @@ mod tests {
         };
         let a = build();
         let b = build();
-        assert_eq!(a.this(), b.this(), "same rule body ⇒ same identity");
         assert_eq!(
-            a.encode(),
-            b.encode(),
+            a.try_this().expect("a storable rule"),
+            b.try_this().expect("a storable rule"),
+            "same rule body ⇒ same identity"
+        );
+        assert_eq!(
+            a.try_encode().expect("a storable rule"),
+            b.try_encode().expect("a storable rule"),
             "dag-cbor encoding is stable across compilations"
         );
         assert!(
-            a.this().to_string().starts_with("rule:"),
+            a.try_this()
+                .expect("a storable rule")
+                .to_string()
+                .starts_with("rule:"),
             "identity is a rule: URI, got {}",
-            a.this()
+            a.try_this().expect("a storable rule")
         );
         // Round-trips through encode/decode.
-        let decoded = DeductiveRule::decode(&a.encode()).expect("decodes");
-        assert_eq!(decoded.this(), a.this(), "encode/decode preserves identity");
+        let decoded =
+            DeductiveRule::decode(&a.try_encode().expect("a storable rule")).expect("decodes");
+        assert_eq!(
+            decoded.try_this().expect("a storable rule"),
+            a.try_this().expect("a storable rule"),
+            "encode/decode preserves identity"
+        );
     }
 
     /// A premise that reads a collection and binds neither the key nor
@@ -1250,10 +1251,13 @@ mod tests {
         let descriptor: DeductiveRuleDescriptor =
             serde_json::from_value(json).expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let bytes = rule.encode();
+        let bytes = rule.try_encode().expect("a storable rule");
         assert_eq!(
-            DeductiveRule::decode(&bytes).map(|decoded| (decoded.this(), decoded.encode())),
-            Ok((rule.this(), bytes))
+            DeductiveRule::decode(&bytes).map(|decoded| (
+                decoded.try_this().expect("a storable rule"),
+                decoded.try_encode().expect("a storable rule")
+            )),
+            Ok((rule.try_this().expect("a storable rule"), bytes))
         );
     }
 

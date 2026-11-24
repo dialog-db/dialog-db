@@ -3379,7 +3379,7 @@ mod tests {
         transaction: crate::Transaction<&'t crate::Branch>,
         rule: &dialog_query::DeductiveRule,
     ) -> crate::Transaction<&'t crate::Branch> {
-        transaction.assert(rule)
+        transaction.assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
     }
 
     /// A rule `conclusion :- Concept(target, terms)` built from

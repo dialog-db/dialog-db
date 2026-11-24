@@ -7674,7 +7674,7 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
     #[allow(deprecated)]
     alice_branch
         .transaction()
-        .assert(&rule)
+        .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
         .assert(
             the!("note/payload")
                 .of(milk.clone())
@@ -7734,7 +7734,7 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
         .claims()
         .select(
             Selector::new()
-                .of(rule.this())
+                .of(rule.try_this().expect("a storable rule"))
                 .the("dialog.rule/source".parse()?),
         )
         .to_owned()

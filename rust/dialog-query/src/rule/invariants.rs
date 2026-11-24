@@ -84,7 +84,7 @@ fn a_rule_the_previous_release_stored_is_inert_under_its_byte_hash() {
         "the rule is not live under the hash of the bytes it was stored as"
     );
     assert!(
-        rule.stored_as(&rule.this()),
+        rule.stored_as(&rule.try_this().expect("a storable rule")),
         "it is live under its identity"
     );
 }
@@ -103,7 +103,10 @@ fn a_premise_field_name_does_not_distinguish_a_rule() {
         knows_as("acquaintance", "this", "x"),
         knows_as("acquaintance", "x", "friend"),
     ]);
-    assert_eq!(knows.this(), acquaintance.this());
+    assert_eq!(
+        knows.try_this().expect("a storable rule"),
+        acquaintance.try_this().expect("a storable rule")
+    );
 }
 
 /// A rule's plan is keyed by its identity and the spelling of its head.
@@ -135,7 +138,11 @@ fn a_plan_is_cached_by_the_working_spelling_it_was_planned_for() {
         "deduce": head("b", "a"),
         "when": [premise("x/p", "p", "b"), premise("x/q", "q", "a")],
     }));
-    assert_eq!(one.this(), other.this(), "one rule, two spellings");
+    assert_eq!(
+        one.try_this().expect("a storable rule"),
+        other.try_this().expect("a storable rule"),
+        "one rule, two spellings"
+    );
     let scope = Environment::new();
     let adornment = Adornment::binding(&one.conclusion().sorted_operands(), &scope);
     let cache = PlanCache::default();

@@ -172,9 +172,9 @@ impl<'a> QueryLayer<'a> {
     /// merges an existing batch in. Any concept instance, attribute
     /// expression, or other `Statement` works too. Chainable.
     ///
-    /// A deductive rule is a `Statement` too, so `.with(rule)` folds it
-    /// into the overlay — the query resolves it as a transient rule
-    /// without persisting it.
+    /// A [`StorableRule`](dialog_query::StorableRule) is a `Statement`
+    /// too, so `.with(storable)` folds the rule into the overlay: the
+    /// query resolves it as a transient rule without persisting it.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
         statement.assert(&mut self.changes);
         self
@@ -3112,7 +3112,10 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("admin".to_string()),
             )
-            .assert(employee_pair_rule())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_pair_rule())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3167,8 +3170,22 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(projection("org/person-name", "org/employee-name", "name"))
-            .assert(projection("org/person-role", "org/employee-role", "role"))
+            .assert(
+                dialog_query::StorableRule::try_from(projection(
+                    "org/person-name",
+                    "org/employee-name",
+                    "name",
+                ))
+                .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(projection(
+                    "org/person-role",
+                    "org/employee-role",
+                    "role",
+                ))
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3203,7 +3220,14 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Stored".to_string()),
             )
-            .assert(projection("org/person-name", "org/employee-name", "name"))
+            .assert(
+                dialog_query::StorableRule::try_from(projection(
+                    "org/person-name",
+                    "org/employee-name",
+                    "name",
+                ))
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3294,7 +3318,10 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3330,7 +3357,10 @@ mod rule_tests {
                     .of("id:alice".parse::<Entity>()?)
                     .is("Alice".to_string()),
             )
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&env)
@@ -3375,7 +3405,10 @@ mod rule_tests {
                     .of("id:alice".parse::<Entity>()?)
                     .is("Alice".to_string()),
             )
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&env)
@@ -3446,7 +3479,7 @@ mod rule_tests {
             .assert(the!("org/salary").of(alice.clone()).is(3u32))
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3529,7 +3562,7 @@ mod rule_tests {
             .assert(the!("org/dept").of(bob.clone()).is(dept_a.clone()))
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(the!("org/flat-total").of(dept_b.clone()).is(9u32))
-            .assert(&committed)
+            .assert(dialog_query::StorableRule::try_from(&committed).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3541,7 +3574,7 @@ mod rule_tests {
         terms.insert("top".into(), Term::var("top"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(&overlay)
+            .with(dialog_query::StorableRule::try_from(&overlay).expect("a storable rule"))
             .select(ConceptQuery {
                 predicate: dept_top,
                 terms,
@@ -3613,7 +3646,10 @@ mod rule_tests {
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(employee_from_person())
+            .with(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -3659,7 +3695,10 @@ mod rule_tests {
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(employee_from_person())
+            .with(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -3702,7 +3741,10 @@ mod rule_tests {
         terms.insert("name".into(), Term::var("name"));
         let with_overlay: Vec<ConceptConclusion> = branch
             .query()
-            .with(employee_from_person())
+            .with(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -3751,7 +3793,10 @@ mod rule_tests {
             terms.insert("name".into(), Term::var("name"));
             branch
                 .query()
-                .with(employee_from_person())
+                .with(
+                    dialog_query::StorableRule::try_from(employee_from_person())
+                        .expect("a storable rule"),
+                )
                 .select(ConceptQuery {
                     predicate: employee_descriptor(),
                     terms,
@@ -3791,7 +3836,10 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(operator)
@@ -3894,7 +3942,10 @@ mod rule_tests {
 
         branch
             .transaction()
-            .assert(rule_with_person_attr("org/contractor-name"))
+            .assert(
+                dialog_query::StorableRule::try_from(rule_with_person_attr("org/contractor-name"))
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3935,7 +3986,9 @@ mod rule_tests {
         );
 
         let mut changes = dialog_corpus::Changes::new();
-        rule_with_person_attr("org/contractor-name").assert(&mut changes);
+        dialog_query::StorableRule::try_from(rule_with_person_attr("org/contractor-name"))
+            .expect("a storable rule")
+            .assert(&mut changes);
         branch
             .commit(stream::iter(changes.into_instructions()))
             .perform(&operator)
@@ -3977,8 +4030,14 @@ mod rule_tests {
             .perform(&operator)
             .await?
             .transaction()
-            .assert(rule("case:active", "account/active")?)
-            .assert(rule("case:invited", "account/invited")?)
+            .assert(
+                dialog_query::StorableRule::try_from(rule("case:active", "account/active")?)
+                    .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(rule("case:invited", "account/invited")?)
+                    .expect("a storable rule"),
+            )
             .assert(
                 the!("account/invited")
                     .of(account.clone())
@@ -4053,7 +4112,7 @@ mod rule_tests {
         assert!(
             their_branch
                 .rule_cache()
-                .body(&entity, &rule.encode())
+                .body(&entity, &rule.try_encode().expect("a storable rule"))
                 .is_some(),
             "the body our query decoded is theirs to reuse"
         );
@@ -4112,7 +4171,14 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(projection("org/employee-name", "org/staff-name", "name"))
+            .assert(
+                dialog_query::StorableRule::try_from(projection(
+                    "org/employee-name",
+                    "org/staff-name",
+                    "name",
+                ))
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -4120,7 +4186,9 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         assert!(staff(&branch, &operator).await?.is_empty());
-        branch.overlay().assert(employee_from_person())?;
+        branch.overlay().assert(
+            dialog_query::StorableRule::try_from(employee_from_person()).expect("a storable rule"),
+        )?;
         assert_eq!(staff(&branch, &operator).await?, vec![alice]);
         Ok(())
     }
@@ -4149,7 +4217,9 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         assert!(query_employees(&branch, &operator).await?.is_empty());
-        let tx = branch.transaction().assert(employee_from_person());
+        let tx = branch.transaction().assert(
+            dialog_query::StorableRule::try_from(employee_from_person()).expect("a storable rule"),
+        );
         assert_eq!(transaction_employees(&tx, &operator).await?, vec![alice]);
         Ok(())
     }
@@ -4180,10 +4250,16 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let mut genuine = Changes::new();
-        employee_from_person().assert(&mut genuine);
+        dialog_query::StorableRule::try_from(employee_from_person())
+            .expect("a storable rule")
+            .assert(&mut genuine);
         // The bytes of another rule: they decode, but not to a rule stored
         // under this entity.
-        let other = Value::Bytes(rule_with_person_attr("org/person-alias").encode());
+        let other = Value::Bytes(
+            rule_with_person_attr("org/person-alias")
+                .try_encode()
+                .expect("a storable rule"),
+        );
         let mut forged = Changes::new();
         for (of, the, change) in genuine.iter() {
             let dialog_corpus::Change::Assert(value, cardinality) = change else {
@@ -4256,7 +4332,10 @@ mod rule_tests {
         // Commit the rule on the SAME handle → its head advances.
         branch
             .transaction()
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -4286,8 +4365,8 @@ mod rule_tests {
         let r1 = rule_with_person_attr("org/person-name");
         let r2 = rule_with_person_attr("org/contractor-name");
         assert_ne!(
-            r1.this(),
-            r2.this(),
+            r1.try_this().expect("a storable rule"),
+            r2.try_this().expect("a storable rule"),
             "distinct bodies ⇒ distinct identities"
         );
 
@@ -4303,8 +4382,8 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(&r1)
-            .assert(&r2)
+            .assert(dialog_query::StorableRule::try_from(&r1).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(&r2).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4348,7 +4427,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(&r1)
+            .assert(dialog_query::StorableRule::try_from(&r1).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4362,7 +4441,7 @@ mod rule_tests {
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(&r2)
+            .with(dialog_query::StorableRule::try_from(&r2).expect("a storable rule"))
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -4420,9 +4499,10 @@ mod rule_tests {
             .await?;
         assert!(before.is_empty(), "no rule, no employees");
 
-        branch
-            .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"))?;
+        branch.overlay().assert(
+            dialog_query::StorableRule::try_from(rule_with_person_attr("org/contractor-name"))
+                .expect("a storable rule"),
+        )?;
         let after: Vec<ConceptConclusion> = branch
             .select(employees())
             .perform(&operator)
@@ -4475,9 +4555,10 @@ mod rule_tests {
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty(), "no rule, no employees");
 
-        branch
-            .overlay()
-            .assert(rule_with_person_attr("org/contractor-name"))?;
+        branch.overlay().assert(
+            dialog_query::StorableRule::try_from(rule_with_person_attr("org/contractor-name"))
+                .expect("a storable rule"),
+        )?;
         let delta = subscription
             .poll(&operator)
             .await?
@@ -4514,7 +4595,10 @@ mod rule_tests {
 
         branch
             .transaction()
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .assert(
                 the!("org/person-name")
                     .of(Entity::new()?)
@@ -4584,7 +4668,10 @@ mod rule_tests {
             .perform(&operator)
             .await?
             .transaction()
-            .assert(employee_from_person())
+            .assert(
+                dialog_query::StorableRule::try_from(employee_from_person())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -4628,7 +4715,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(&r_person)
+            .assert(dialog_query::StorableRule::try_from(&r_person).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4647,7 +4734,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(&r_contractor)
+            .assert(dialog_query::StorableRule::try_from(&r_contractor).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4699,7 +4786,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4711,7 +4798,7 @@ mod rule_tests {
         // Retract the rule's facts on the same handle → head advances.
         branch
             .transaction()
-            .retract(&rule)
+            .retract(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4747,7 +4834,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(&v1)
+            .assert(dialog_query::StorableRule::try_from(&v1).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4761,7 +4848,10 @@ mod rule_tests {
         // body, not v1's cached one.
         let carol: Entity = "id:carol".parse()?;
         let v2 = rule_with_person_attr("org/agent-name");
-        assert_ne!(v1.this(), v2.this());
+        assert_ne!(
+            v1.try_this().expect("a storable rule"),
+            v2.try_this().expect("a storable rule")
+        );
         branch
             .transaction()
             .assert(
@@ -4769,7 +4859,7 @@ mod rule_tests {
                     .of(carol.clone())
                     .is("Carol".to_string()),
             )
-            .assert(&v2)
+            .assert(dialog_query::StorableRule::try_from(&v2).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4852,8 +4942,8 @@ mod rule_tests {
         let device: Entity = "id:device".parse()?;
         branch
             .transaction()
-            .assert(&remote)
-            .assert(&replicated)
+            .assert(dialog_query::StorableRule::try_from(&remote).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(&replicated).expect("a storable rule"))
             .assert(
                 the!("load.space/subject")
                     .of(here.clone())
@@ -5586,7 +5676,7 @@ mod resolver_tests {
         let conclusion = rule.conclusion().clone();
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -5651,7 +5741,7 @@ mod resolver_tests {
         let conclusion = rule.conclusion().clone();
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -5741,7 +5831,7 @@ mod resolver_tests {
         let conclusion = rule.conclusion().clone();
         branch
             .transaction()
-            .assert(&rule)
+            .assert(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -6019,7 +6109,8 @@ mod transient_pattern_tests {
             predicate: concept("heading", "note/heading", "text:"),
             terms,
         };
-        let layer = branch.with(&rule);
+        let layer =
+            branch.with(dialog_query::StorableRule::try_from(&rule).expect("a storable rule"));
         let staged: Vec<_> = layer
             .changes()
             .clone()
@@ -6028,13 +6119,14 @@ mod transient_pattern_tests {
             .collect();
         assert!(staged.iter().any(|instruction| match instruction {
             dialog_corpus::Instruction::Assert(fact, _)
-            | dialog_corpus::Instruction::Retract(fact) => fact.of == rule.this(),
+            | dialog_corpus::Instruction::Retract(fact) =>
+                fact.of == rule.try_this().expect("a storable rule"),
         }));
         assert!(staged.iter().any(|instruction| match instruction {
             dialog_corpus::Instruction::Assert(fact, _) => {
-                fact.of == rule.this()
+                fact.of == rule.try_this().expect("a storable rule")
                     && fact.the == source_attr()
-                    && fact.is == Value::Bytes(rule.encode())
+                    && fact.is == Value::Bytes(rule.try_encode().expect("a storable rule"))
             }
             dialog_corpus::Instruction::Retract(_) => false,
         }));

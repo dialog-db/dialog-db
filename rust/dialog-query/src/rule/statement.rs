@@ -1,8 +1,9 @@
 //! Rules as [`Statement`]s: the `dialog.rule/*` storage vocabulary and
 //! the lowering that installs a rule by plain assertion.
 //!
-//! A rule *is* its facts: asserting a [`DeductiveRule`] or an
-//! [`InductiveRule`] into any [`Update`] target stages the
+//! A rule *is* its facts: asserting a [`StorableRule`], a
+//! [`DeductiveRule`] or an [`InductiveRule`] checked to have a stored
+//! form, into any [`Update`] target stages the
 //! `dialog.rule/*` claims that persist it, and retracting the same rule
 //! erases them — install and uninstall are ordinary writes, no dedicated
 //! API. The kind decides the fact shape:
@@ -24,6 +25,7 @@ use std::collections::BTreeSet;
 
 use crate::attribute::The;
 use crate::corpus::{Entity, Value};
+use crate::error::TypeError;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
 use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
@@ -250,166 +252,216 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
         .collect()
 }
 
-/// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
+/// A rule that can be stored: a [`DeductiveRule`] or an
+/// [`InductiveRule`] together with the identity and the body it is
+/// stored under, computed when it was checked. Only a storable rule is
+/// a [`Statement`], so a rule with no stored form (a concept's implicit
+/// rule, or one that reads an attribute by a raw scan) cannot be
+/// asserted or retracted.
+///
+/// Asserting a deductive rule installs it as `dialog.rule/*` facts:
 /// the `derives` head index over the conclusion's attributes, which
 /// resolution looks the rule up by, the `conclusion` concept it was
 /// written against, the `source` body, and the `reads` reverse index
 /// over the body's attributes that lets commit-time dispatch close its
-/// trigger footprint over derivation. Retracting the same rule erases
-/// those facts, uninstalling it.
-///
-/// A rule that holds a pattern is stored as any other, its body in
-/// format 5 (see [`body`](crate::rule::body)).
+/// trigger footprint over derivation. Asserting an inductive rule
+/// installs the `source` body (shared attribute with deductive rules:
+/// hydration dispatches on the head field), the `induces` head index,
+/// and the `on` trigger index dispatch probes by touched attribute.
+/// Retracting the same rule erases those facts, uninstalling it. A rule
+/// that holds a pattern is stored as any other, its body in format 5
+/// (see [`body`](crate::rule::body)).
 ///
 /// ```no_run
-/// # use dialog_query::DeductiveRule;
-/// # use dialog_query::Changes;
-/// # fn example(rule: DeductiveRule) {
+/// # use dialog_query::{Changes, DeductiveRule, StorableRule};
+/// # fn example(rule: DeductiveRule) -> Result<(), dialog_query::error::TypeError> {
 /// let mut changes = Changes::new();
-/// changes.assert(&rule);
+/// changes.assert(StorableRule::try_from(&rule)?);
+/// # Ok(())
 /// # }
 /// ```
-impl Statement for &DeductiveRule {
-    fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.this();
-        update.associate(
-            conclusion_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.conclusion().this()),
-            dialog_corpus::Cardinality::Many,
-        );
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-            dialog_corpus::Cardinality::Many,
-        );
-        for reads in reads_entities(self) {
-            update.associate(
-                reads_attr(),
-                rule_entity.clone(),
-                Value::Entity(reads),
-                dialog_corpus::Cardinality::Many,
-            );
-        }
-        for derives in derives_entities(self) {
-            update.associate(
-                derives_attr(),
-                rule_entity.clone(),
-                Value::Entity(derives),
-                dialog_corpus::Cardinality::Many,
-            );
-        }
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorableRule {
+    rule: Rule,
+    this: Entity,
+    body: Vec<u8>,
+}
+
+impl StorableRule {
+    /// The rule's content-addressed identity, the entity its facts are
+    /// stored under.
+    pub fn this(&self) -> &Entity {
+        &self.this
     }
 
-    fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.this();
-        update.dissociate(
-            conclusion_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.conclusion().this()),
-        );
-        update.dissociate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-        );
-        for reads in reads_entities(self) {
-            update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
-        }
-        for derives in derives_entities(self) {
-            update.dissociate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
+    /// The rule's stored body.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The rule.
+    pub fn rule(&self) -> &Rule {
+        &self.rule
+    }
+
+    fn checked(rule: Rule, this: Option<Entity>, body: Option<Vec<u8>>) -> Result<Self, TypeError> {
+        match (this, body) {
+            (Some(this), Some(body)) => Ok(StorableRule { rule, this, body }),
+            _ => Err(TypeError::RuleWithoutIdentity {
+                concept: rule.conclusion().this().to_string(),
+            }),
         }
     }
 }
 
-impl Statement for DeductiveRule {
-    fn assert(self, update: &mut impl Update) {
-        (&self).assert(update);
-    }
+impl TryFrom<Rule> for StorableRule {
+    type Error = TypeError;
 
-    fn retract(self, update: &mut impl Update) {
-        (&self).retract(update);
+    /// Fails with [`TypeError::RuleWithoutIdentity`] when the rule has
+    /// no stored form.
+    fn try_from(rule: Rule) -> Result<Self, Self::Error> {
+        let (this, body) = match &rule {
+            Rule::Deductive(rule) => (rule.try_this(), rule.try_encode()),
+            Rule::Inductive(rule) => (rule.try_this(), rule.try_encode()),
+        };
+        Self::checked(rule, this, body)
     }
 }
 
-/// Asserting an [`InductiveRule`] installs it as `dialog.rule/*` facts:
-/// the `source` body (shared attribute with deductive rules — hydration
-/// dispatches on the head field), the `induces` head index, and the
-/// `on` trigger index dispatch probes by touched attribute. Retracting
-/// the same rule erases those facts, uninstalling it. A rule that holds
-/// a pattern is stored in format 5.
-impl Statement for &InductiveRule {
+impl TryFrom<&Rule> for StorableRule {
+    type Error = TypeError;
+
+    fn try_from(rule: &Rule) -> Result<Self, Self::Error> {
+        StorableRule::try_from(rule.clone())
+    }
+}
+
+impl TryFrom<DeductiveRule> for StorableRule {
+    type Error = TypeError;
+
+    fn try_from(rule: DeductiveRule) -> Result<Self, Self::Error> {
+        StorableRule::try_from(Rule::Deductive(rule))
+    }
+}
+
+impl TryFrom<&DeductiveRule> for StorableRule {
+    type Error = TypeError;
+
+    fn try_from(rule: &DeductiveRule) -> Result<Self, Self::Error> {
+        StorableRule::try_from(Rule::Deductive(rule.clone()))
+    }
+}
+
+impl TryFrom<InductiveRule> for StorableRule {
+    type Error = TypeError;
+
+    fn try_from(rule: InductiveRule) -> Result<Self, Self::Error> {
+        StorableRule::try_from(Rule::Inductive(rule))
+    }
+}
+
+impl TryFrom<&InductiveRule> for StorableRule {
+    type Error = TypeError;
+
+    fn try_from(rule: &InductiveRule) -> Result<Self, Self::Error> {
+        StorableRule::try_from(Rule::Inductive(rule.clone()))
+    }
+}
+
+impl Statement for &StorableRule {
     fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.this();
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-            dialog_corpus::Cardinality::Many,
-        );
-        update.associate(
-            induces_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.conclusion().this()),
-            dialog_corpus::Cardinality::Many,
-        );
-        for on in on_entities(self) {
-            update.associate(
-                on_attr(),
-                rule_entity.clone(),
-                Value::Entity(on),
-                dialog_corpus::Cardinality::Many,
-            );
+        let entity = self.this.clone();
+        let body = Value::Bytes(self.body.clone());
+        match &self.rule {
+            Rule::Deductive(rule) => {
+                update.associate(
+                    conclusion_attr(),
+                    entity.clone(),
+                    Value::Entity(rule.conclusion().this()),
+                    dialog_corpus::Cardinality::Many,
+                );
+                update.associate(
+                    source_attr(),
+                    entity.clone(),
+                    body,
+                    dialog_corpus::Cardinality::Many,
+                );
+                for reads in reads_entities(rule) {
+                    update.associate(
+                        reads_attr(),
+                        entity.clone(),
+                        Value::Entity(reads),
+                        dialog_corpus::Cardinality::Many,
+                    );
+                }
+                for derives in derives_entities(rule) {
+                    update.associate(
+                        derives_attr(),
+                        entity.clone(),
+                        Value::Entity(derives),
+                        dialog_corpus::Cardinality::Many,
+                    );
+                }
+            }
+            Rule::Inductive(rule) => {
+                update.associate(
+                    source_attr(),
+                    entity.clone(),
+                    body,
+                    dialog_corpus::Cardinality::Many,
+                );
+                update.associate(
+                    induces_attr(),
+                    entity.clone(),
+                    Value::Entity(rule.conclusion().this()),
+                    dialog_corpus::Cardinality::Many,
+                );
+                for on in on_entities(rule) {
+                    update.associate(
+                        on_attr(),
+                        entity.clone(),
+                        Value::Entity(on),
+                        dialog_corpus::Cardinality::Many,
+                    );
+                }
+            }
         }
     }
 
     fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.this();
-        update.dissociate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-        );
-        update.dissociate(
-            induces_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.conclusion().this()),
-        );
-        for on in on_entities(self) {
-            update.dissociate(on_attr(), rule_entity.clone(), Value::Entity(on));
+        let entity = self.this.clone();
+        let body = Value::Bytes(self.body.clone());
+        match &self.rule {
+            Rule::Deductive(rule) => {
+                update.dissociate(
+                    conclusion_attr(),
+                    entity.clone(),
+                    Value::Entity(rule.conclusion().this()),
+                );
+                update.dissociate(source_attr(), entity.clone(), body);
+                for reads in reads_entities(rule) {
+                    update.dissociate(reads_attr(), entity.clone(), Value::Entity(reads));
+                }
+                for derives in derives_entities(rule) {
+                    update.dissociate(derives_attr(), entity.clone(), Value::Entity(derives));
+                }
+            }
+            Rule::Inductive(rule) => {
+                update.dissociate(source_attr(), entity.clone(), body);
+                update.dissociate(
+                    induces_attr(),
+                    entity.clone(),
+                    Value::Entity(rule.conclusion().this()),
+                );
+                for on in on_entities(rule) {
+                    update.dissociate(on_attr(), entity.clone(), Value::Entity(on));
+                }
+            }
         }
     }
 }
 
-impl Statement for InductiveRule {
-    fn assert(self, update: &mut impl Update) {
-        (&self).assert(update);
-    }
-
-    fn retract(self, update: &mut impl Update) {
-        (&self).retract(update);
-    }
-}
-
-/// A kind-erased [`Rule`] lowers as whichever variant it carries.
-impl Statement for &Rule {
-    fn assert(self, update: &mut impl Update) {
-        match self {
-            Rule::Deductive(rule) => rule.assert(update),
-            Rule::Inductive(rule) => rule.assert(update),
-        }
-    }
-
-    fn retract(self, update: &mut impl Update) {
-        match self {
-            Rule::Deductive(rule) => rule.retract(update),
-            Rule::Inductive(rule) => rule.retract(update),
-        }
-    }
-}
-
-impl Statement for Rule {
+impl Statement for StorableRule {
     fn assert(self, update: &mut impl Update) {
         (&self).assert(update);
     }

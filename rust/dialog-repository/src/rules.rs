@@ -44,7 +44,8 @@
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
 //! - A **transient** layer reads an overlay: a line's session overlay,
 //!   the per-query overlay, or a transaction's staged writes. Overlay
-//!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
+//!   rules (`tx.assert(storable)` / `.with(storable)` of a
+//!   [`StorableRule`](dialog_query::StorableRule), uncommitted — the head
 //!   has NOT moved) are never head-cached: a rule set assembled over
 //!   them is keyed by the rule facts each layer holds (see [`RuleKey`]),
 //!   which is what makes the "overlay rule masked by a head-keyed cache"

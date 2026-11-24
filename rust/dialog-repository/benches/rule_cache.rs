@@ -88,7 +88,7 @@ async fn open(name: &str, committed_last: bool) -> (Branch, Peer<VolatileSpace, 
     }
     let last = if committed_last { DEPTH } else { DEPTH - 1 };
     for to in 1..=last {
-        tx = tx.assert(link(to));
+        tx = tx.assert(dialog_query::StorableRule::try_from(link(to)).expect("a storable rule"));
     }
     tx.commit().publish().perform(&operator).await.unwrap();
     let branch = repo.branch("main").open().perform(&operator).await.unwrap();
@@ -214,7 +214,10 @@ fn rule_cache(c: &mut Criterion) {
                     let start = Instant::now();
                     let found: Vec<ConceptConclusion> = branch
                         .query()
-                        .with(link(DEPTH))
+                        .with(
+                            dialog_query::StorableRule::try_from(link(DEPTH))
+                                .expect("a storable rule"),
+                        )
                         .select(query())
                         .perform(operator)
                         .try_vec()

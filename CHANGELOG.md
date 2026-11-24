@@ -14,6 +14,45 @@ says how to cut a release.
 
 ## Unreleased
 
+### Only a rule that can be stored is a statement: assert a `StorableRule`
+
+Pull request link to be added when it opens.
+
+A rule with no stored form (a concept's implicit rule, or any rule
+that reads an attribute by a raw scan) has no identity. `DeductiveRule`,
+`InductiveRule` and `Rule` were statements all the same, so asserting
+or retracting one panicked looking up the identity it does not have.
+Now no rule type is a statement. A `StorableRule`, which a rule converts
+into only when it has a stored form, is one, and the conversion refuses
+any other rule with a typed error.
+
+What this changes for you:
+
+- **Breaking:** `DeductiveRule`, `&DeductiveRule`, `InductiveRule`,
+  `&InductiveRule`, `Rule` and `&Rule` no longer implement `Statement`.
+  Convert a rule with `StorableRule::try_from(&rule)?` and assert,
+  retract or `.with(...)` the result:
+  `changes.assert(StorableRule::try_from(&rule)?)`.
+- `StorableRule::try_from` returns `TypeError::RuleWithoutIdentity
+  { concept }` for a rule with no stored form, where asserting it
+  panicked. `TypeError` has the new variant.
+- **Breaking:** `DeductiveRule::this`, `DeductiveRule::encode`,
+  `InductiveRule::this` and `InductiveRule::encode`, which panicked for
+  such a rule, are removed. Use `try_this` and `try_encode`, or
+  `StorableRule::this` and `StorableRule::body`.
+
+Why: a value a caller can build must not take the process down, and a
+rule that cannot be stored should not be accepted where a stored
+statement is expected. Making every rule storable, by giving the raw
+attribute scan a stored form, is the direction for the stored-format
+work and is not part of this change.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs changes: a storable rule is
+  written as the same facts, under the same identity, with the same
+  body. An older release reads what this one writes.
+
 ### The first commit after a `QueriedRanges` pull reads from the replica's own blocks
 
 [#861](https://github.com/dialog-db/dialog-db/pull/861)

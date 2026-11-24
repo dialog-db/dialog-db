@@ -709,7 +709,10 @@ mod tests {
             "What they are called",
             serde_json::json!({ "integer:": 5 }),
         ));
-        assert_eq!(a.this(), b.this());
+        assert_eq!(
+            a.try_this().expect("a storable rule"),
+            b.try_this().expect("a storable rule")
+        );
     }
 
     /// A rule's constants are identified by value: a natural, an integer
@@ -721,9 +724,18 @@ mod tests {
         let natural = compile(employee("", serde_json::json!({ "natural:": 5 })));
         let float = compile(employee("", serde_json::json!({ "float:": 5.0 })));
         let other = compile(employee("", serde_json::json!({ "integer:": 6 })));
-        assert_eq!(integer.this(), natural.this());
-        assert_eq!(integer.this(), float.this());
-        assert_ne!(integer.this(), other.this());
+        assert_eq!(
+            integer.try_this().expect("a storable rule"),
+            natural.try_this().expect("a storable rule")
+        );
+        assert_eq!(
+            integer.try_this().expect("a storable rule"),
+            float.try_this().expect("a storable rule")
+        );
+        assert_ne!(
+            integer.try_this().expect("a storable rule"),
+            other.try_this().expect("a storable rule")
+        );
     }
 
     /// A premise's field names are notation: a premise reading the same
@@ -748,8 +760,10 @@ mod tests {
             }]
         });
         assert_eq!(
-            compile(renamed).this(),
-            compile(employee("", serde_json::json!({ "integer:": 5 }))).this()
+            compile(renamed).try_this().expect("a storable rule"),
+            compile(employee("", serde_json::json!({ "integer:": 5 })))
+                .try_this()
+                .expect("a storable rule")
         );
     }
 
@@ -760,8 +774,10 @@ mod tests {
         let mut other = employee("", serde_json::json!({ "integer:": 5 }));
         other["deduce"]["with"]["name"]["the"] = serde_json::json!("org/manager-name");
         assert_ne!(
-            compile(other).this(),
-            compile(employee("", serde_json::json!({ "integer:": 5 }))).this()
+            compile(other).try_this().expect("a storable rule"),
+            compile(employee("", serde_json::json!({ "integer:": 5 })))
+                .try_this()
+                .expect("a storable rule")
         );
     }
 
@@ -805,8 +821,8 @@ mod tests {
             ("x", ""),
         ] {
             assert_eq!(
-                rule(first, second).this(),
-                plain.this(),
+                rule(first, second).try_this().expect("a storable rule"),
+                plain.try_this().expect("a storable rule"),
                 "{first:?} {second:?}"
             );
         }
@@ -836,14 +852,25 @@ mod tests {
         let inductive = inductive.compile().expect("rule compiles");
         let rules = [
             (
-                compile(employee("", serde_json::json!({ "integer:": 5 }))).this(),
-                compile(employee("", serde_json::json!({ "integer:": 5 }))).encode(),
+                compile(employee("", serde_json::json!({ "integer:": 5 })))
+                    .try_this()
+                    .expect("a storable rule"),
+                compile(employee("", serde_json::json!({ "integer:": 5 })))
+                    .try_encode()
+                    .expect("a storable rule"),
             ),
             (
-                compile(employee("", serde_json::json!({ "text:": "senior" }))).this(),
-                compile(employee("", serde_json::json!({ "text:": "senior" }))).encode(),
+                compile(employee("", serde_json::json!({ "text:": "senior" })))
+                    .try_this()
+                    .expect("a storable rule"),
+                compile(employee("", serde_json::json!({ "text:": "senior" })))
+                    .try_encode()
+                    .expect("a storable rule"),
             ),
-            (inductive.this(), inductive.encode()),
+            (
+                inductive.try_this().expect("a storable rule"),
+                inductive.try_encode().expect("a storable rule"),
+            ),
         ];
         let named: Vec<(String, String)> = rules
             .iter()

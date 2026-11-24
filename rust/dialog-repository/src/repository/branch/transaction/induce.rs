@@ -2068,7 +2068,9 @@ mod tests {
 
         branch
             .transaction()
-            .assert(increment_rule())
+            .assert(
+                dialog_query::StorableRule::try_from(increment_rule()).expect("a storable rule"),
+            )
             .assert(
                 dialog_query::the!("counter/count")
                     .of(counter.clone())
@@ -2169,7 +2171,10 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         branch
             .transaction()
-            .assert(integer_increment_rule())
+            .assert(
+                dialog_query::StorableRule::try_from(integer_increment_rule())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -2265,7 +2270,7 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .assert(
                 dialog_query::the!("counter/count")
                     .of(counter.clone())
@@ -2317,7 +2322,10 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         branch
             .transaction()
-            .assert(integer_increment_rule())
+            .assert(
+                dialog_query::StorableRule::try_from(integer_increment_rule())
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -2408,7 +2416,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -2518,8 +2526,8 @@ mod tests {
         branch
             .transaction()
             .assert(Transient(intermediate.this()))
-            .assert(stage)
-            .assert(finish)
+            .assert(dialog_query::StorableRule::try_from(stage).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(finish).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -2625,8 +2633,20 @@ mod tests {
             .transaction()
             .assert(transient_target("cmd.stage/target")?)
             .assert(transient_target("cmd.finish/target")?)
-            .assert(relay("cmd.start/target", "cmd.stage/target")?)
-            .assert(relay("cmd.stage/target", "cmd.finish/target")?)
+            .assert(
+                dialog_query::StorableRule::try_from(relay(
+                    "cmd.start/target",
+                    "cmd.stage/target",
+                )?)
+                .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(relay(
+                    "cmd.stage/target",
+                    "cmd.finish/target",
+                )?)
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -2685,7 +2705,13 @@ mod tests {
         branch
             .transaction()
             .assert(transient_target("cmd.stage/target")?)
-            .assert(relay("cmd.start/target", "cmd.stage/target")?)
+            .assert(
+                dialog_query::StorableRule::try_from(relay(
+                    "cmd.start/target",
+                    "cmd.stage/target",
+                )?)
+                .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -2780,8 +2806,8 @@ mod tests {
             .transaction()
             .assert(Transient(ping.this()))
             .assert(Transient(pong.this()))
-            .assert(ping_to_pong)
-            .assert(pong_to_ping)
+            .assert(dialog_query::StorableRule::try_from(ping_to_pong).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(pong_to_ping).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -2835,8 +2861,14 @@ mod tests {
 
         branch
             .transaction()
-            .assert(stamp("cmd.x/target", "result.x/target"))
-            .assert(stamp("cmd.y/target", "result.y/target"))
+            .assert(
+                dialog_query::StorableRule::try_from(stamp("cmd.x/target", "result.x/target"))
+                    .expect("a storable rule"),
+            )
+            .assert(
+                dialog_query::StorableRule::try_from(stamp("cmd.y/target", "result.y/target"))
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -2918,7 +2950,7 @@ mod tests {
         let other: Entity = "msg:2".parse()?;
         branch
             .transaction()
-            .assert(consume)
+            .assert(dialog_query::StorableRule::try_from(consume).expect("a storable rule"))
             .assert(
                 dialog_query::the!("mailbox.message/body")
                     .of(message.clone())
@@ -3028,8 +3060,8 @@ mod tests {
 
         branch
             .transaction()
-            .assert(status)
-            .assert(notify)
+            .assert(dialog_query::StorableRule::try_from(status).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(notify).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3119,7 +3151,10 @@ mod tests {
         // at this head.
         branch
             .transaction()
-            .assert(stamp("result.first/target"))
+            .assert(
+                dialog_query::StorableRule::try_from(stamp("result.first/target"))
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3143,7 +3178,10 @@ mod tests {
         // the cached discovery for on:cmd.z/target is stale now.
         branch
             .transaction()
-            .assert(stamp("result.second/target"))
+            .assert(
+                dialog_query::StorableRule::try_from(stamp("result.second/target"))
+                    .expect("a storable rule"),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -3189,7 +3227,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(tagger())
+            .assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3217,7 +3255,7 @@ mod tests {
 
         branch
             .transaction()
-            .retract(tagger())
+            .retract(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3262,7 +3300,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(tagger())
+            .assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3272,7 +3310,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
-            .retract(tagger())
+            .retract(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -3313,7 +3351,7 @@ mod tests {
             .assert(
                 dialog_query::the!("dialog.rule/source")
                     .of(forged.clone())
-                    .is(tagger().encode()),
+                    .is(tagger().try_encode().expect("a storable rule")),
             )
             .assert(dialog_query::the!("dialog.rule/on").of(forged).is(on))
             .commit()
@@ -3371,7 +3409,7 @@ mod tests {
         // Installing the rule is the completing transition.
         branch
             .transaction()
-            .assert(tagger())
+            .assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3424,7 +3462,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(drain)
+            .assert(dialog_query::StorableRule::try_from(drain).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3470,7 +3508,7 @@ mod tests {
         let actor: Entity = "actor:1".parse()?;
         branch
             .transaction()
-            .assert(alert)
+            .assert(dialog_query::StorableRule::try_from(alert).expect("a storable rule"))
             .assert(
                 dialog_query::the!("shift/duty")
                     .of(actor.clone())
@@ -3506,7 +3544,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(status)
+            .assert(dialog_query::StorableRule::try_from(status).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3566,7 +3604,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(tagger())
+            .assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3677,7 +3715,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(tagger())
+            .assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3763,7 +3801,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(pair)
+            .assert(dialog_query::StorableRule::try_from(pair).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -3824,7 +3862,7 @@ mod tests {
         // branch has state and rules, but no induction ever ran and no
         // watermark exists.
         let mut install = dialog_corpus::Changes::new();
-        install.assert(tagger());
+        install.assert(dialog_query::StorableRule::try_from(tagger()).expect("a storable rule"));
         let old: Entity = "doc:old".parse()?;
         branch
             .commit(install.into_stream())
@@ -3991,7 +4029,7 @@ mod tests {
         .expect("rule compiles");
         branch
             .transaction()
-            .assert(stamp)
+            .assert(dialog_query::StorableRule::try_from(stamp).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4096,7 +4134,7 @@ mod tests {
         let item: Entity = "item:1".parse()?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4165,7 +4203,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4324,7 +4362,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(assign_rule()?)
+            .assert(dialog_query::StorableRule::try_from(assign_rule()?).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4380,7 +4418,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(assign_rule()?)
+            .assert(dialog_query::StorableRule::try_from(assign_rule()?).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4459,8 +4497,8 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(alias)
-            .assert(assign_rule()?)
+            .assert(dialog_query::StorableRule::try_from(alias).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(assign_rule()?).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4564,9 +4602,9 @@ mod tests {
         };
         branch
             .transaction()
-            .assert(assign_rule()?)
-            .assert(stage)
-            .assert(issue_command)
+            .assert(dialog_query::StorableRule::try_from(assign_rule()?).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(stage).expect("a storable rule"))
+            .assert(dialog_query::StorableRule::try_from(issue_command).expect("a storable rule"))
             .assert(transient(&staged)?)
             .assert(transient(&command_fields)?)
             .commit()
@@ -4651,7 +4689,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(assign_rule()?)
+            .assert(dialog_query::StorableRule::try_from(assign_rule()?).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4750,7 +4788,7 @@ mod tests {
         branch.refresh(&operator).await?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4822,7 +4860,7 @@ mod tests {
         let item: Entity = "item:1".parse()?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
@@ -4892,7 +4930,7 @@ mod tests {
         let item: Entity = "item:1".parse()?;
         branch
             .transaction()
-            .assert(rule)
+            .assert(dialog_query::StorableRule::try_from(rule).expect("a storable rule"))
             .commit()
             .publish()
             .perform(&operator)
