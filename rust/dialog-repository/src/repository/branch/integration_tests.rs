@@ -2763,6 +2763,118 @@ async fn it_writes_where_it_wrote_after_adopting_a_head_another_device_moved(
     Ok(())
 }
 
+/// A replica commits after a restart from its own blocks, where it
+/// committed before the restart.
+///
+/// A commit reads its parent's revision record, to carry the skip links
+/// along. A branch remembers the record of each revision it mints, so the
+/// next commit in the same process reads none. A commit writes its record
+/// into a buffer of the tree, not into the leaf the record routes to, so a
+/// replica that restarted, with nothing remembered, reads the record of
+/// its own last revision through a leaf it may never have held.
+///
+/// A reproduction: it fails on main. Under random keys the commit after
+/// the restart fetched in 2 runs of 400, and of the first 600 seeds 3
+/// fetch, exactly the 3 under which the restarted follower does not hold
+/// the leaf a lookup of its head's record starts at. The keys here derive
+/// from one of them, and the test asserts that layout before relying on
+/// it.
+#[dialog_common::test]
+async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(278);
+    let _entropy = seed.entropy();
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("restart"));
+    let credential = seed.credential("profile").await?;
+    let session = |peer: Peer<VolatileSpace>| async move {
+        let operator = peer
+            .session(b"test")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
+        anyhow::Ok((operator, peer))
+    };
+    let (operator, profile) =
+        session(open_peer_as(storage.clone(), location.clone(), credential.clone()).await?).await?;
+    let alice_repo = profile
+        .space(seed.name("restart-a"))
+        .create()
+        .with_credential(seed.signer("repository").await?)
+        .perform(&operator)
+        .await?;
+    let follower = seed.name("restart-b");
+    let devices = following(operator, profile, alice_repo, &s3, &follower).await?;
+
+    devices.name("user:0-0", "first").await?;
+    assert_eq!(
+        devices.name("user:0-0", "second").await?,
+        0,
+        "the follower commits from its own blocks while it runs"
+    );
+
+    let (operator, restarted) = session(open_peer_as(storage, location, credential).await?).await?;
+    let env = Counting::new(operator);
+    let repository = restarted.space(follower).open().perform(&env).await?;
+    let bob = repository.branch("main").open().perform(&env).await?;
+    let head = bob.revision().context("the head survives the restart")?;
+    assert_eq!(Some(&head), devices.bob.revision().as_ref());
+
+    assert!(
+        !holds_the_leaf_of_its_record(&bob, &head, &env).await?,
+        "the fixture's layout moved: under seed {} the restarted follower \
+         holds the leaf a lookup of its head's record starts at, so choose \
+         the seed again",
+        seed.value()
+    );
+    env.reset();
+    bob.commit(stream::iter(vec![named("user:0-0", "third")]))
+        .perform(&env)
+        .await?;
+    assert_eq!(
+        env.count("Hydrate"),
+        0,
+        "the follower commits after a restart from its own blocks"
+    );
+
+    Ok(())
+}
+
+/// Whether `branch`'s replica holds, without asking any remote, the leaf a
+/// lookup of `head`'s own revision record starts at: the leaf a commit on
+/// `head` reads to carry the skip links along.
+async fn holds_the_leaf_of_its_record<Env>(
+    branch: &Branch,
+    head: &Revision,
+    env: &Env,
+) -> Result<bool>
+where
+    Env: Provider<nodes::Read<CorpusNode>> + dialog_common::ConditionalSync,
+{
+    use dialog_corpus::{
+        AttributeKey, AttributeKeyPart, EntityKeyPart, KeyViewConstruct, KeyViewMut as _, Relation,
+        history::REVISION_ATTRIBUTE,
+    };
+    use dialog_search_tree::{NodeBody, Reading};
+
+    let revision: Relation = REVISION_ATTRIBUTE.parse()?;
+    let key = <AttributeKey<Key> as KeyViewConstruct>::min()
+        .set_attribute(AttributeKeyPart::from(&revision))
+        .set_entity(EntityKeyPart::from(&head.version().entity()))
+        .into_key();
+    let reading = Reading::new(branch.subject()).locally();
+    let mut at = NodeHash::from(*head.tree.hash());
+    loop {
+        let Some(node) = reading.read::<CorpusNode>(&at).perform(env).await? else {
+            return Ok(false);
+        };
+        match node.body() {
+            NodeBody::Segment(_) => return Ok(true),
+            NodeBody::Index(index) if index.is_empty() => return Ok(true),
+            NodeBody::Index(index) => at = index.hash_at(index.route(key.as_ref())?)?.clone(),
+        }
+    }
+}
+
 /// A replica's first commit on a head another device moved reads from its
 /// own blocks, wherever that head's revision record falls.
 ///
