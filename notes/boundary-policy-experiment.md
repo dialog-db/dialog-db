@@ -158,7 +158,7 @@ Smaller than arm 1's -15.2% at 4096: the residual near-duplicate leaves (up to 1
 
 ### Data provenance note
 
-The Phase A input files were no longer on disk; both were regenerated for this pass: `retro-full.csv` from the archive.org retrocomputing dump (same Apr 2024 vintage, same `scripts/se-transform.py`; 117236 facts across 50553 transactions) and the tonk CSV via `tonk export` on `~/Projects/tonk`. The SE baseline capture reproduces the Phase A shape (7.44 MB max leaf, ~90% bytes in 100K+ nodes), confirming like-for-like input.
+The Phase A input files were no longer on disk; both were regenerated for this pass: `retro-full.csv` from the archive.org retrocomputing dump (same Apr 2024 vintage, same `scripts/se-transform.py`, now [on the `research-data` branch](https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py); 117236 facts across 50553 transactions) and the tonk CSV via `tonk export` on `~/Projects/tonk`. The SE baseline capture reproduces the Phase A shape (7.44 MB max leaf, ~90% bytes in 100K+ nodes), confirming like-for-like input.
 
 ## Step 2: the weight-proportional coin (2026-07-21)
 
