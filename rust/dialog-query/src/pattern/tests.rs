@@ -2095,3 +2095,101 @@ fn it_stores_a_rule_that_negates_a_pattern() {
     assert!(decoded.stored_as(&rule.this()), "under its name");
     assert_eq!(decoded.try_encode(), Some(stored));
 }
+
+/// The composite constants a rule can hold, a map, a list, and a map
+/// nested in a list in a map, each beside the pattern of its parts,
+/// which holds no variable and so is that constant.
+fn composite_constants() -> Vec<(Value, Pattern)> {
+    let list: Value = Composite::list([text("a"), Value::UnsignedInt(1)])
+        .expect("a list")
+        .into();
+    let nested: Value = Composite::list([map(&[("c", text("d"))]), text("e")])
+        .expect("a list")
+        .into();
+    let parts = |entries: Vec<(&str, Pattern)>| {
+        Pattern::map(
+            entries
+                .into_iter()
+                .map(|(key, pattern)| (text(key), pattern)),
+        )
+        .expect("a pattern")
+    };
+    vec![
+        (
+            map(&[("a", text("b"))]),
+            parts(vec![("a", Pattern::from(text("b")))]),
+        ),
+        (
+            list,
+            Pattern::list([
+                Pattern::from(text("a")),
+                Pattern::from(Value::UnsignedInt(1)),
+            ]),
+        ),
+        (
+            map(&[("inner", nested), ("n", Value::UnsignedInt(2))]),
+            parts(vec![
+                (
+                    "inner",
+                    Pattern::list([
+                        parts(vec![("c", Pattern::from(text("d")))]),
+                        Pattern::from(text("e")),
+                    ]),
+                ),
+                ("n", Pattern::from(Value::UnsignedInt(2))),
+            ]),
+        ),
+    ]
+}
+
+/// A rule that holds a composite constant, a map or a list with no
+/// variable in it, reads back from its stored body. A pattern with no
+/// variable in it is that constant, so this is also how such a pattern
+/// is stored, in format 4 as no pattern is held.
+#[dialog_common::test]
+fn it_reads_back_a_rule_that_holds_a_composite_constant() {
+    for (constant, pattern) in composite_constants() {
+        assert_eq!(pattern.as_value(), Some(constant.clone()));
+        for held in [Pattern::from(constant.clone()), pattern] {
+            let rule = DeductiveRule::new(
+                concept("heading", "note/heading", "text:"),
+                vec![
+                    read("note/title", "text:", var("heading")),
+                    read("note/payload", "composite:map", held),
+                ],
+            )
+            .expect("compiles");
+            let stored = rule.try_encode().expect("a body");
+            assert_eq!(body::format_of(&stored), Some(4), "no pattern is held");
+            let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
+            assert!(decoded.stored_as(&rule.this()));
+            assert_eq!(decoded.try_encode(), Some(stored));
+        }
+    }
+}
+
+/// An inductive rule that holds a composite constant reads back from its
+/// stored body too.
+#[dialog_common::test]
+fn it_reads_back_an_inductive_rule_that_holds_a_composite_constant() {
+    use crate::rule::InductiveRule;
+
+    for (constant, _) in composite_constants() {
+        let rule = InductiveRule::new(
+            concept("heading", "note/heading", "text:"),
+            vec![
+                read("note/title", "text:", var("heading")),
+                read(
+                    "note/payload",
+                    "composite:map",
+                    Pattern::Term(Term::Constant(constant.clone())),
+                ),
+            ],
+        )
+        .expect("compiles");
+        let stored = rule.try_encode().expect("a body");
+        let decoded = InductiveRule::decode(&stored).expect("the body reads back");
+        assert!(decoded.stored_as(&rule.this()), "{constant:?}");
+        assert_eq!(decoded.try_encode(), Some(stored));
+    }
+}

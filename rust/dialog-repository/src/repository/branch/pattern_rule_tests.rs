@@ -1196,3 +1196,165 @@ async fn it_leaves_a_body_in_a_later_format_inert() -> Result<()> {
     );
     Ok(())
 }
+
+/// `note/payload` of `?this` is `constant`, a map or a list with no
+/// variable in it, and `note/title` of `?this` is `?heading`.
+fn holding(constant: &Composite) -> Result<Vec<Premise>> {
+    let mut payload = Parameters::new();
+    payload.insert("this".into(), Term::var("this"));
+    payload.set(
+        "payload".into(),
+        Pattern::Term(Term::Constant(constant.clone().into())),
+    );
+    let mut title = Parameters::new();
+    title.insert("this".into(), Term::var("this"));
+    title.insert("heading".into(), Term::var("heading"));
+    Ok(vec![
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("payload", "note/payload", "composite:map"),
+            terms: payload,
+        })),
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("heading", "note/title", "text:"),
+            terms: title,
+        })),
+    ])
+}
+
+/// A list nested in a map: `{"by" ["me" {"at" "home"}] "n" 2}`.
+fn nested() -> Result<Composite> {
+    let at: Value = Composite::map([(text("at"), text("home"))])?.into();
+    let by: Value = Composite::list([text("me"), at])?.into();
+    Ok(Composite::map([
+        (text("by"), by),
+        (text("n"), Value::UnsignedInt(2)),
+    ])?)
+}
+
+/// Commits `of`'s payload `payload` and its title `title`.
+async fn titled<S: PeerSpace>(
+    branch: &Branch,
+    session: &Peer<S, Session>,
+    of: &Entity,
+    payload: &Composite,
+    title: &str,
+) -> Result<()> {
+    #[allow(deprecated)]
+    branch
+        .transaction()
+        .assert(the!("note/payload").of(of.clone()).is(payload.clone()))
+        .assert(the!("note/title").of(of.clone()).is(title.to_string()))
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    Ok(())
+}
+
+/// A rule that holds a composite constant is committed, read back from a
+/// branch loaded afresh, and fires from its stored body: a deductive rule
+/// derives the heading of the note whose payload is the constant and of
+/// no other, and an inductive rule writes it at commit. Neither is listed
+/// in `dialog.rule/invalid`.
+async fn composite_scenario<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    let repo = test_repo(session, peer).await;
+    let constant = nested()?;
+    let milk: Entity = "id:milk".parse()?;
+    let call: Entity = "id:call".parse()?;
+
+    let rule = DeductiveRule::new(
+        concept("heading", "note/heading", "text:"),
+        holding(&constant)?,
+    )?;
+    let branch = repo.branch("main").open().perform(session).await?;
+    titled(&branch, session, &milk, &constant, "Buy milk").await?;
+    titled(&branch, session, &call, &payload("Call mum")?, "Call mum").await?;
+    #[allow(deprecated)]
+    branch
+        .transaction()
+        .assert(&rule)
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    let body = stored_bytes(&repo, session, &rule.this()).await?;
+    assert_eq!(body, rule.encode(), "the body is the rule's encoding");
+    assert_eq!(format_of(&body), Some(4), "no pattern is held");
+    let branch = repo.branch("main").load().perform(session).await?;
+    assert_eq!(
+        invalid(&branch, session).await?,
+        Vec::new(),
+        "no body is invalid"
+    );
+    assert_eq!(
+        derived(&repo, "main", session).await?,
+        vec![(milk.clone(), text("Buy milk"))],
+        "the stored rule fires"
+    );
+
+    let induced = InductiveRule::new(
+        concept("heading", "note/heading", "text:"),
+        holding(&constant)?,
+    )?;
+    let inducing = repo.branch("induced").open().perform(session).await?;
+    #[allow(deprecated)]
+    inducing
+        .transaction()
+        .assert(&induced)
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    let inducing = repo.branch("induced").load().perform(session).await?;
+    assert_eq!(
+        invalid(&inducing, session).await?,
+        Vec::new(),
+        "no body is invalid"
+    );
+    titled(&inducing, session, &call, &payload("Call mum")?, "Call mum").await?;
+    titled(&inducing, session, &milk, &constant, "Buy milk").await?;
+    let written = read(
+        &repo,
+        "induced",
+        Selector::new().the("note/heading".parse()?),
+        session,
+    )
+    .await?;
+    assert_eq!(
+        written
+            .iter()
+            .map(|fact| (fact.of.clone(), fact.is.clone()))
+            .collect::<Vec<_>>(),
+        vec![(milk, text("Buy milk"))],
+        "the inductive rule wrote the heading at commit"
+    );
+    Ok(())
+}
+
+/// On the volatile provider.
+#[dialog_common::test]
+async fn it_fires_a_stored_rule_that_holds_a_composite_constant_on_a_volatile_branch() -> Result<()>
+{
+    let (session, peer) = test_session_with_peer().await;
+    composite_scenario(&session, &peer).await
+}
+
+/// On the filesystem provider.
+///
+/// Native only: the filesystem provider is the native one. In the browser
+/// a branch is kept in IndexedDB and OPFS, and the web run of
+/// `it_fires_a_stored_rule_that_holds_a_composite_constant_on_a_volatile_branch`
+/// pins the same scenario there.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_fires_a_stored_rule_that_holds_a_composite_constant_on_a_filesystem_branch()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    use crate::helpers::filesystem_session_with_peer;
+
+    let (session, peer) = filesystem_session_with_peer(root.path()).await?;
+    composite_scenario(&session, &peer).await
+}
