@@ -30,7 +30,10 @@
 //! `frame`, `frameset`, `applet`), an attribute named `on…` that is no
 //! `on/` event, `srcdoc`, a `style` a value writes, and an attribute that
 //! takes a URL (`URLS`) unless fixed text settles its scheme as `http`,
-//! `https` or `mailto`, a constant included. Names are compared in any
+//! `https` or `mailto` or starts it with a path, a query or a fragment
+//! (`/`, `?`, `#`), a constant included. A `srcset` a value is written
+//! into is refused, since each of its URLs follows a comma; a constant
+//! one has each of its URLs checked. Names are compared in any
 //! case, and a fixed start with a control character or a space is
 //! refused. This is a refusal of known dangerous shapes and no
 //! sanitizer: the back end stays the boundary. It escapes every text and
@@ -374,8 +377,25 @@ fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
     if lowered == "style" && written(attribute) {
         return refuse("a style a value writes");
     }
+    // A srcset is URLs separated by commas, so a value anywhere in it
+    // could start one.
+    if lowered == "srcset" && written(attribute) {
+        return refuse("a srcset a value is written into: each of its URLs follows a comma");
+    }
     if URLS.contains(&lowered.as_str()) {
         let safe = match attribute {
+            // Each candidate of a srcset is a URL and what it is drawn
+            // at, after a comma.
+            Attribute::Text(text) if lowered == "srcset" => text.split(',').all(|candidate| {
+                let candidate = candidate.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+                settled(
+                    candidate
+                        .split([' ', '\t', '\n', '\r', '\x0c'])
+                        .next()
+                        .unwrap_or_default(),
+                    true,
+                )
+            }),
             Attribute::Text(text) => settled(text, true),
             Attribute::Parts(pieces) => match pieces.first() {
                 Some(Piece::Text(text)) => settled(text, pieces.len() == 1),
@@ -593,6 +613,8 @@ mod safety {
             "[:img {:srcset [\"/a.png 1x, \" ?url]}]",
             "[:img {:srcset [\"/image/\" ?n \" 1x\"]}]",
             "[:img {:srcset \"javascript:go() 1x\"}]",
+            "[:img {:srcset \"/a.png 1x, javascript:go() 2x\"}]",
+            "[:img {:srcset \"/a.png 1x,\u{1}javascript:go() 2x\"}]",
         ] {
             assert!(
                 matches!(read(text), Err(Error::Unsafe(said)) if said.contains("srcset")),

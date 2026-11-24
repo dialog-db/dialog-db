@@ -90,8 +90,9 @@ What this changes for you:
   to let a row's values reach script: an element that runs or loads
   (`script`, `iframe`, `object`, `embed`, `style`, `link`, `meta`,
   `base`, `frame`, `frameset`, `applet`), an attribute named `on…`,
-  `srcdoc`, a `style` a value writes, and a URL attribute whose scheme
-  fixed text does not settle as `http`, `https` or `mailto`. It is no
+  `srcdoc`, a `style` a value writes, a `srcset` a value is written
+  into, and a URL attribute whose fixed start neither names `http`,
+  `https` or `mailto` nor is a path, a query or a fragment. It is no
   sanitizer: a back end still escapes every text and attribute value it
   serialises.
 - A set, `{: "errand" : "home"}`, is a value: an answer that holds one
