@@ -1249,8 +1249,9 @@ impl Expander {
         for (at, name) in misread {
             if done.remove(&at).is_some() {
                 let error = Error::Refused(format!(
-                    "{} reads `{name}` as an attribute, and the document declares `{name}` as a \
-                     concept after it: declare the concept above what reads it",
+                    "{} reads `{name}`, or a name under it, as an attribute's, and the document \
+                     declares `{name}` as a concept after it: declare the concept above what \
+                     reads it",
                     trees.get(at).map(ToString::to_string).unwrap_or_default()
                 ));
                 refused.insert(
@@ -2028,12 +2029,20 @@ impl Expander {
             let declared = word
                 .as_deref()
                 .is_some_and(|word| self.concepts.contains(word));
+            // The name read as an attribute's, and the concept it would be
+            // derived under, what comes before its `/`: either declared
+            // later would have made this read another relation.
             if !declared
                 && let Some(word) = word
                     .as_deref()
                     .filter(|word| Kind::of(word) == Kind::Attribute)
             {
                 self.misread.push((self.tree, word.to_string()));
+                if let Some((concept, _)) = word.split_once('/')
+                    && !self.concepts.contains(concept)
+                {
+                    self.misread.push((self.tree, concept.to_string()));
+                }
             }
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
