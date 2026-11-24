@@ -82,7 +82,7 @@ pub const DERIVED: &str = "dialog.notation.concept";
 /// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
 /// | `dialog.notation.report.q12` | a site's number | digits only |
 /// | `c0`, `c1`, `row`, fields of a report | a column's number | the fields of the notation's own relations, never a document's |
-/// | `dialog.notation.concept.<length>.<concept>.<name>` | a concept's name and an attribute's | the concept's length, one base-36 digit, says where it ends, so the name splits one way whatever dots either holds |
+/// | `dialog.notation.concept.<concept>.<name>` | a concept's name and an attribute's | a concept named as a domain is refused when it is declared (`it_refuses_a_concept_named_as_a_domain`), so a concept's name holds no dot and ends at the first dot after the prefix |
 /// | `<label>/key`, an entry's key in a rule's head | a field's label | a head with a field named so beside the entry is refused |
 pub fn unwritten(name: &str) -> bool {
     name.contains('[')

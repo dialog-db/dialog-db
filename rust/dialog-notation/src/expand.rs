@@ -530,9 +530,12 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 /// The read a derived attribute is: one named under a declared concept,
 /// `list/count-open`, in that concept's own domain. It is a relation of
 /// its own, named by the concept's name and the attribute's, since the
-/// build has no hash of a concept to name it by. The concept's length
-/// comes first, one base-36 digit, so where the concept ends is said and
-/// not found: `my.list/count` and `my/list.count` are two relations.
+/// build has no hash of a concept to name it by. It is one name for one
+/// concept and attribute because a concept's name holds no dot: one
+/// named as a domain, `my.list`, is refused when it is declared
+/// (`it_refuses_a_concept_named_as_a_domain`), so the concept ends at the
+/// first dot after the prefix, and `my/list.count` is the one relation
+/// `dialog.notation.concept.my.list.count`.
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
@@ -575,25 +578,19 @@ fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
         )));
     }
     // The engine allows a relation 64 bytes, its attribute's part, the
-    // longest label, counted. A concept of more than 35 bytes has no
-    // length digit at all.
+    // longest label, counted.
     let label = terms.keys().map(String::len).max().unwrap_or(0);
-    let total = DERIVED.len() + 2 + concept.len() + 1 + name.len() + 1 + label;
-    let length = u32::try_from(concept.len())
-        .ok()
-        .and_then(|length| char::from_digit(length, 36));
-    let (Some(length), true) = (length, total <= 64) else {
+    let total = DERIVED.len() + 1 + concept.len() + 1 + name.len() + 1 + label;
+    if total > 64 {
         return Err(Error::Refused(format!(
             "{tree} derives `{concept}/{name}`, whose relation would be {total} bytes, past the \
              64 the engine allows: the concept's name, the attribute's and its longest label \
              together may have {} bytes",
-            64 - (DERIVED.len() + 2 + 1 + 1)
+            64 - (DERIVED.len() + 1 + 1 + 1)
         )));
-    };
+    }
     Ok(Syntax::Application(
-        Box::new(Syntax::Reference(format!(
-            "{DERIVED}.{length}.{concept}.{name}"
-        ))),
+        Box::new(Syntax::Reference(format!("{DERIVED}.{concept}.{name}"))),
         Parameters {
             items: vec![entity],
             terms,
