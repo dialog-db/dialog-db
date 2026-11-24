@@ -161,6 +161,11 @@ pub enum Error {
     /// named, each said as its form.
     #[error("{0} would be the relation of two sites, {1} and {2}")]
     Clash(String, String, String),
+    /// A view's template lets data reach script, at the part given: an
+    /// element that runs what it holds, an inline handler, or a URL a
+    /// variable writes whole.
+    #[error("{0}: a value of a row could reach script there")]
+    Unsafe(String),
     /// One document defines one name twice, by the two forms given: what
     /// it means would depend on the order they are written in.
     #[error("{0} is defined twice in one document, by {1} and by {2}")]

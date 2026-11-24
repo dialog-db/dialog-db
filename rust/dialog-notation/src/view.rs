@@ -364,3 +364,55 @@ fn event(kind: &str, value: &Syntax) -> Result<Event, Error> {
         fields,
     })
 }
+
+#[cfg(test)]
+mod safety {
+    use super::*;
+
+    fn read(text: &str) -> Result<Node, Error> {
+        template(&crate::parse(text)?.remove(0))
+    }
+
+    /// A template whose values could reach script is refused, naming the
+    /// part: an element that runs what it holds, an attribute named
+    /// `on…` that is no `on/` event, `srcdoc`, a `style` a value writes,
+    /// and a URL a variable writes from its start. A URL with a fixed
+    /// start that cannot turn into a scheme, and text and attributes
+    /// otherwise, are taken.
+    #[test]
+    fn it_refuses_a_template_that_lets_data_reach_script() {
+        for (text, part) in [
+            ("[:script ?title]", "script"),
+            ("[:iframe {:title ?t}]", "iframe"),
+            ("[:object]", "object"),
+            ("[:embed {:src \"/x\"}]", "embed"),
+            ("[:a {:onclick ?title}]", "onclick"),
+            ("[:a {:onClick \"go()\"}]", "onClick"),
+            ("[:iframe {:srcdoc ?title}]", "iframe"),
+            ("[:div {:srcdoc \"<b>x</b>\"}]", "srcdoc"),
+            ("[:div {:style ?css}]", "style"),
+            ("[:div {:style [\"color: \" ?c]}]", "style"),
+            ("[:a {:href ?url}]", "href"),
+            ("[:img {:src ?url}]", "src"),
+            ("[:form {:action ?url}]", "action"),
+            ("[:button {:formaction ?url}]", "formaction"),
+            ("[:a {:href [?scheme \"://x\"]}]", "href"),
+            ("[:a {:href [\"java\" ?rest]}]", "href"),
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Unsafe(said)) if said.contains(part)),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        for text in [
+            "[:a {:href [\"/notebook/\" ?n]} ?title]",
+            "[:a {:href [\"https://example.org/\" ?n]}]",
+            "[:a {:href \"#top\"}]",
+            "[:div {:style \"display: block;\" :class ?c :title ?t} ?text]",
+            "[:button {:on/click {:command :todo/add :text ?t}} \"Add\"]",
+        ] {
+            assert!(read(text).is_ok(), "{text}: {:?}", read(text));
+        }
+    }
+}

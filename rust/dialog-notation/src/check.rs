@@ -559,6 +559,7 @@ mod tests {
             Error::Reserved(_) => "reserved",
             Error::Clash(..) => "clash",
             Error::Twice(..) => "twice",
+            Error::Unsafe(_) => "unsafe",
             Error::Cycle(..) => "cycle",
             Error::Endless(..) => "endless",
         }
