@@ -1358,6 +1358,42 @@ mod tests {
             );
         }
         assert!(read > 300, "{read} of 400 forms read");
+        // A constant of every kind prints as text that reads back as the
+        // tree a value of it is answered as; bytes have no written form,
+        // and print as no other value.
+        let map = data::record([
+            ("title", data::text("Buy milk")),
+            (
+                "tags",
+                data::list([data::text("errand"), data::text("home")])?,
+            ),
+        ])?;
+        for value in [
+            data::text("a \"quoted\" text"),
+            Value::Boolean(true),
+            Value::UnsignedInt(7u64.into()),
+            Value::SignedInt((-7i64).into()),
+            Value::Float(1.5),
+            data::entity("todo:1")?,
+            data::entity("open:")?,
+            data::symbol("xyz.todo/text")?,
+            map.clone(),
+            data::list([map, data::list([])?, Value::UnsignedInt(1u64.into())])?,
+        ] {
+            let printed = Syntax::Constant(value.clone()).to_string();
+            assert_eq!(
+                crate::parse(&printed)?,
+                vec![crate::compile::written(&value)],
+                "{printed}"
+            );
+        }
+        for bytes in [Value::Bytes(vec![1, 2]), Value::Record(vec![3])] {
+            let printed = Syntax::Constant(bytes).to_string();
+            assert!(
+                !crate::parse(&printed).is_ok_and(|trees| trees == vec![Syntax::Blank]),
+                "{printed}"
+            );
+        }
         for text in ["18446744073709551616", "-9223372036854775809", "1e400"] {
             assert!(crate::parse(text).is_err(), "{text}");
         }
