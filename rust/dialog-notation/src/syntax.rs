@@ -276,6 +276,8 @@ fn made<'a>(
         }
         Form::Application(head, parts) => {
             let mut operand = Parameters::default();
+            // Whether `of:` has been written: a second is a label twice.
+            let mut of_said = false;
             let mut bare: Vec<(&Form, Option<&Mark>)> = Vec::new();
             let mut order = Vec::new();
             // `of:` is the part with no label, written with one.
@@ -325,6 +327,10 @@ fn made<'a>(
                         path.pop();
                         let term = term?;
                         if item {
+                            if of_said {
+                                return Err(Error::Refused(format!("{form} says `of:` twice")));
+                            }
+                            of_said = true;
                             operand.items.push(term);
                         } else if operand.terms.insert(label.clone(), term).is_some() {
                             return Err(Error::Refused(format!("{form} says `{label}:` twice")));
