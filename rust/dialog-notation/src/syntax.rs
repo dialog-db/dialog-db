@@ -1135,11 +1135,17 @@ mod tests {
         );
     }
 
+    /// A label twice is refused, `of:` as any other: it would otherwise
+    /// be read as two parts with no label.
     #[test]
     fn it_refuses_a_label_twice() {
         assert_eq!(
             refusal("(f a: 1 a: 2)"),
             Error::Refused("(f a: 1 a: 2) says `a:` twice".into())
+        );
+        assert_eq!(
+            refusal("(f of: 1 of: 2)"),
+            Error::Refused("(f of: 1 of: 2) says `of:` twice".into())
         );
     }
 
