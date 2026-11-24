@@ -106,6 +106,83 @@ async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
     Ok(())
 }
 
+/// An answer prints as text that reads back as the same tree, and an
+/// embedder can make a value of what it read: a set, a map, one nested
+/// in a record, and none. A set says the same in any order of its
+/// members, and says a member once.
+///
+/// The empty set and the empty map are both written `{}`: the notation
+/// has no written form that tells them apart, so they read back as one
+/// tree.
+#[dialog_common::test]
+async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
+    use dialog_notation::{Syntax, parse};
+    let mut notebook = todos().await?;
+    notebook.submit(CARD).await?;
+    let mut answers = report(&mut notebook, "(select (todo/card ?t is: ?card))").await?;
+    let mut notebooks = notebooks().await?;
+    notebooks
+        .submit(
+            "(query (notebook/outline ?n is: ?outline)
+               (notebook/named ?n title: ?title)
+               (notebook/blocks ?n block: (collect ?blocks))
+               (is ?outline {:title ?title :blocks ?blocks}))",
+        )
+        .await?;
+    answers.extend(
+        report(
+            &mut notebooks,
+            "(select (notebook/outline ?n is: ?outline))",
+        )
+        .await?,
+    );
+    // a set nested in a record, the empty set, a map nested in a
+    // record and the empty map
+    assert!(
+        answers
+            .iter()
+            .any(|answer| answer.contains(r#"{: "errand" : "home"}"#))
+    );
+    assert!(
+        answers
+            .iter()
+            .any(|answer| answer.contains(r#"{"N1" block:a"#))
+    );
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| answer.contains("{}"))
+            .count(),
+        2
+    );
+    for answer in answers.iter().map(String::as_str).chain([
+        r#"{: "errand" : "home"}"#,
+        r#"{: {: 1 : 2} : {:a 1}}"#,
+        r#"{"N1" block:a "N2" block:b}"#,
+        "{}",
+    ]) {
+        let read = parse(answer)?;
+        assert_eq!(read.len(), 1, "{answer}");
+        assert_eq!(read[0].to_string(), answer);
+        let value = read[0]
+            .value()
+            .map_err(|error| anyhow::anyhow!("{answer}: {error}"))?;
+        assert_eq!(Syntax::try_from(&value)?, read[0], "{answer}");
+    }
+    // A set has no order and holds a member once.
+    assert_eq!(
+        parse(r#"{: "home" : "errand"}"#)?[0].value()?,
+        parse(r#"{: "errand" : "home"}"#)?[0].value()?
+    );
+    assert!(matches!(
+        parse(r#"{: "home" : "home"}"#)?[0].value(),
+        Err(Error::Refused(why)) if why.contains("twice")
+    ));
+    // The empty set and the empty map read back as one tree.
+    assert_eq!(parse("{}")?, parse("{}")?);
+    Ok(())
+}
+
 /// The folds a selection asks Dialog-DB for.
 fn folds(text: &str) -> Result<usize> {
     let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);
