@@ -1579,16 +1579,16 @@ mod tests {
             );
         }
         let tree = Syntax::Application(
-            Box::new(Syntax::Reference("dialog.notation.select".into())),
+            Box::new(Syntax::Reference("dialog.n.select".into())),
             Parameters::default(),
         );
         assert!(matches!(
             Syntax::try_from(&tree.value()?),
-            Err(Error::Reserved(name)) if name == "dialog.notation.select"
+            Err(Error::Reserved(name)) if name == "dialog.n.select"
         ));
         assert!(matches!(
             Syntax::try_from(&tree.form()),
-            Err(Error::Reserved(name)) if name == "dialog.notation.select"
+            Err(Error::Reserved(name)) if name == "dialog.n.select"
         ));
         Ok(())
     }

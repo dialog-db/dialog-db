@@ -1265,7 +1265,7 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
     let hashed: Vec<&String> = said
         .iter()
         .chain(&kept)
-        .filter(|said| said.contains("dialog.notation.c."))
+        .filter(|said| said.contains("dialog.n.c."))
         .collect();
     assert!(hashed.is_empty(), "{hashed:?}");
     Ok(())

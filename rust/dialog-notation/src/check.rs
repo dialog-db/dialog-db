@@ -367,7 +367,7 @@ mod tests {
     }
 
     /// Every name the notation makes for itself is under one namespace,
-    /// `dialog.notation`, and a document that names anything under it is
+    /// `dialog.n`, and a document that names anything under it is
     /// refused where it does, naming it, with nothing compiled. Every
     /// other name is the author's: `report.quarterly`, `concept.list`,
     /// `?a.b`, `?view-of` and `?source-key` are refused no more. Reading
@@ -377,41 +377,39 @@ mod tests {
     fn it_refuses_only_what_is_under_the_notations_own_namespace() -> Result<(), Error> {
         let refused = [
             (
-                r#"(select (dialog.notation.query.row ?x part: "ab"))"#,
-                "dialog.notation.query.row",
+                r#"(select (dialog.n.query.row ?x part: "ab"))"#,
+                "dialog.n.query.row",
             ),
             (
-                "(rule (dialog.notation.query.row ?x row: 1) (xyz.a ?x))",
-                "dialog.notation.query.row",
+                "(rule (dialog.n.query.row ?x row: 1) (xyz.a ?x))",
+                "dialog.n.query.row",
+            ),
+            ("(select (dialog.n.select ?x))", "dialog.n.select"),
+            (
+                "(assert (dialog.n.once.write once:1 n: 1))",
+                "dialog.n.once.write",
             ),
             (
-                "(select (dialog.notation.select ?x))",
-                "dialog.notation.select",
+                "(select (dialog.n.view.layer ?x row: ?r))",
+                "dialog.n.view.layer",
             ),
             (
-                "(assert (dialog.notation.once.write once:1 n: 1))",
-                "dialog.notation.once.write",
+                "(select (dialog.n.report.qabc ?x c0: ?y))",
+                "dialog.n.report.qabc",
             ),
             (
-                "(select (dialog.notation.view.layer ?x row: ?r))",
-                "dialog.notation.view.layer",
+                "(rule (xyz.a ?x) (dialog.n.concept.list.count-open ?x is: ?n))",
+                "dialog.n.concept.list.count-open",
             ),
-            (
-                "(select (dialog.notation.report.qabc ?x c0: ?y))",
-                "dialog.notation.report.qabc",
-            ),
-            (
-                "(rule (xyz.a ?x) (dialog.notation.concept.list.count-open ?x is: ?n))",
-                "dialog.notation.concept.list.count-open",
-            ),
-            ("(select (dialog.notation ?x))", "dialog.notation"),
+            ("(select (dialog.n ?x))", "dialog.n"),
+            ("(select (dialog.n.anything ?x))", "dialog.n.anything"),
             (
                 r#"(assert (syntax.meta rule:1 description: "mine"))"#,
                 "syntax.meta",
             ),
             (
-                "(rule (syntax (dialog.notation.query.row ?x)) (expand (mine ?x)))\n(rule (xyz.out ?a) (mine ?a))",
-                "dialog.notation.query.row",
+                "(rule (syntax (dialog.n.query.row ?x)) (expand (mine ?x)))\n(rule (xyz.out ?a) (mine ?a))",
+                "dialog.n.query.row",
             ),
         ];
         for (text, name) in refused {
@@ -434,6 +432,11 @@ mod tests {
             "(select (xyz.a ?a n: ?source-key))",
             "(select (xyz.a ?a n: ?collect-0 m: ?query-row))",
             "(select (syntax.meta ?rule description: ?text))",
+            // The engine's own `dialog.node` shares a string prefix with
+            // `dialog.n` and no segment: the notation leaves it alone.
+            "(select (dialog.node.probe/node ?c ?node))",
+            // Nothing under the namespace the notation had is its own.
+            "(select (dialog.notation.select ?x n: ?y))",
         ] {
             let mut analyzer = Analyzer::new()?;
             let checked = check(&mut analyzer, text);
@@ -444,6 +447,13 @@ mod tests {
             );
             assert!(!checked.steps.is_empty(), "{text}");
         }
+        // A derived attribute's domain is told by whole segments.
+        assert!(!crate::syntax::is_derived("dialog.node.probe"));
+        assert!(!crate::syntax::is_derived("dialog.n.cx"));
+        assert!(crate::syntax::is_derived(&crate::syntax::derived(
+            "list",
+            "count-open"
+        )?));
         // An author's `?a.b` is the author's variable: named only where
         // it must not hold, it is refused as any such variable is, and
         // not taken for one an expansion made.
@@ -1246,7 +1256,7 @@ mod tests {
     fn derived_in(checked: &Checked) -> Vec<String> {
         let said = format!("{:?}", checked.steps);
         let mut found: Vec<String> = said
-            .match_indices("dialog.notation.c.")
+            .match_indices("dialog.n.c.")
             .map(|(at, _)| {
                 said[at..]
                     .split(['/', '"'])
@@ -1277,7 +1287,7 @@ mod tests {
         ));
         assert_eq!(once.len(), 1, "{once:?}");
         assert_eq!(once, again);
-        assert_eq!(once[0].len(), "dialog.notation.c.".len() + 26, "{once:?}");
+        assert_eq!(once[0].len(), "dialog.n.c.".len() + 26, "{once:?}");
         let long = "abcdefghijabcdefghijabcdefghijabcd";
         let cafe = "caf\u{e9}";
         for text in [
@@ -1332,9 +1342,7 @@ mod tests {
             messages
                 .iter()
                 .any(|message| message.contains("list/count-open"))
-                && messages
-                    .iter()
-                    .all(|message| !message.contains("dialog.notation")),
+                && messages.iter().all(|message| !message.contains("dialog.n")),
             "{messages:?}"
         );
         Ok(())
