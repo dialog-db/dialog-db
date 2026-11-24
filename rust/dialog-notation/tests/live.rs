@@ -516,7 +516,17 @@ async fn it_answers_after_a_poll_failed_putting_the_answers_together() -> Result
     standing.poll(&notebook.operator).await?;
     notebook.submit(CHANGE).await?;
     standing.fail_next_answer();
-    assert!(standing.poll(&notebook.operator).await.is_err());
+    let failed = standing.poll(&notebook.operator).await;
+    assert!(
+        matches!(
+            failed,
+            Err(dialog_notation::live::LiveError::Notation(
+                dialog_notation::Error::Refused(_)
+            ))
+        ),
+        "{:?}",
+        failed.err()
+    );
     let now = standing
         .poll(&notebook.operator)
         .await?

@@ -972,8 +972,12 @@ mod tests {
     #[test]
     fn it_skips_comments_and_refuses_what_does_not_close() {
         assert_eq!(read("; nothing\n(a) ; more").unwrap().len(), 1);
-        assert!(read("(a (b)").is_err());
-        assert!(read("{:a 1").is_err());
-        assert!(read(")").is_err());
+        for text in ["(a (b)", "{:a 1", ")"] {
+            assert!(
+                matches!(read(text), Err(Error::Read(_))),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
     }
 }

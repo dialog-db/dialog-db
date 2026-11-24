@@ -546,6 +546,10 @@ fn kind(patch: &Patch) -> &'static str {
 async fn it_maintains_the_card_by_asking_again_alike() -> Result<()> {
     let subscribed = the_card_through_its_changes(How::Subscribed).await?;
     let asked = the_card_through_its_changes(How::Asked).await?;
+    assert!(
+        !subscribed.is_empty(),
+        "the changes give patches to compare"
+    );
     assert_eq!(subscribed, asked);
     Ok(())
 }

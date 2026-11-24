@@ -2730,8 +2730,13 @@ mod tests {
         // Every field said, it needs no `...`.
         assert!(expanded(TODO, "(select (todo ?t list: ?l text: ?x state: ?s))").is_ok());
         // What it leaves out may not be bound: a concept's fields are
-        // facts, and no record of them is kept.
-        assert!(expanded(TODO, "(select (todo ?t text: ?x ... ?others))").is_err());
+        // facts, and no record of them is kept. No definition takes a
+        // read with its rest bound, so nothing says what it is.
+        let bound = expanded(TODO, "(select (todo ?t text: ?x ... ?others))");
+        assert!(
+            matches!(&bound, Err(Error::Unknown(form)) if form == "(todo ?t ... ?others text: ?x)"),
+            "{bound:?}"
+        );
         // A relation.
         assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x))").is_ok());
         assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x ...))").is_ok());

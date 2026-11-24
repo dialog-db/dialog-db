@@ -1455,7 +1455,11 @@ mod tests {
             );
         }
         for text in ["18446744073709551616", "-9223372036854775809", "1e400"] {
-            assert!(crate::parse(text).is_err(), "{text}");
+            assert!(
+                matches!(crate::parse(text), Err(Error::Refused(why)) if why.contains(text)),
+                "{text}: {:?}",
+                crate::parse(text)
+            );
         }
         Ok(())
     }

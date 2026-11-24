@@ -249,7 +249,10 @@ mod tests {
         assert_eq!(field(&read, "xyz.todo/text"), Some(&text("attribute")));
         assert_eq!(read.get("N1"), Some(&Value::Boolean(true)));
         assert_eq!(items(&pair)?, Some(vec![natural(1), natural(2)]));
-        assert!(map([("a", natural(1)), ("a", natural(2))]).is_err());
+        assert!(matches!(
+            map([("a", natural(1)), ("a", natural(2))]),
+            Err(Error::Refused(_))
+        ));
         Ok(())
     }
 
