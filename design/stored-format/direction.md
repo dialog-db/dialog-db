@@ -42,6 +42,16 @@ next release. Facts in cells are backed in the
   body; N never reads the old names but in the upgrade. Old and new sit
   side by side until pruned.
 
+## Decided for every approach
+
+The maintainer decided on 2026-11-24 that the move to format 5 reverses
+every listed `as` to least first and makes every `top` a `max`
+([listed order](listed-order.md)). It is the same in every column: the
+upgrade reverses a list only in a body below format 5, and an embedder
+reverses the definitions it ships. Under C a format 3 body is read on
+every read path for a release, so C also reverses on every read, not
+only in the upgrade.
+
 ## The matrix
 
 | criterion \ approach | A. Status quo | B. One format, cut over once | C. Read old, write new, one cycle | D. Fence, then migrate | E. A new vocabulary |

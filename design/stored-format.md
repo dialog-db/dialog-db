@@ -7,7 +7,8 @@ The [journal](stored-format/journal.md) has where the topic stands, the
 [inventory](stored-format/inventory.md) of what is stored and read, the
 [blast radius](stored-format/blast-radius.md) of an identity change with
 the questions for tonk, [two releases in one space](stored-format/mixed-fleets.md),
-and the [plan](stored-format/plan.md).
+[the order of a listed `as`](stored-format/listed-order.md), and the
+[plan](stored-format/plan.md).
 
 ## Description
 
@@ -18,6 +19,12 @@ The maintainer, Irakli, 2026-11-24:
 - "All rules and concepts would be rewritten to format 5 and their
   identities will change ... again we should not try to carry format 4
   legacy"
+
+- "when migrating from format 4 → 5 we'll reorder all the variants to
+  match left to right order", and, asked whether only lists a `top`
+  reads: "No lets reverse all please". Decided: every listed `as` is
+  reversed to least first and every `top` becomes `max`
+  ([listed order](stored-format/listed-order.md)).
 
 And 2026-11-18, in the rule-format ledger: a release should read the
 format it writes and no other, with a migration that keeps the earlier

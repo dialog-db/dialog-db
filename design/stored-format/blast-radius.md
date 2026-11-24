@@ -104,6 +104,15 @@ what `db.name/referent` points at.
 - **T8.** Does tonk serialize a `Changes` batch anywhere that outlives a
   process (an outbox, a queue in storage)? A batch spells cardinalities,
   and reads the picks 0.3 to 0.5 wrote (`model/update.rs:58` to `:80`).
+- **T10.** How many listed attributes do tonk's spaces and tonk's own
+  source define, how many does a ranked field (`top`, `max`, `min`)
+  read, and in what order were the unranked ones written? Does tonk
+  store a listing in its records (`db.attribute/as`) as one value or
+  several?
+- **T11.** Will tonk reverse the listed `as` in the concepts it ships in
+  the same release that runs the migration? A definition outside a rule
+  body carries no format number, so nothing tells a reader which order
+  it is in.
 - **T9.** How many devices of one space can be on different releases at
   once, and for how long: is there a way for tonk to know every device
   of a space has upgraded?

@@ -29,8 +29,10 @@ to be on main before the next tag, or a live space moves twice.
    go; every body is written in 5. The upgrade rewrites a format 4 body
    too. If the maintainer moves identities (open question 1), it is
    here, once, with the reproduction of the format 4 identity added to
-   `dialog_query::migration` for the upgrade. Releasable: no release
-   has written format 4.
+   `dialog_query::migration` for the upgrade. The upgrade reverses every
+   listed `as` in a body below format 5 and makes every `top` a `max`
+   ([listed order](listed-order.md)), after `feat/listed-type-order`
+   lands. Releasable: no release has written format 4.
 
 5. **A new vocabulary.** Rule facts and the transient marker are
    written and read under new attribute names. Every read path reads

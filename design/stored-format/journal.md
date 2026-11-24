@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys, and on two of its five load paths fails the query. | Directing. Five approaches and a matrix; E recommended by the agent. |
-| **Agenda** | Tonk's answers T1 to T9 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the four open questions in the top story. F1 confirmed by a run on 0.5.0 (see the last entry). | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the four open questions in the top story. F1 confirmed by a run on 0.5.0 (see the last entry). | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -58,3 +58,24 @@ on F1, whose run is recorded below.
 ## 2026-11-24, the runs
 
 Two runs were started and had not finished when this was first committed: the existing migration and format tests on main, and a probe on a v0.5.0 worktree outside the repository planting a format 4 body indexed under `org/salary` and querying `org/salary` (F1). Their results are added here when they finish.
+
+## 2026-11-24, Directing: the order of a listed `as`
+
+**Asked.** Relayed by the coordinator from the maintainer: reverse the
+listed `as` from format 4 to 5 so it reads left to right, `top` becoming
+`max`. The coordinator asked which stored lists had an order that meant
+anything, and whether to reverse every list or only those a `top` reads.
+
+**Learned.** In this repository 4 listed attributes are read by `top`
+and 5 are not; one of the 5 is written least first. tonk-team's fixture
+holds none. A reversal is not idempotent and a list does not say its
+order, so the format number is what lets the upgrade reverse once; a
+definition outside a body has no number, and the embedder reverses its
+own in the same release (T11). Main's `rewrite_body` and its doc
+disagree on whether a `top` list is reversed.
+
+**Decided.** By the maintainer: reverse every list ("No lets reverse all
+please"), overruling the coordinator's opinion that an unranked list may
+already be least first. It keeps one relation to one order. Recorded in
+the ledger and [listed order](listed-order.md); it holds in every
+approach of the matrix.
