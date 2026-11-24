@@ -163,6 +163,13 @@ pub(crate) fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
             Syntax::Application(_, operand) if operand.terms.contains_key(THIS) => {
                 return Some((part, format!("{THIS}:")));
             }
+            // A label is a name like any other: one under the
+            // namespace would conclude or read what the notation keeps.
+            Syntax::Application(_, operand)
+                if let Some(label) = operand.terms.keys().find(|label| reserved_name(label)) =>
+            {
+                return Some((part, format!("{label}:")));
+            }
             Syntax::Application(operator, operand) => {
                 open.extend(operand.terms.values().rev());
                 open.extend(operand.items.iter().rev());
@@ -174,6 +181,35 @@ pub(crate) fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
                     open.push(key);
                 }
             }
+            Syntax::Tuple(items) => open.extend(items.iter().rev()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The first application in `tree` as written with a label that holds a
+/// `/`, and the label. Only the notation writes one, where it joins the
+/// reads of one entity under `unless` into one read: a document that
+/// writes one names another domain's attribute where its own field
+/// stands. What is quoted is not a form.
+fn slashed(tree: &Syntax) -> Option<(&Syntax, String)> {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            Syntax::Application(operator, operand) => {
+                if let Some(label) = operand.terms.keys().find(|label| label.contains('/')) {
+                    return Some((part, label.clone()));
+                }
+                open.extend(operand.terms.values().rev());
+                open.extend(operand.items.iter().rev());
+                open.push(operator);
+            }
+            Syntax::Map(entries) => entries.iter().rev().for_each(|(key, value)| {
+                open.push(value);
+                open.push(key);
+            }),
             Syntax::Tuple(items) => open.extend(items.iter().rev()),
             _ => {}
         }
@@ -1361,6 +1397,16 @@ impl Expander {
         if let Some((part, name)) = reserved(tree) {
             let part = part.clone();
             return self.about(&part, |_| Err(Error::Reserved(name)));
+        }
+        if let Some((part, label)) = slashed(tree) {
+            let part = part.clone();
+            let (domain, field) = label.rsplit_once('/').unwrap_or((&label, ""));
+            let message = format!(
+                "{part} has the label `{label}:`, which names an attribute of another domain: a \
+                 label is a field of the read's own domain, so read `{domain}` by itself, \
+                 `({domain} … {field}: …)`"
+            );
+            return self.about(&part, |_| Err(Error::Refused(message)));
         }
         Ok(())
     }

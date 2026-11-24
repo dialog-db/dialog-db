@@ -43,6 +43,11 @@ What this changes for you:
   `(retract (todo todo:1))`, and the same in a rule with premises, are
   unchanged. One field is retracted through its relation,
   `(retract (xyz.todo/state of: todo:1 is: :open))`.
+- A label under the notation's namespace, `dialog.n.c.<hash>/is:` or
+  `dialog.n/x:`, is `Error::Reserved` wherever it is written, so no
+  document concludes or reads a derived attribute by its hash. A label
+  with a `/`, `io.contact/email:`, is refused: a label is a field of the
+  read's own domain, and another domain is read by itself.
 - A refusal names what the author wrote: the author's form where it
   quoted the compiled rule, `?t` for the notation's `?t[0]`, and `_`
   for a variable the notation made for none. Dialog-DB's "Required
