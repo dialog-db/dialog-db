@@ -178,9 +178,14 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
             };
             let bindings = matches(operator, wanted, bindings)?;
             let mut bindings = run(&operand.items, &named.items, bindings)?;
+            // A part a tree leaves out matches a part of variables under
+            // its label, which binds nothing; a part that says a literal is
+            // what has to be there.
             for (label, pattern) in &named.terms {
-                if let Some(item) = operand.terms.get(label) {
-                    bindings = matches(item, pattern, bindings)?;
+                match operand.terms.get(label) {
+                    Some(item) => bindings = matches(item, pattern, bindings)?,
+                    None if unsaid(pattern) => {}
+                    None => return None,
                 }
             }
             let extra: BTreeMap<String, Syntax> = operand
@@ -196,6 +201,19 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
             }
         }
         literal => (tree == literal).then_some(bindings),
+    }
+}
+
+/// Whether a part of a pattern says nothing but variables: `?x`, `_`, or
+/// a map or a list of them, `{?k ?v}`.
+fn unsaid(pattern: &Syntax) -> bool {
+    match pattern {
+        Syntax::Variable(_) | Syntax::Blank => true,
+        Syntax::Map(entries) => entries
+            .iter()
+            .all(|(key, value)| unsaid(key) && unsaid(value)),
+        Syntax::Tuple(items) => items.iter().all(unsaid),
+        _ => false,
     }
 }
 
@@ -221,7 +239,22 @@ fn fill_run(templates: &[Syntax], bindings: &Bindings, fresh: &str) -> Result<Ve
                 _ => None,
             })
             .collect();
-        let count = many.first().map_or(0, |(_, trees)| trees.len());
+        // Each repeating variable took as many as the others: the repeat
+        // is filled once for each.
+        let Some((_, first)) = many.first() else {
+            return Err(Error::Refused(format!(
+                "... {repeated} repeats nothing: no variable in it took several"
+            )));
+        };
+        let count = first.len();
+        if let Some((name, trees)) = many.iter().find(|(_, trees)| trees.len() != count) {
+            return Err(Error::Refused(format!(
+                "... {repeated}: ?{name} took {} and ?{} took {count}, and a repeat takes as many \
+                 of each",
+                trees.len(),
+                many[0].0
+            )));
+        }
         for index in 0..count {
             let mut each = bindings.clone();
             for (name, trees) in &many {
