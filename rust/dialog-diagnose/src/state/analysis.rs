@@ -3,7 +3,7 @@
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_corpus::{Datum, DialogCorpusError, Index, Key, State};
-use dialog_search_tree::{Accessor, NodeBody, PersistentNode};
+use dialog_search_tree::{NodeBody, PersistentNode};
 
 use super::store::WorkerMessage;
 use std::sync::Arc;
@@ -66,12 +66,10 @@ impl FactsTreeAnalysis {
         };
 
         let storage = self.storage.clone();
-        let catalog = self.tree.catalog().clone();
+        let reading = self.tree.reading().clone();
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
-            let accessor = Accessor::new(storage.as_ref(), &catalog);
-
             let mut stats = FactsTreeStats::default();
             let mut levels = VecDeque::from([vec![root]]);
             let mut segment_sizes: Vec<usize> = vec![];
@@ -80,7 +78,8 @@ impl FactsTreeAnalysis {
                 let mut next_level = vec![];
 
                 for hash in level {
-                    let node: PersistentNode<Key, State<Datum>> = accessor.get_node(&hash).await?;
+                    let node: PersistentNode<Key, State<Datum>> =
+                        reading.node(storage.as_ref(), &hash).await?;
                     match node.body() {
                         NodeBody::Index(index) => {
                             for at in 0..index.len() {

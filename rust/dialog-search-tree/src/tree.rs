@@ -4,7 +4,6 @@ pub use transient::*;
 use std::{marker::PhantomData, ops::RangeBounds};
 
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Priority};
-use dialog_effects::archive::prelude::CatalogScope;
 use futures_core::Stream;
 use rkyv::{
     Deserialize, Serialize,
@@ -18,11 +17,11 @@ use rkyv::{
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest,
     PersistentNode, Prefetch, Reading, SearchOptions, SearchResult, TreeDifference, TreeWalker,
     Value, into_owned,
 };
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Subject};
 
 /// A node on a range estimate's edge path, with the range's bound on each
 /// side it cuts through (`None` where the range runs past the node's edge).
@@ -41,16 +40,16 @@ type Cut<'a> = (Blake3Hash, Option<&'a [u8]>, Option<&'a [u8]>);
 ///
 /// Nodes are stored in content-addressed storage using [`Blake3Hash`] as
 /// identifiers, enabling deduplication and efficient versioning. The tree
-/// is a root under a catalog and nothing else: every node it reads is the
-/// block its hash names in that catalog, loaded through the environment the
-/// read is given (see [`load_node`](crate::load_node)), which answers from
-/// the node cache it holds for the catalog's subject; every node an edit
-/// seals goes into a caller-owned [`Delta`](crate::Delta), and into that
-/// same cache.
+/// is a root and the [`Reading`] it asks for nodes by, nothing else: every
+/// node it reads is the one its hash names in the subject's archive, asked
+/// of the environment the read is given ([`Reading::node`]), which answers
+/// from whatever it keeps for that subject; every node an edit seals goes
+/// into a caller-owned [`Delta`](crate::Delta), and reaches the environment
+/// when the caller writes it ([`nodes::Write`](crate::nodes::Write)).
 ///
 /// ## Clone Semantics
 ///
-/// Cloning a [`PersistentTree`] copies its root and catalog. Two versions of
+/// Cloning a [`PersistentTree`] copies its root and reading. Two versions of
 /// a tree read through the same environment share whatever it keeps.
 #[derive(Debug)]
 pub struct PersistentTree<Key, Value, D = Geometric>
@@ -63,7 +62,6 @@ where
     value: PhantomData<Value>,
     distribution: PhantomData<D>,
 
-    catalog: CatalogScope,
     root: TreeRoot,
     reading: Reading,
 }
@@ -112,9 +110,8 @@ where
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            catalog: self.catalog.clone(),
             root: self.root.clone(),
-            reading: self.reading,
+            reading: self.reading.clone(),
         }
     }
 }
@@ -134,10 +131,10 @@ where
         + ConditionalSync,
     D: Distribution,
 {
-    /// The catalog this tree's blocks live in: every node it reads is the
-    /// block its hash names there.
-    pub fn catalog(&self) -> &CatalogScope {
-        &self.catalog
+    /// The subject whose nodes this tree reads: every node it reads is the
+    /// one its hash names in that subject's archive.
+    pub fn subject(&self) -> &Subject {
+        &self.reading.subject
     }
 
     /// Returns the [`Blake3Hash`] of the root node of this tree.
@@ -176,29 +173,33 @@ where
         }
     }
 
-    /// Creates a new empty [`PersistentTree`] with no entries in `catalog`,
-    /// under the default format [`Manifest`].
+    /// Creates a new empty [`PersistentTree`] with no entries, reading
+    /// `subject`'s nodes, under the default format [`Manifest`].
     ///
     /// The tree's root is the derived empty root for its manifest (see
     /// [`empty_root`](Self::empty_root)) — the exact hash the first persist
     /// lands on — but no store holds that node until a persist runs
     /// ([`stored_root`](Self::stored_root) is `None` until then).
-    pub fn empty_in(catalog: CatalogScope) -> Self {
-        Self::empty_with_manifest(catalog, Manifest::default())
+    pub fn empty_in(subject: Subject) -> Self {
+        Self::empty_with_manifest(subject, Manifest::default())
     }
 
-    /// Creates a new empty [`PersistentTree`] in `catalog` under an explicit
-    /// format `manifest`.
-    pub fn empty_with_manifest(catalog: CatalogScope, manifest: Manifest) -> Self {
+    /// Creates a new empty [`PersistentTree`] reading `subject`'s nodes,
+    /// under an explicit format `manifest`.
+    pub fn empty_with_manifest(subject: Subject, manifest: Manifest) -> Self {
+        Self::empty_reading(Reading::new(subject), manifest)
+    }
+
+    /// The empty tree under `manifest`, reading as `reading` says.
+    pub(crate) fn empty_reading(reading: Reading, manifest: Manifest) -> Self {
         let hash = Self::empty_root(&manifest)
             .expect("the zero-entry node has a fixed, infallible encoding");
         Self {
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            catalog,
             root: TreeRoot::Empty { manifest, hash },
-            reading: Reading::default(),
+            reading,
         }
     }
 
@@ -216,37 +217,41 @@ where
         )
     }
 
-    /// The tree rooted at `root` in `catalog`: a previously persisted
-    /// version, restored. The tree loads its nodes lazily, as operations
+    /// The tree rooted at `root`, reading `subject`'s nodes: a previously
+    /// persisted version, restored. The tree loads its nodes lazily, as operations
     /// reach them.
     ///
     /// The all-zero hash is read as the empty tree under the default
     /// [`Manifest`] (see [`LEGACY_EMPTY_ROOT`]).
     ///
     /// The tree holds no nodes: what a reconstructed tree finds in memory is
-    /// whatever the environment it reads through holds for the catalog's
-    /// subject, so an environment that keeps its node cache across
-    /// reconstructions keeps a tree from a moving root warm.
-    pub fn at(catalog: CatalogScope, root: Blake3Hash) -> Self {
+    /// whatever the environment it reads through holds for the subject, so
+    /// an environment that keeps its node cache across reconstructions
+    /// keeps a tree from a moving root warm.
+    pub fn at(subject: Subject, root: Blake3Hash) -> Self {
+        Self::at_reading(Reading::new(subject), root)
+    }
+
+    /// The tree rooted at `root`, reading as `reading` says.
+    fn at_reading(reading: Reading, root: Blake3Hash) -> Self {
         if root.as_bytes() == &LEGACY_EMPTY_ROOT {
-            return Self::empty_in(catalog);
+            return Self::empty_reading(reading, Manifest::default());
         }
-        Self::seal(catalog, root)
+        Self::seal(reading, root)
     }
 
-    /// The tree rooted at `root` in this tree's catalog, read as this one
-    /// is (see [`reading`](Self::reading)).
+    /// The tree rooted at `root`, read as this one is (see
+    /// [`reading`](Self::reading)).
     pub fn with_root(&self, root: Blake3Hash) -> Self {
-        let mut tree = Self::at(self.catalog.clone(), root);
-        tree.reading = self.reading;
-        tree
+        Self::at_reading(self.reading.clone(), root)
     }
 
-    /// How this tree's reads load the nodes the environment's cache does not
-    /// hold: a [`Load`] someone is waiting on, unless the tree was
-    /// [`ranked`](Self::ranked) or made [`local`](Self::locally).
-    pub fn reading(&self) -> Reading {
-        self.reading
+    /// How this tree asks for its nodes: whose they are, and as a read
+    /// someone is waiting on that may hydrate, unless the tree was
+    /// [`ranked`](Self::ranked) or made [`local`](Self::locally). An edit
+    /// opened from this tree reads the same way.
+    pub fn reading(&self) -> &Reading {
+        &self.reading
     }
 
     /// This tree, its reads ranking a hydration they cause as `priority`: a
@@ -259,21 +264,13 @@ where
     }
 
     /// This tree, its reads seeing only what the local archive holds: every
-    /// load it performs is [local](Load::locally), so a node the replica
+    /// read it performs is [local](Read::locally), so a node the replica
     /// lacks reads as absent wherever else the subject's blocks live. For a
     /// reader whose answer is what this replica holds, such as an export
     /// that does not download.
     pub fn locally(mut self) -> Self {
         self.reading.local = true;
         self
-    }
-
-    /// The reads of one operation on this tree, through `storage`.
-    pub(crate) fn accessor<'a, Env>(&self, storage: &'a Env) -> Accessor<'a, Key, Value, Env>
-    where
-        Env: ?Sized,
-    {
-        Accessor::new(storage, &self.catalog).reading(self.reading)
     }
 
     /// Retrieves the value associated with `key` from the tree.
@@ -379,14 +376,13 @@ where
         let Some(root) = self.stored_root() else {
             return Ok(None);
         };
-        let accessor = self.accessor(storage);
         // Each pending node is bounded on the sides the range cuts through
         // it: `None` on a side means the range runs past that side, so the
         // node's whole extent on it counts.
         let mut pending: Vec<Cut<'_>> = vec![(root.clone(), Some(lower), Some(upper))];
         let mut total = 0u64;
         while let Some((hash, lower, upper)) = pending.pop() {
-            let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+            let node: PersistentNode<Key, Value> = self.reading.node(storage, &hash).await?;
             let index = match node.as_index() {
                 Ok(index) => index,
                 Err(_) => {
@@ -445,9 +441,7 @@ where
             + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = self.accessor(storage);
-
-        TreeWalker::new(self.stored_root().cloned()).stream(range, accessor)
+        TreeWalker::new(self.stored_root().cloned()).stream(range, storage, self.reading.clone())
     }
 
     /// [`stream_range`](Self::stream_range), yielding each entry's key as a
@@ -467,9 +461,11 @@ where
             + ConditionalSync,
         R: RangeBounds<Key> + ConditionalSend,
     {
-        let accessor = self.accessor(storage);
-
-        TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(range, accessor)
+        TreeWalker::<Key, Value>::new(self.stored_root().cloned()).stream_handles(
+            range,
+            storage,
+            self.reading.clone(),
+        )
     }
 
     /// Returns a differential that produces changes to transform `self` into
@@ -613,14 +609,13 @@ where
     /// [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`]. The batch's new nodes go into the caller's delta,
     /// not the tree.
-    pub(crate) fn seal(catalog: CatalogScope, root: Blake3Hash) -> Self {
+    pub(crate) fn seal(reading: Reading, root: Blake3Hash) -> Self {
         PersistentTree {
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
-            catalog,
             root: TreeRoot::Node(root),
-            reading: Reading::default(),
+            reading,
         }
     }
 
@@ -643,8 +638,7 @@ where
                 // The root is read through the node cache, so a cache that
                 // holds the root answers without a load or a check; the
                 // header itself is a handful of bytes to read.
-                let accessor = self.accessor(storage);
-                let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+                let node: PersistentNode<Key, Value> = self.reading.node(storage, hash).await?;
                 Ok(node.manifest()?)
             }
         }
@@ -665,12 +659,18 @@ where
     /// tree's own format. An unpersisted empty tree carries its manifest in
     /// memory and hands it to the batch directly. Equivalent to
     /// [`TransientTree::from`].
+    ///
+    /// The batch reads as this tree does ([`reading`](Self::reading)): an
+    /// edit of a [local](Self::locally) tree reads only what this replica
+    /// holds and fails on a node it lacks rather than hydrating it, an edit
+    /// of a [ranked](Self::ranked) tree ranks the hydrations it causes as the
+    /// tree does, and the tree the batch persists reads that way too.
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         match &self.root {
             TreeRoot::Empty { manifest, .. } => {
-                TransientTree::empty_with_manifest(self.catalog.clone(), manifest.clone())
+                TransientTree::empty_reading(self.reading.clone(), manifest.clone())
             }
-            TreeRoot::Node(hash) => TransientTree::new(self.catalog.clone(), hash.clone()),
+            TreeRoot::Node(hash) => TransientTree::new_reading(self.reading.clone(), hash.clone()),
         }
     }
 
@@ -698,10 +698,8 @@ where
             + Provider<Preload<PersistentNode<Key, Value>>>
             + ConditionalSync,
     {
-        let accessor = self.accessor(storage);
-
         TreeWalker::new(self.stored_root().cloned())
-            .search(key, accessor, options)
+            .search(key, storage, &self.reading, options)
             .await
     }
 }
@@ -731,7 +729,7 @@ mod tests {
     use crate::helpers::Blocks;
     use anyhow::Result;
 
-    use crate::{Accessor, Delta, PersistentTree, Scale};
+    use crate::{Delta, PersistentTree, Scale};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -750,7 +748,7 @@ mod tests {
         // sums rather than a single leaf's count.
         const COUNT: u32 = 2_000;
 
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut edit = tree.edit();
         for i in 0..COUNT {
             edit = edit
@@ -766,9 +764,13 @@ mod tests {
             );
         }
 
-        let accessor =
-            Accessor::<[u8; 4], Vec<u8>, _>::new(&storage, &crate::helpers::test_catalog());
-        let root = accessor.get_node(tree.root()).await?;
+        let (env, reading) = (
+            &storage,
+            crate::Reading::new(crate::helpers::test_subject()),
+        );
+        let root = reading
+            .node::<crate::PersistentNode<[u8; 4], Vec<u8>>, _>(env, tree.root())
+            .await?;
         let estimate = root.scale().estimate();
 
         assert!(
@@ -800,7 +802,7 @@ mod tests {
         let mut delta = Delta::zero();
 
         const COUNT: u32 = 2_000;
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut edit = tree.edit();
         for i in 0..COUNT {
             edit = edit
@@ -871,7 +873,7 @@ mod tests {
         let storage = Blocks::new();
         let mut delta = Delta::zero();
 
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut edit = tree.edit();
         for i in 0..500u32 {
             edit = edit
@@ -887,9 +889,13 @@ mod tests {
             );
         }
 
-        let accessor =
-            Accessor::<[u8; 4], Vec<u8>, _>::new(&storage, &crate::helpers::test_catalog());
-        let root = accessor.get_node(tree.root()).await?;
+        let (env, reading) = (
+            &storage,
+            crate::Reading::new(crate::helpers::test_subject()),
+        );
+        let root = reading
+            .node::<crate::PersistentNode<[u8; 4], Vec<u8>>, _>(env, tree.root())
+            .await?;
         let flushed = root.scale();
 
         // A canonical tree carries no novelty, so its scale is a pure function
@@ -914,7 +920,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retrieves_inserted_values() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert a range of values
@@ -1035,7 +1041,7 @@ mod tests {
 
         let storage = Blocks::new();
         let mut tree =
-            PersistentTree::<TaggedKey, Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<TaggedKey, Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Keys of both tags. Tag sorts first, so tag-0 keys form one run of
@@ -1092,7 +1098,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_values() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert values
@@ -1154,7 +1160,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert values in non-sequential order
@@ -1206,7 +1212,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert values 0-99
@@ -1277,7 +1283,7 @@ mod tests {
         // routes to several subtrees.
         let storage = JournaledBlocks::new();
         storage.disable_journal();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut edit = tree.edit();
         for index in 0..2000u32 {
             edit = edit
@@ -1289,9 +1295,9 @@ mod tests {
         storage.flush(&mut delta);
 
         // The last key below the root's second subtree, and that subtree.
-        let accessor =
-            Accessor::<[u8; 4], Vec<u8>, _>::new(&storage, &crate::helpers::test_catalog());
-        let root = accessor.get_node(tree.root()).await?;
+        let root = crate::Reading::new(crate::helpers::test_subject())
+            .node::<crate::PersistentNode<[u8; 4], Vec<u8>>, _>(&storage, tree.root())
+            .await?;
         let NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the root of 2000 entries of 2KiB is an index");
         };
@@ -1331,7 +1337,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert values 0-9 and 90-99
@@ -1394,7 +1400,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
 
         // Get on empty tree should return None
         let value = tree.get(&1u32.to_le_bytes(), &storage).await?;
@@ -1428,7 +1434,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_derives_the_empty_root_when_empty() -> Result<()> {
-        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         // The empty tree's root is the derived empty root for its manifest —
         // exactly what the first persist lands on — but nothing is stored
         // until that persist runs.
@@ -1447,16 +1453,20 @@ mod tests {
 
         let storage = Blocks::new();
         let mut delta = Delta::zero();
-        let empty = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog())
+        let empty = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject())
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
         storage.flush(&mut delta);
 
-        let accessor =
-            Accessor::<[u8; 4], Vec<u8>, _>::new(&storage, &crate::helpers::test_catalog());
-        let root = accessor.get_node(empty.root()).await?;
+        let (env, reading) = (
+            &storage,
+            crate::Reading::new(crate::helpers::test_subject()),
+        );
+        let root = reading
+            .node::<crate::PersistentNode<[u8; 4], Vec<u8>>, _>(env, empty.root())
+            .await?;
         let crate::NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the empty tree's root is a segment, not an index");
         };
@@ -1465,7 +1475,7 @@ mod tests {
         assert!(root.is_empty()?);
 
         let opened = PersistentTree::<[u8; 4], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             empty.root().clone(),
         );
         assert_eq!(opened.get(&1u32.to_le_bytes(), &storage).await?, None);
@@ -1501,7 +1511,7 @@ mod tests {
 
         let storage = Blocks::new();
         let legacy = PersistentTree::<[u8; 4], Vec<u8>>::at(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             Blake3Hash::from(LEGACY_EMPTY_ROOT),
         );
         assert!(legacy.stored_root().is_none());
@@ -1516,7 +1526,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         let from_fresh =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog())
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject())
                 .edit()
                 .insert([0, 0, 0, 1], vec![1], &storage)
                 .await?
@@ -1524,7 +1534,7 @@ mod tests {
         assert_eq!(from_legacy.root(), from_fresh.root());
 
         let edit = TransientTree::<[u8; 4], Vec<u8>>::new(
-            crate::helpers::test_catalog(),
+            crate::helpers::test_subject(),
             Blake3Hash::from(LEGACY_EMPTY_ROOT),
         );
         let emptied = edit.persist(&mut delta)?;
@@ -1545,7 +1555,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_updates_existing_keys() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert initial value
@@ -1595,7 +1605,7 @@ mod tests {
     async fn it_preserves_old_tree_after_insert() -> Result<()> {
         let storage = Blocks::new();
         let mut tree_v1 =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_v1 = Delta::zero();
 
         // Insert into v1
@@ -1658,7 +1668,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_creates_independent_tree_versions() -> Result<()> {
         let storage = Blocks::new();
-        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_base = Delta::zero();
 
         // Insert base data
@@ -1732,7 +1742,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_changes_root_after_modification() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         let root_empty = tree.root().clone();
@@ -1803,7 +1813,7 @@ mod tests {
 
         // Build tree A
         let mut tree_a =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_a = Delta::zero();
         for i in 0..10u32 {
             tree_a = tree_a
@@ -1823,7 +1833,7 @@ mod tests {
 
         // Build tree B with same data
         let mut tree_b =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_b = Delta::zero();
         for i in 0..10u32 {
             tree_b = tree_b
@@ -1850,7 +1860,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_single_entry_tree() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert single entry
@@ -1900,7 +1910,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_empty_tree() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
 
         // Delete from empty tree should be a no-op on the entry set; the
         // persisted empty tree lands on the canonical empty node.
@@ -1919,7 +1929,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_populated_tree() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
 
         // Insert some data
         let mut delta = Delta::zero();
@@ -1962,7 +1972,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_mixed_operations() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert
@@ -2034,7 +2044,7 @@ mod tests {
 
         // Build tree A with one insertion order
         let mut tree_a =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_a = Delta::zero();
         tree_a = tree_a
             .edit()
@@ -2078,7 +2088,7 @@ mod tests {
 
         // Build tree B with different insertion order
         let mut tree_b =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_b = Delta::zero();
         tree_b = tree_b
             .edit()
@@ -2129,7 +2139,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_to_the_empty_node_after_deleting_all_entries() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert some entries
@@ -2229,7 +2239,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert values 10-20
@@ -2290,7 +2300,7 @@ mod tests {
         use rand::{Rng, thread_rng};
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         let mut ledger = Vec::new();
 
@@ -2333,7 +2343,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_gets_present_and_absent_keys_across_index_boundaries() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
 
         // Even keys only, so every odd key probes a gap; spread wide enough to
         // force a multi-level index whose boundaries the descent must navigate.
@@ -2382,7 +2392,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_restores_tree_from_persisted_root_hash() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..100u32 {
@@ -2404,7 +2414,7 @@ mod tests {
         let root = tree.root().clone();
 
         // Reconstruct from just the root hash — no shared delta or cache
-        let restored = PersistentTree::<[u8; 4], Vec<u8>>::at(crate::helpers::test_catalog(), root);
+        let restored = PersistentTree::<[u8; 4], Vec<u8>>::at(crate::helpers::test_subject(), root);
 
         for i in 0..100u32 {
             let value = restored.get(&i.to_le_bytes(), &storage).await?;
@@ -2426,7 +2436,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Insert and flush a base set
@@ -2486,7 +2496,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         // Build and flush
@@ -2547,7 +2557,7 @@ mod tests {
         let storage = Blocks::new();
         let all_keys: Vec<u32> = (0..1000).collect();
 
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for &k in &all_keys {
             tree = tree
@@ -2619,7 +2629,7 @@ mod tests {
     async fn it_returns_to_the_empty_node_after_sequential_deletion_of_many_entries() -> Result<()>
     {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..500u32 {
@@ -2667,7 +2677,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_preserves_root_when_upserting_identical_value() -> Result<()> {
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..50u32 {
@@ -2709,7 +2719,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
 
         // Insert keys whose byte and numeric orders differ.
         // 1u32 = [1,0,0,0], 256u32 = [0,1,0,0], 512u32 = [0,2,0,0]
@@ -2769,7 +2779,7 @@ mod tests {
         use std::ops::Bound;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..20u32 {
@@ -2815,7 +2825,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..20u32 {
@@ -2853,7 +2863,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
 
         for i in 0..20u32 {
@@ -2914,7 +2924,7 @@ mod tests {
 
         // Build tree A: forward insertion order
         let mut tree_a =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_a = Delta::zero();
         for &k in &keys {
             tree_a = tree_a
@@ -2934,7 +2944,7 @@ mod tests {
 
         // Build tree B: reverse insertion order
         let mut tree_b =
-            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+            PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_b = Delta::zero();
         for &k in keys.iter().rev() {
             tree_b = tree_b
@@ -2971,7 +2981,7 @@ mod tests {
         let storage = Blocks::new();
 
         // Create base tree
-        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta_base = Delta::zero();
         for i in 0..20u32 {
             base = base
@@ -3088,7 +3098,7 @@ mod tests {
         let storage = Blocks::new();
         let all_keys: Vec<u32> = (0..1000).collect();
 
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for &k in &all_keys {
             tree = tree
@@ -3174,7 +3184,7 @@ mod tests {
         keys: &[u32],
         storage: &mut Blocks,
     ) -> Result<PersistentTree<[u8; 4], Vec<u8>>> {
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for &k in keys {
             tree = tree
@@ -3321,7 +3331,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = Blocks::new();
-        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_subject());
         let mut delta = Delta::zero();
         for i in 0..5u32 {
             tree = tree

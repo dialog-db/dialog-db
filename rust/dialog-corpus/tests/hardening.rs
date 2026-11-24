@@ -51,7 +51,7 @@ fn probe_values() -> Vec<Value> {
 #[tokio::test]
 async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
     let blocks = Blocks::new();
-    let mut index = Corpus::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut index = Corpus::empty_in(dialog_search_tree::helpers::test_subject());
     let mut delta = ArchiveDelta::zero();
 
     let mut instructions = Vec::new();

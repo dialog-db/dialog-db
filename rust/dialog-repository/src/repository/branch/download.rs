@@ -225,9 +225,9 @@ impl<'a> DownloadBranch<'a> {
                     None => branch.fallback(),
                 };
                 let _loan = routes::lend(branch.routes(), branch.of(), &fallback);
-                let catalog = branch.archive().index();
+                let subject = branch.subject();
                 let at =
-                    |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
+                    |tree: &TreeReference| Index::at(subject.clone(), NodeHash::from(*tree.hash()));
                 at(&target)
                     .follow(&at(&held), env)
                     .await
@@ -240,7 +240,7 @@ impl<'a> DownloadBranch<'a> {
                 // leaf beside it. Read it, so the first commit on the
                 // adopted head waits on nothing.
                 if let Some(adopted) = adopted {
-                    TreeHistory::from_root(catalog.clone(), adopted.tree.hash(), erased(env))
+                    TreeHistory::from_root(subject.clone(), adopted.tree.hash(), erased(env))
                         .revision_record(&adopted.version())
                         .await
                         .map_err(|error| DownloadError::Snapshot(error.into()))?;

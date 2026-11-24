@@ -52,10 +52,10 @@
 //! ```
 
 use dialog_capability::Provider as Performs;
+use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{Changes, Statement as _, Update as _, Value};
-use dialog_effects::archive::prelude::CatalogScope;
 use dialog_query::attribute::{Cardinality, Relation};
 use dialog_query::{AttributeDescriptor, ConceptDescriptor};
 use dialog_search_tree::nodes;
@@ -102,7 +102,7 @@ pub fn fetch() -> ConceptDescriptor {
 /// answer, written into `control:` on the command's own entity.
 async fn answer<Env>(
     command: Command,
-    catalog: CatalogScope,
+    subject: Subject,
     env: Env,
     fetching: bool,
 ) -> Result<Changes, Failure>
@@ -122,7 +122,7 @@ where
         return Err(Failure::new(format!("{node} is not a node")));
     };
 
-    let read = nodes::Read::<CorpusNode>::new(catalog, Blake3Hash::from(hash));
+    let read = nodes::Read::<CorpusNode>::new(subject, Blake3Hash::from(hash));
     let read = if fetching { read } else { read.locally() };
     let local = read
         .perform(&env)
@@ -167,10 +167,10 @@ where
     Env: Performs<nodes::Read<CorpusNode>> + Clone + ConditionalSend + ConditionalSync + 'static,
 {
     let provider = |concept: &ConceptDescriptor, fetching: bool| {
-        let catalog = stack.primary().archive().index();
+        let subject = stack.primary().subject();
         let env = env.clone();
         Provider::new(concept, move |command| {
-            answer(command, catalog.clone(), env.clone(), fetching)
+            answer(command, subject.clone(), env.clone(), fetching)
         })
     };
     [provider(&probe(), false), provider(&fetch(), true)]

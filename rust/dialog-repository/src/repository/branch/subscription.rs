@@ -1042,16 +1042,16 @@ where
         // branch tracks. A remote that failed to load fails only a read
         // that misses, with the load failure as its cause.
         let archive = ArchiveScope::new(self.branch.subject());
-        let catalog = archive.index();
+        let subject = self.branch.subject();
         let store = erased(env);
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store;
         let storage = store;
         let index_at = |hash: Option<Blake3Hash>| match hash {
-            Some(hash) => Index::at(catalog.clone(), NodeHash::from(hash)),
+            Some(hash) => Index::at(subject.clone(), NodeHash::from(hash)),
             // An unborn side of the diff has no tree; the differential
             // runs against the empty index.
-            None => Index::empty_in(catalog.clone()),
+            None => Index::empty_in(subject.clone()),
         };
         let previous = index_at(pinned);
         let next = index_at(target);
@@ -2458,6 +2458,59 @@ mod tests {
         let delta = subscription.poll(&operator).await?.expect("a retraction");
         assert_eq!(delta.retracted.len(), 1, "the removed member");
         assert_eq!(subscription.results().len(), 1, "one member remains");
+        Ok(())
+    }
+
+    /// A field picking `max` or `min` over an attribute that lists its
+    /// values, least first, reads the claim holding the last or the
+    /// first listed value present, and a subscription over it moves to
+    /// the next once that claim is retracted.
+    #[dialog_common::test]
+    async fn it_updates_a_listed_max_and_min_when_the_winner_is_retracted() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        for (pick, winner, next) in [("max", "high", "medium"), ("min", "low", "medium")] {
+            let branch = repo.branch(pick).open().perform(&operator).await?;
+            let task = Entity::new()?;
+            let mut transaction = branch.transaction();
+            for level in ["low", "medium", "high"] {
+                transaction = transaction
+                    .assert(the!("task/priority").of(task.clone()).is(level.to_string()));
+            }
+            transaction.commit().publish().perform(&operator).await?;
+
+            let mut subscription = branch.subscribe(concept_query(
+                serde_json::json!({ "with": { "priority": {
+                    "the": "task/priority",
+                    "as": ["low", "medium", "high"],
+                    "cardinality": "many",
+                    "pick": pick
+                } } }),
+                &["priority"],
+            ));
+            let priorities = |rows: &[dialog_query::ConceptConclusion]| {
+                rows.iter()
+                    .map(|row| row.get::<String>("priority"))
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            let initial = subscription.poll(&operator).await?.expect("initial");
+            assert_eq!(priorities(&initial.asserted)?, vec![winner], "{pick}");
+
+            branch
+                .transaction()
+                .retract(
+                    the!("task/priority")
+                        .of(task.clone())
+                        .is(winner.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let delta = subscription.poll(&operator).await?.expect("a retraction");
+            assert_eq!(priorities(&delta.retracted)?, vec![winner], "{pick}");
+            assert_eq!(priorities(&delta.asserted)?, vec![next], "{pick}");
+        }
         Ok(())
     }
 
