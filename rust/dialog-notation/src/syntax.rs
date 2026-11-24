@@ -61,7 +61,7 @@ use crate::written::{Note, Path, Segment, Slot, Written};
 pub const NAMESPACE: &str = "dialog.notation";
 
 /// The domain every derived attribute's relation is under:
-/// `dialog.notation.concept.4.list.count-open` is what
+/// `dialog.notation.concept.list.count-open` is what
 /// `(list/count-open ?l ?n)` derives and reads. A concept's domain is
 /// concluded only.
 pub const DERIVED: &str = "dialog.notation.concept";

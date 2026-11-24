@@ -536,10 +536,10 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
-/// (dialog.notation.concept.4.list.count-open ?l is: (count ?t))
+/// (dialog.notation.concept.list.count-open ?l is: (count ?t))
 ///
 /// (list/count ?l status: ?s count: (count ?t))
-/// (dialog.notation.concept.4.list.count ?l count: (count ?t) status: ?s)
+/// (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s)
 /// ```
 ///
 /// Its two terms unlabeled are the entity and the value, under `is:`.
@@ -3543,14 +3543,14 @@ mod tests {
         assert_eq!(concluded.len(), 1);
         assert!(
             concluded[0].starts_with(
-                "(rule (dialog.notation.concept.4.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
+                "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
             ),
             "{concluded:?}"
         );
         assert_eq!(
             expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
             vec![
-                "(rule (report (dialog.notation.concept.4.list.count-open list:home is: ?n)) (dialog.notation.concept.4.list.count-open list:home is: ?n))"
+                "(rule (report (dialog.notation.concept.list.count-open list:home is: ?n)) (dialog.notation.concept.list.count-open list:home is: ?n))"
             ]
         );
         let labelled = expanded(
@@ -3561,7 +3561,7 @@ mod tests {
         .unwrap();
         assert!(
             labelled[0].starts_with(
-                "(rule (dialog.notation.concept.4.list.count ?l count: (count ?t) status: ?s) "
+                "(rule (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s) "
             ),
             "{labelled:?}"
         );

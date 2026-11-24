@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn it_reads_a_fold_where_a_term_stands() {
         let form = forms(
-            "(rule (dialog.notation.concept.4.list.count-open ?l is: (count ?t))
+            "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t))
                (xyz.todo ?t list: ?l))",
         )
         .unwrap()
@@ -782,7 +782,7 @@ mod tests {
         );
         for unread in ["(count)", "(count ?t ?u)", "(count ?t by: ?l)"] {
             let form = forms(&format!(
-                "(rule (dialog.notation.concept.4.list.count-open ?l is: {unread}) (xyz.todo ?t list: ?l))"
+                "(rule (dialog.notation.concept.list.count-open ?l is: {unread}) (xyz.todo ?t list: ?l))"
             ))
             .unwrap()
             .remove(0);
@@ -799,9 +799,9 @@ mod tests {
     fn it_refuses_a_write_in_a_concepts_domain() {
         let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
         for text in [
-            "(rule (assert (dialog.notation.concept.4.list.count-open list:home is: 3)))",
-            "(rule (assert (dialog.notation.concept.4.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
-            "(rule (retract (dialog.notation.concept.4.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
+            "(rule (assert (dialog.notation.concept.list.count-open list:home is: 3)))",
+            "(rule (assert (dialog.notation.concept.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
+            "(rule (retract (dialog.notation.concept.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
         ] {
             assert!(
                 matches!(head(text), Err(Error::Refused(why)) if why.contains("rules conclude and nothing writes")),
@@ -809,7 +809,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            head("(rule (dialog.notation.concept.4.list.count-open ?l is: ?n) (xyz.n ?l n: ?n))"),
+            head("(rule (dialog.notation.concept.list.count-open ?l is: ?n) (xyz.n ?l n: ?n))"),
             Ok(Head::Derive(_))
         ));
         // A domain that only starts with the word is no concept's.

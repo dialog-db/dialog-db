@@ -1155,10 +1155,11 @@ mod tests {
     }
 
     /// The names the notation makes from what a document writes are one
-    /// name for one input. A derived attribute's relation says its
-    /// concept's length before the concept. A concept named as a domain,
-    /// `my.list`, is refused, so `my.list/count` derives nothing that
-    /// `my/list.count` could meet. A head's key of an entry, `entry/key`,
+    /// name for one input. A derived attribute's relation is its
+    /// concept's name, a dot, and the attribute's: a concept named as a
+    /// domain, `my.list`, is refused, so a concept's name holds no dot and
+    /// `my/list.count` derives the one name `my.list.count` that no other
+    /// accepted concept and attribute spell. A head's key of an entry, `entry/key`,
     /// is refused where a field of the same head is named so.
     #[test]
     fn it_refuses_two_inputs_that_would_make_one_name() -> Result<(), Error> {
@@ -1185,7 +1186,7 @@ mod tests {
         );
         let said = format!("{:?}", checked.steps);
         assert!(
-            said.contains("dialog.notation.concept.2.my.list.count/is"),
+            said.contains("dialog.notation.concept.my.list.count/is"),
             "{said}"
         );
         let checked = check(
