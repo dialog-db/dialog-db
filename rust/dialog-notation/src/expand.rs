@@ -188,6 +188,61 @@ pub(crate) fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
     None
 }
 
+/// `pending` with the concepts of the document put in the order they
+/// read each other: one whose body reads a concept another form of the
+/// document declares comes after that form, so that what it reads is a
+/// concept when it is installed, whatever order they are written in.
+/// What reads nothing of the document keeps its place, a rule about
+/// syntax before any concept; concepts that read each other round keep
+/// the order written.
+fn concepts_in_order(pending: &mut Vec<usize>, trees: &[Syntax]) {
+    let declares = |at: usize| {
+        let tree = &trees[at];
+        (tree.applies() == Some("concept"))
+            .then(|| items(tree).first().and_then(Syntax::applies))
+            .flatten()
+            .map(str::to_string)
+    };
+    let concepts: Vec<usize> = pending
+        .iter()
+        .copied()
+        .filter(|at| declares(*at).is_some())
+        .collect();
+    let reads = |at: usize| -> Vec<String> {
+        items(&trees[at])
+            .iter()
+            .skip(1)
+            .flat_map(|member| {
+                let mut names = Vec::new();
+                let mut open = vec![member];
+                while let Some(part) = open.pop() {
+                    if let Some(name) = part.applies() {
+                        names.push(name.to_string());
+                    }
+                    open.extend(items(part));
+                }
+                names
+            })
+            .collect()
+    };
+    let mut placed: Vec<usize> = Vec::new();
+    let mut left = concepts.clone();
+    while !left.is_empty() {
+        let ready = left.iter().position(|at| {
+            reads(*at).iter().all(|name| {
+                left.iter()
+                    .all(|other| other == at || declares(*other).as_deref() != Some(name.as_str()))
+            })
+        });
+        // Concepts that read each other round: the first written goes.
+        placed.push(left.remove(ready.unwrap_or(0)));
+    }
+    let first = pending.iter().position(|at| concepts.contains(at));
+    pending.retain(|at| !concepts.contains(at));
+    let at = first.map_or(pending.len(), |first| first.min(pending.len()));
+    pending.splice(at..at, placed);
+}
+
 /// The first application in `tree` as written with a label that holds a
 /// `/`, and the label. Only the notation writes one, where it joins the
 /// reads of one entity under `unless` into one read: a document that
@@ -1271,6 +1326,7 @@ impl Expander {
             .filter(|at| !skipping.contains_key(at))
             .collect();
         pending.sort_by_key(|at| rank(&trees[*at]));
+        concepts_in_order(&mut pending, &trees);
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
         let mut refused: BTreeMap<usize, Diagnostic> = skipping
             .into_iter()
