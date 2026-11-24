@@ -2982,6 +2982,35 @@ mod tests {
         }
     }
 
+    /// Of the rules about syntax that apply, the one that names the most
+    /// of what is written is taken, and a part left to `...` is left
+    /// whether `...` names it or not: `...` and `... ?r` rank the same. A
+    /// real tie at a premise is refused, as it is elsewhere.
+    #[test]
+    fn it_takes_the_rule_that_names_the_most_however_the_rest_is_written() {
+        let any = "(rule (syntax (xyz.any ?e)) (expand (thing ?e ...)))";
+        let named = "(rule (syntax (xyz.named ?e name: ?n)) (expand (thing ?e name: ?n)))";
+        let asked = "(select (xyz.x ?e v: ?n) (thing ?e name: ?n))";
+        assert_eq!(
+            expanded(&format!("{any} {named}"), asked).unwrap(),
+            vec!["(rule (report (xyz.x ?e v: ?n)) (xyz.named ?e name: ?n))"]
+        );
+        let rest = "(rule (syntax (xyz.rest ?e)) (expand (thing ?e ... ?r)))";
+        assert_eq!(
+            expanded(&format!("{rest} {named}"), asked).unwrap(),
+            expanded(&format!("{any} {named}"), asked)
+                .unwrap()
+                .iter()
+                .map(|rule| rule.replace("xyz.any", "xyz.rest"))
+                .collect::<Vec<_>>(),
+        );
+        // `(thing ?e ...)` and `(thing ?e ... ?r)` leave the same parts.
+        assert!(matches!(
+            expanded(&format!("{any} {rest}"), asked),
+            Err(Error::Ambiguous(..))
+        ));
+    }
+
     /// Where the labels written fit several definitions, a read is of
     /// every one of them: the rule is expanded once a definition, and a
     /// form that recurs in it is the same definition's each time.
