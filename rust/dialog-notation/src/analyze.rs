@@ -147,7 +147,7 @@ mod tests {
     #[dialog_common::test]
     fn it_says_where_the_form_a_warning_is_about_is() -> Result<(), Error> {
         let text = "(concept (todo/add text: ?x)
-  (xyz.todo.add/text of: ?c is: ?x in: :control))
+  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))
 
 (rule (assert (todo/add text: ?x))
   (xyz.draft ?t text: ?x))

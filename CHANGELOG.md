@@ -141,12 +141,14 @@ What this changes for you:
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).
-- A line's `cardinality:` is the attribute's; a line that says none
-  reads every claim. An elector in a concept's head, `status: (top
-  ?s)`, or on a line's value, `is: (top ?s)`, is the concept field's
-  `pick`; a variant's cases, `as: [:open :done]`, are the attribute's
-  listed values, best first. A listed `as:` with no elector chooses
-  nothing.
+- A line's `cardinality:` is the attribute's, and every line of a
+  concept or a command writes one, `cardinality: :one` or
+  `cardinality: :many`: a line that says none is refused at that form.
+  A line read in a rule's body or a select needs none and reads every
+  claim. An elector in a concept's head, `status: (max ?s)`, or on a
+  line's value, `is: (max ?s)`, is the concept field's `pick`; a
+  variant's cases, `as: [:open :done]`, are the attribute's listed
+  values, least first. A listed `as:` with no elector chooses nothing.
 - A view's `(count ?x)` of what its own markup collects is kept by
   `Branch::subscribe_fold`.
 - Refused, each with what to write instead or why: a fold in a rule

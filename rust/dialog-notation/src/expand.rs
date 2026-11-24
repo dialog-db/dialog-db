@@ -596,6 +596,18 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
     let mut reads: Vec<Syntax> = Vec::new();
     for part in members(template.clone()) {
         let read = match line(&part)? {
+            // A line of a concept or a command says its cardinality: a
+            // field is one claim or many, and nothing chooses for it.
+            Some(_)
+                if !part
+                    .operand()
+                    .is_some_and(|operand| operand.terms.contains_key("cardinality")) =>
+            {
+                return Err(Error::Refused(format!(
+                    "{part} says no cardinality: a line of a concept or a command writes \
+                     `cardinality: :one` or `cardinality: :many`"
+                )));
+            }
             Some(read) => {
                 any = true;
                 read
@@ -2398,9 +2410,9 @@ mod tests {
         (concept (todo ?t list: ?l text: ?x state: ?s)
           (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
         (concept (todo/add todo: ?t list: ?l text: ?x)
-          (xyz.todo.add/todo of: ?c is: ?t in: :control)
-          (xyz.todo.add/list of: ?c is: ?l in: :control)
-          (xyz.todo.add/text of: ?c is: ?x in: :control))
+          (xyz.todo.add/todo of: ?c is: ?t in: :control cardinality: :many)
+          (xyz.todo.add/list of: ?c is: ?l in: :control cardinality: :many)
+          (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))
         (rule (assert (todo ?t list: ?l text: ?x state: :open))
           (todo/add todo: ?t list: ?l text: ?x))
     "#;
@@ -2618,25 +2630,25 @@ mod tests {
         );
         for (text, why) in [
             (
-                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s))",
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s cardinality: :many))",
                 "says what a key is",
             ),
             (
-                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :colour))",
+                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :colour cardinality: :many))",
                 "is not what a key is",
             ),
             (
-                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s by: :colour))",
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s by: :colour cardinality: :many))",
                 "is not what a key is",
             ),
             (
-                "(concept (m ?e source: ?s) (xyz.m/?n of: ?e is: ?s by: :name))",
+                "(concept (m ?e source: ?s) (xyz.m/?n of: ?e is: ?s by: :name cardinality: :many))",
                 "the key of a collection is a field of the concept's head: ?n",
             ),
             (
                 "(concept (m ?e source: {?n ?s} block: {?p ?b})
-                   (xyz.m/?n of: ?e is: ?s by: :name)
-                   (xyz.n/?p of: ?e is: ?b by: :position))",
+                   (xyz.m/?n of: ?e is: ?s by: :name cardinality: :many)
+                   (xyz.n/?p of: ?e is: ?b by: :position cardinality: :many))",
                 "a concept holds one",
             ),
         ] {
@@ -2745,7 +2757,7 @@ mod tests {
         assert_eq!(
             rule,
             vec![
-                "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
+                "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control (:many _)) text: (:control (:many ?x)) todo: (:control (:many ?t))))"
             ]
         );
         let compiled = crate::compile(&parse(&rule[0]).unwrap().remove(0));
@@ -2775,9 +2787,9 @@ mod tests {
             (concept (todo ?t list: ?l text: ?x state: ?s)
               (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
             (concept (todo/add todo: ?t list: ?l text: ?x)
-              (xyz.todo.add/todo of: ?c is: ?t in: :control)
-              (xyz.todo.add/list of: ?c is: ?l in: :control)
-              (xyz.todo.add/text of: ?c is: ?x in: :control))"#;
+              (xyz.todo.add/todo of: ?c is: ?t in: :control cardinality: :many)
+              (xyz.todo.add/list of: ?c is: ?l in: :control cardinality: :many)
+              (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))"#;
         let uses = r#"
             (assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
             (rule (assert (todo ?t list: ?l text: ?x state: :open))
@@ -2805,7 +2817,7 @@ mod tests {
         let (kernel, diagnostics) = expander
             .submit(
                 "(select (memo ?t text: ?x))
-                 (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x)))
+                 (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x cardinality: :many)))
                    (expand (note-kind ?name)))
                  (note-kind memo)",
             )
@@ -2813,7 +2825,7 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
             kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
-            vec!["(rule (report (xyz.note ?t text: ?x)) (xyz.note ?t text: ?x))"]
+            vec!["(rule (report (xyz.note ?t text: (:many ?x))) (xyz.note ?t text: (:many ?x)))"]
         );
         assert_eq!(expander.origin(), &[0]);
     }
@@ -2999,7 +3011,7 @@ mod tests {
         assert_eq!(
             rule,
             "(rule (assert (xyz.todo ?t list: (:one (:entity ?l)) state: (:last :open) text: (:one (:text ?x)))) \
-             (xyz.todo.add _ list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"
+             (xyz.todo.add _ list: (:control (:many ?l)) text: (:control (:many ?x)) todo: (:control (:many ?t))))"
         );
         assert!(diagnostics.is_empty());
     }
@@ -3053,7 +3065,7 @@ mod tests {
         let (_, diagnostics) = expander
             .submit(
                 r#"(concept (todo/snooze todo: ?t)
-                     (xyz.todo.snooze/todo of: ?c is: ?t in: :control))
+                     (xyz.todo.snooze/todo of: ?c is: ?t in: :control cardinality: :many))
                    (assert (todo/snooze todo: todo:1))"#,
             )
             .unwrap();
@@ -3082,7 +3094,7 @@ mod tests {
         let (_, diagnostics) = expander
             .submit(
                 "(concept (counter/increment counter: ?n)
-                   (xyz.counter.increment/counter of: ?c is: ?n in: :control))
+                   (xyz.counter.increment/counter of: ?c is: ?n in: :control cardinality: :many))
                  (assert (counter/increment counter: counter:a))
                  (rule (assert (xyz.counter ?c count: (+ ?n : 1)))
                    (counter/increment counter: ?c) (xyz.counter ?c count: ?n))",
@@ -3104,7 +3116,7 @@ mod tests {
         assert_eq!(premise.len(), 1);
         assert_eq!(
             premise[0],
-            "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
+            "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control (:many _)) text: (:control (:many ?x)) todo: (:control (:many ?t))))"
         );
         let deduced = expanded(
             TODO,
@@ -3153,33 +3165,33 @@ mod tests {
     fn it_refuses_what_is_not_decided_of_a_command() {
         for (text, why) in [
             (
-                "(concept (todo/x text: ?x) (xyz.todo/text of: ?c is: ?x))",
+                "(concept (todo/x text: ?x) (xyz.todo/text of: ?c is: ?x cardinality: :many))",
                 "its lines are not on the control layer",
             ),
             (
                 "(concept (todo/x text: ?x n: ?n)
-                   (xyz.todo.x/text of: ?c is: ?x in: :control)
-                   (xyz.todo.x/n of: ?c is: ?n))",
+                   (xyz.todo.x/text of: ?c is: ?x in: :control cardinality: :many)
+                   (xyz.todo.x/n of: ?c is: ?n cardinality: :many))",
                 "mixes lines on the control layer with stored ones",
             ),
             (
-                "(concept (todo/x ?t text: ?x) (xyz.todo.x/text of: ?t is: ?x in: :control))",
+                "(concept (todo/x ?t text: ?x) (xyz.todo.x/text of: ?t is: ?x in: :control cardinality: :many))",
                 "names its entity and holds lines on the control layer",
             ),
             (
                 "(concept (todo/x text: ?x n: ?n)
-                   (xyz.todo.x/text of: ?c is: ?x in: :control)
-                   (xyz.todo.x/n of: ?d is: ?n in: :control))",
+                   (xyz.todo.x/text of: ?c is: ?x in: :control cardinality: :many)
+                   (xyz.todo.x/n of: ?d is: ?n in: :control cardinality: :many))",
                 "about more than one entity",
             ),
             (
                 "(concept (todo/x text: ?x n: ?n)
-                   (xyz.todo.x/text of: ?c is: ?x in: :control)
-                   (xyz.todo.y/n of: ?c is: ?n in: :control))",
+                   (xyz.todo.x/text of: ?c is: ?x in: :control cardinality: :many)
+                   (xyz.todo.y/n of: ?c is: ?n in: :control cardinality: :many))",
                 "more than one domain",
             ),
             (
-                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?x in: :draft))",
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?x in: :draft cardinality: :many))",
                 "no layers yet",
             ),
         ] {
@@ -3194,7 +3206,7 @@ mod tests {
         assert!(matches!(
             expanded(
                 "",
-                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?y in: :control))"
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?y in: :control cardinality: :many))"
             ),
             Err(Error::Refused(why)) if why.contains("every variable in it is a parameter")
         ));
@@ -3509,15 +3521,30 @@ mod tests {
                 r#"(assert (xyz.todo/title todo:1 "Buy milk"))"#,
                 r#"(assert (xyz.todo/title of: todo:1 is: "Buy milk"))"#,
             ),
-            (
-                "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (select (titled ?t title: ?x))",
-                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x)) (select (titled ?t title: ?x))",
-            ),
         ] {
             let read = expanded("", unlabeled).unwrap();
             assert!(!read.is_empty());
             assert_eq!(read, expanded("", labelled).unwrap(), "{unlabeled}");
         }
+        // A line of a concept says its cardinality, a labelled part, so
+        // there it is written with `of:` and `is:`: the two unlabeled
+        // terms are refused, saying what to write.
+        let unlabeled = expanded(
+            "",
+            "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (select (titled ?t title: ?x))",
+        );
+        assert!(
+            matches!(&unlabeled, Err(Error::Refused(why)) if why.contains("cardinality: :one")),
+            "{unlabeled:?}"
+        );
+        assert!(
+            expanded(
+                "",
+                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x cardinality: :many)) \
+                 (select (titled ?t title: ?x))"
+            )
+            .is_ok()
+        );
     }
 
     /// Every variable of a concept's body is one of its parameters,
@@ -3601,7 +3628,7 @@ mod tests {
             &format!(
                 "{lists}
                  (concept (list/archive list: ?l)
-                   (xyz.list.archive/list of: ?c is: ?l in: :control))"
+                   (xyz.list.archive/list of: ?c is: ?l in: :control cardinality: :many))"
             ),
             "(select (list/archive list: ?l))",
         )

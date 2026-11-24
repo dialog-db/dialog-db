@@ -826,8 +826,8 @@ mod tests {
 
 ; Adding a to-do.
 (concept (todo/add todo: ?t text: ?x)
-  (xyz.todo.add/todo of: ?c is: ?t in: :control)
-  (xyz.todo.add/text of: ?c is: ?x in: :control))
+  (xyz.todo.add/todo of: ?c is: ?t in: :control cardinality: :many)
+  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))
 
 ; Adding a to-do
 ; opens it.
@@ -903,7 +903,7 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
-            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(concept (todo/add text: ?x)\n  (xyz.todo.add/text of: ?c is: ?x in: :control))\n(assert (todo todo:1 text: \"milk\"))\n(assert (todo/add text: \"eggs\"))\n",
+            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(concept (todo/add text: ?x)\n  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))\n(assert (todo todo:1 text: \"milk\"))\n(assert (todo/add text: \"eggs\"))\n",
         );
         assert_eq!(checked.refusals().count(), 0);
         let [warning] = checked.diagnostics.as_slice() else {
@@ -1036,7 +1036,7 @@ mod tests {
   (xyz.todo ?t list: (:last ?l)))
 
 (concept (list ?l item: {?k ?i})
-  (xyz.list/?k of: ?l is: ?i by: :position))
+  (xyz.list/?k of: ?l is: ?i by: :position cardinality: :many))
 ";
 
     /// The `the:` of a line's descriptor, as Dialog-DB writes it.

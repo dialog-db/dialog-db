@@ -64,9 +64,11 @@ pub struct Line {
     /// `as:`, as written: a type's keyword, or a variant's cases.
     pub kind: Option<Syntax>,
     /// The attribute's cardinality, `one` or `many`, as Dialog-DB reads
-    /// it: as written, by `cardinality:` or `(:one …)`, or by a pick, or
-    /// `many` where none is written, since such a line reads every
-    /// claim. None only where the line does not compile.
+    /// it. A line of a concept or a command always writes
+    /// `cardinality:`, so for one it is what was written. A concept
+    /// written as reads of a domain says it by `(:one …)` or a pick, and
+    /// is `many` where it says none, since such a read takes every claim.
+    /// None only where the line does not compile.
     pub cardinality: Option<String>,
     /// `in:`, the layer, as written.
     pub layer: Option<String>,

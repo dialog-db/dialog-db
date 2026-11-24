@@ -40,11 +40,11 @@ const TODO: &str = r#"
     ; Adding a to-do, and completing one: commands, a concept each
     ; whose head names no entity, its lines on the control layer.
     (concept (todo/add todo: ?t list: ?l text: ?x)
-      (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
-      (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-      (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+      (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control cardinality: :many)
+      (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+      (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :many))
     (concept (todo/complete todo: ?t)
-      (xyz.todo.complete/todo of: ?c is: ?t as: :entity in: :control))
+      (xyz.todo.complete/todo of: ?c is: ?t as: :entity in: :control cardinality: :many))
 
     ; Adding a to-do opens it.
     (rule (assert (todo ?t list: ?l text: ?x state: :open))
@@ -117,9 +117,9 @@ async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<
                  (todo/add todo: ?t list: ?l text: ?x))
                (select (xyz.todo ?t text: (:last ?x)))
                (concept (todo/add todo: ?t list: ?l text: ?x)
-                 (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
-                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+                 (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :many))
                (concept (todo ?t list: ?l text: ?x state: ?s)
                  (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
                  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
@@ -161,8 +161,8 @@ async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
                  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
                  (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
                (concept (todo/add list: ?l text: ?x)
-                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :many))
                (rule (assert (todo ?t list: ?l text: ?x state: :open))
                  (todo/add list: ?l text: ?x)
                  (id ?t list: ?l text: ?x))"#,
@@ -333,9 +333,9 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     notebook
         .submit(
             r#"(concept (block/place subject: ?b notebook: ?n key: ?k)
-                 (xyz.block.place/subject of: ?c is: ?b as: :entity in: :control)
-                 (xyz.block.place/notebook of: ?c is: ?n as: :entity in: :control)
-                 (xyz.block.place/key of: ?c is: ?k as: :text in: :control))
+                 (xyz.block.place/subject of: ?c is: ?b as: :entity in: :control cardinality: :many)
+                 (xyz.block.place/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many)
+                 (xyz.block.place/key of: ?c is: ?k as: :text in: :control cardinality: :many))
                (rule (assert (notebook-entry ?n block: {?k ?b}))
                  (block/place subject: ?b notebook: ?n key: ?k))
                (rule (retract (notebook-entry ?n block: {?old ?b}))
@@ -455,7 +455,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
     let command = notebook
         .submit(
             r#"(concept (todo/ping todo: ?t)
-                 (xyz.todo.ping/todo of: ?c is: ?t as: :entity in: :control))
+                 (xyz.todo.ping/todo of: ?c is: ?t as: :entity in: :control cardinality: :many))
                (assert (todo/ping todo: ?t) (when (todo ?t text: "Buy milk" ...)))"#,
         )
         .await;
@@ -563,10 +563,10 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
         .submit(&format!(
             r#"{COLLECTIONS}
                (concept (block/insert block: ?x notebook: ?b after: ?lo before: ?hi)
-                 (xyz.block.insert/block of: ?c is: ?x as: :entity in: :control)
-                 (xyz.block.insert/notebook of: ?c is: ?b as: :entity in: :control)
-                 (xyz.block.insert/after of: ?c is: ?lo as: :text in: :control)
-                 (xyz.block.insert/before of: ?c is: ?hi as: :text in: :control))
+                 (xyz.block.insert/block of: ?c is: ?x as: :entity in: :control cardinality: :many)
+                 (xyz.block.insert/notebook of: ?c is: ?b as: :entity in: :control cardinality: :many)
+                 (xyz.block.insert/after of: ?c is: ?lo as: :text in: :control cardinality: :many)
+                 (xyz.block.insert/before of: ?c is: ?hi as: :text in: :control cardinality: :many))
                (rule (assert (notebook-entry ?b block: {{?at ?x}}))
                  (block/insert block: ?x notebook: ?b after: ?lo before: ?hi)
                  (dialog/position ?x after: ?lo before: ?hi is: ?at))
@@ -632,8 +632,8 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
                  (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
                  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))
                (concept (todo/add list: ?l text: ?x)
-                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :many))
                (rule (assert (todo ?c list: ?l text: ?x))
                  (todo/add of: ?c list: ?l text: ?x))"#,
         )
@@ -791,7 +791,7 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
         "; A note.
 (concept (note ?n text: ?x)
   ; What it says.
-  (xyz.note/text of: ?n is: ?x as: :text))
+  (xyz.note/text of: ?n is: ?x as: :text cardinality: :many))
 
 ; One note, as a row.
 (query (note/row ?n is: ?row) (note ?n text: ?x) (view ?row [:li ?x]))",
@@ -828,7 +828,7 @@ async fn it_retracts_every_field_of_a_concept_named_by_its_entity() -> Result<()
                  (xyz.block/notebook of: ?b is: ?n as: :entity cardinality: :one)
                  (xyz.block/source of: ?b is: ?s as: :text cardinality: :one))
                (concept (block/remove subject: ?b)
-                 (xyz.block.remove/subject of: ?c is: ?b as: :entity in: :control))
+                 (xyz.block.remove/subject of: ?c is: ?b as: :entity in: :control cardinality: :many))
                (rule (retract (notebook/block ?b))
                  (block/remove subject: ?b))
                (assert (notebook/block block:1 notebook: notebook:1 source: "one"))
@@ -876,11 +876,11 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
                  (xyz.todo/list of: ?i is: ?l as: :entity cardinality: :one))
 
                (concept (todo/add todo: ?i list: ?l title: ?t)
-                 (xyz.todo.add/todo of: ?c is: ?i as: :entity in: :control)
-                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-                 (xyz.todo.add/title of: ?c is: ?t as: :text in: :control))
+                 (xyz.todo.add/todo of: ?c is: ?i as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/title of: ?c is: ?t as: :text in: :control cardinality: :many))
                (concept (todo/complete todo: ?i)
-                 (xyz.todo.complete/todo of: ?c is: ?i as: :entity in: :control))
+                 (xyz.todo.complete/todo of: ?c is: ?i as: :entity in: :control cardinality: :many))
 
                (rule (assert (todo ?i list: ?l title: ?t state: :open))
                  (todo/add todo: ?i list: ?l title: ?t))
@@ -1284,7 +1284,7 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
 
 const COUNTER: &str = "
     (concept (counter/increment counter: ?n)
-      (xyz.counter.increment/counter of: ?c is: ?n as: :entity in: :control))
+      (xyz.counter.increment/counter of: ?c is: ?n as: :entity in: :control cardinality: :many))
     (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
       (counter/increment counter: ?c)
       (xyz.counter ?c count: (:last (:natural ?n))))";
@@ -1347,7 +1347,7 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
     let (_, diagnostics) = notebook
         .submit(
             "(concept (counter/reset counter: ?n)
-               (xyz.counter.reset/counter of: ?c is: ?n as: :entity in: :control))
+               (xyz.counter.reset/counter of: ?c is: ?n as: :entity in: :control cardinality: :many))
              (assert (counter/reset counter: counter:a))",
         )
         .await?;
@@ -1493,7 +1493,7 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     notebook
         .submit(
             "(concept (todo/snooze todo: ?t)
-               (xyz.todo.snooze/todo of: ?c is: ?t as: :entity in: :control))",
+               (xyz.todo.snooze/todo of: ?c is: ?t as: :entity in: :control cardinality: :many))",
         )
         .await?;
     let (_, diagnostics) = notebook
@@ -1547,8 +1547,8 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
                  (< ?p : 10))
 
                (concept (shop/restock item: ?i count: ?n)
-                 (shop.restock/item of: ?c is: ?i as: :entity in: :control)
-                 (shop.restock/count of: ?c is: ?n as: :natural in: :control))
+                 (shop.restock/item of: ?c is: ?i as: :entity in: :control cardinality: :many)
+                 (shop.restock/count of: ?c is: ?n as: :natural in: :control cardinality: :many))
 
                ; Restocking sets the count.
                (rule (assert (shop.stock ?i count: (:last (:natural ?n))))
@@ -1606,8 +1606,8 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
 
 const MOVE: &str = "
     (concept (todo/move todo: ?t list: ?to)
-      (xyz.todo.move/todo of: ?c is: ?t as: :entity in: :control)
-      (xyz.todo.move/list of: ?c is: ?to as: :entity in: :control))";
+      (xyz.todo.move/todo of: ?c is: ?t as: :entity in: :control cardinality: :many)
+      (xyz.todo.move/list of: ?c is: ?to as: :entity in: :control cardinality: :many))";
 
 /// Moving a to-do writes where it is and takes back where it was: two
 /// rules of one head, each with the premises it needs. A tick reads
@@ -1655,9 +1655,9 @@ async fn it_asserts_and_retracts_on_a_command_a_rule_deduces() -> Result<()> {
         .submit(&format!(
             "{MOVE}
              (concept (todo/moved todo: ?t to: ?to from: ?from)
-               (xyz.todo.moved/todo of: ?c is: ?t as: :entity in: :control)
-               (xyz.todo.moved/to of: ?c is: ?to as: :entity in: :control)
-               (xyz.todo.moved/from of: ?c is: ?from as: :entity in: :control))
+               (xyz.todo.moved/todo of: ?c is: ?t as: :entity in: :control cardinality: :many)
+               (xyz.todo.moved/to of: ?c is: ?to as: :entity in: :control cardinality: :many)
+               (xyz.todo.moved/from of: ?c is: ?from as: :entity in: :control cardinality: :many))
              (rule (todo/moved todo: ?t to: ?to from: ?from)
                (todo/move todo: ?t list: ?to)
                (xyz.todo ?t list: ?from))
@@ -1743,7 +1743,7 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
         .submit(&format!(
             "{TODO}
              (concept (list/archive list: ?l)
-               (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control))
+               (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control cardinality: :many))
              (rule (assert (todo/complete todo: ?t))
                (list/archive list: ?l)
                (todo ?t list: ?l ...))"
@@ -1786,7 +1786,7 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
     notebook
         .submit(
             r#"(concept (note/jot text: ?x)
-                 (xyz.note.jot/text of: ?c is: ?x as: :text in: :control))
+                 (xyz.note.jot/text of: ?c is: ?x as: :text in: :control cardinality: :many))
                (rule (assert (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
                  (note/jot text: ?x))"#,
         )
@@ -2130,9 +2130,9 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
 #[dialog_common::test]
 async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<()> {
     let rules = "(concept (name/first name: ?n)
-                   (xyz.name.first/name of: ?c is: ?n as: :entity in: :control))
+                   (xyz.name.first/name of: ?c is: ?n as: :entity in: :control cardinality: :many))
                  (concept (name/second name: ?n)
-                   (xyz.name.second/name of: ?c is: ?n as: :entity in: :control))
+                   (xyz.name.second/name of: ?c is: ?n as: :entity in: :control cardinality: :many))
                  (rule (assert (xyz.name ?n referent: (:last (:entity concept:a))))
                    (name/first name: ?n))
                  (rule (assert (xyz.name ?n referent: (:last (:entity concept:b))))
@@ -2699,8 +2699,8 @@ async fn it_names_one_entity_of_a_number_read_and_written() -> Result<()> {
                  (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
                  (xyz.todo/n of: ?t is: ?n as: :integer cardinality: :one))
                (concept (todo/add list: ?l n: ?n)
-                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
-                 (xyz.todo.add/n of: ?c is: ?n as: :integer in: :control))
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
+                 (xyz.todo.add/n of: ?c is: ?n as: :integer in: :control cardinality: :many))
                (rule (assert (todo ?t list: ?l n: ?n))
                  (todo/add list: ?l n: ?n)
                  (id ?t list: ?l n: ?n))"#,

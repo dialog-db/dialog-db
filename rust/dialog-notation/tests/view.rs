@@ -1478,7 +1478,7 @@ async fn it_renders_a_view_asked_once() -> Result<()> {
 async fn it_refuses_what_a_view_may_not_say() -> Result<()> {
     let command = r#"
         (concept (todo/toggle todo: ?t)
-          (xyz.todo.toggle/todo of: ?c is: ?t as: :entity in: :control))"#;
+          (xyz.todo.toggle/todo of: ?c is: ?t as: :entity in: :control cardinality: :many))"#;
     for (text, says) in [
         (
             "(view todo :row [:li ?title] (todo ?t title: ?title))",

@@ -206,79 +206,79 @@
 ; Create a sheet in workbook `table`.
 (concept (table/create-sheet table: ?table name: ?name order: ?order time: ?time)
   ; The workbook gaining the sheet.
-  (xyz.tonk.table.create-sheet/table of: ?c is: ?table as: :entity in: :control)
+  (xyz.tonk.table.create-sheet/table of: ?c is: ?table as: :entity in: :control cardinality: :many)
   ; The new sheet's name.
-  (xyz.tonk.table.create-sheet/name of: ?c is: ?name as: :text in: :control)
+  (xyz.tonk.table.create-sheet/name of: ?c is: ?name as: :text in: :control cardinality: :many)
   ; Tab-strip order key, computed by the element.
-  (xyz.tonk.table.create-sheet/order of: ?c is: ?order as: :text in: :control)
+  (xyz.tonk.table.create-sheet/order of: ?c is: ?order as: :text in: :control cardinality: :many)
   ; A monotonic integer nonce from the element.
-  (xyz.tonk.table.create-sheet/time of: ?c is: ?time as: :natural in: :control))
+  (xyz.tonk.table.create-sheet/time of: ?c is: ?time as: :natural in: :control cardinality: :many))
 
 ; Rename `sheet` to `name`.
 (concept (table/rename-sheet sheet: ?sheet name: ?name)
   ; The sheet being renamed.
-  (xyz.tonk.table.rename-sheet/sheet of: ?c is: ?sheet as: :entity in: :control)
+  (xyz.tonk.table.rename-sheet/sheet of: ?c is: ?sheet as: :entity in: :control cardinality: :many)
   ; The new name.
-  (xyz.tonk.table.rename-sheet/name of: ?c is: ?name as: :text in: :control))
+  (xyz.tonk.table.rename-sheet/name of: ?c is: ?name as: :text in: :control cardinality: :many))
 
 ; Set a previously-empty cell (mints its claim).
 (concept (table/create-cell sheet: ?sheet at: ?at content: ?content time: ?time)
   ; The sheet the cell is on.
-  (xyz.tonk.table.create-cell/sheet of: ?c is: ?sheet as: :entity in: :control)
+  (xyz.tonk.table.create-cell/sheet of: ?c is: ?sheet as: :entity in: :control cardinality: :many)
   ; A1-style address.
-  (xyz.tonk.table.create-cell/at of: ?c is: ?at as: :text in: :control)
+  (xyz.tonk.table.create-cell/at of: ?c is: ?at as: :text in: :control cardinality: :many)
   ; The raw input.
-  (xyz.tonk.table.create-cell/content of: ?c is: ?content as: :text in: :control)
+  (xyz.tonk.table.create-cell/content of: ?c is: ?content as: :text in: :control cardinality: :many)
   ; A monotonic integer nonce from the element.
-  (xyz.tonk.table.create-cell/time of: ?c is: ?time as: :natural in: :control))
+  (xyz.tonk.table.create-cell/time of: ?c is: ?time as: :natural in: :control cardinality: :many))
 
 ; Replace `cell`'s raw input.
 (concept (table/edit-cell cell: ?cell content: ?content)
   ; The edited cell.
-  (xyz.tonk.table.edit-cell/cell of: ?c is: ?cell as: :entity in: :control)
+  (xyz.tonk.table.edit-cell/cell of: ?c is: ?cell as: :entity in: :control cardinality: :many)
   ; The new raw input.
-  (xyz.tonk.table.edit-cell/content of: ?c is: ?content as: :text in: :control))
+  (xyz.tonk.table.edit-cell/content of: ?c is: ?content as: :text in: :control cardinality: :many))
 
 ; Empty `cell` (retracts it from the sheet).
 (concept (table/clear-cell cell: ?cell)
   ; The cleared cell.
-  (xyz.tonk.table.clear-cell/cell of: ?c is: ?cell as: :entity in: :control))
+  (xyz.tonk.table.clear-cell/cell of: ?c is: ?cell as: :entity in: :control cardinality: :many))
 
 ; Size a previously-default column (mints its claim).
 (concept (table/create-column sheet: ?sheet at: ?at width: ?width time: ?time)
   ; The sheet the column is on.
-  (xyz.tonk.table.create-column/sheet of: ?c is: ?sheet as: :entity in: :control)
+  (xyz.tonk.table.create-column/sheet of: ?c is: ?sheet as: :entity in: :control cardinality: :many)
   ; Column letters.
-  (xyz.tonk.table.create-column/at of: ?c is: ?at as: :text in: :control)
+  (xyz.tonk.table.create-column/at of: ?c is: ?at as: :text in: :control cardinality: :many)
   ; Width px, as decimal text.
-  (xyz.tonk.table.create-column/width of: ?c is: ?width as: :text in: :control)
+  (xyz.tonk.table.create-column/width of: ?c is: ?width as: :text in: :control cardinality: :many)
   ; A monotonic integer nonce from the element.
-  (xyz.tonk.table.create-column/time of: ?c is: ?time as: :natural in: :control))
+  (xyz.tonk.table.create-column/time of: ?c is: ?time as: :natural in: :control cardinality: :many))
 
 ; Change `column`'s width.
 (concept (table/resize-column column: ?column width: ?width)
   ; The resized column.
-  (xyz.tonk.table.resize-column/column of: ?c is: ?column as: :entity in: :control)
+  (xyz.tonk.table.resize-column/column of: ?c is: ?column as: :entity in: :control cardinality: :many)
   ; The new width px, as decimal text.
-  (xyz.tonk.table.resize-column/width of: ?c is: ?width as: :text in: :control))
+  (xyz.tonk.table.resize-column/width of: ?c is: ?width as: :text in: :control cardinality: :many))
 
 ; Size a previously-default row (mints its claim).
 (concept (table/create-row sheet: ?sheet at: ?at height: ?height time: ?time)
   ; The sheet the row is on.
-  (xyz.tonk.table.create-row/sheet of: ?c is: ?sheet as: :entity in: :control)
+  (xyz.tonk.table.create-row/sheet of: ?c is: ?sheet as: :entity in: :control cardinality: :many)
   ; The row number, as text.
-  (xyz.tonk.table.create-row/at of: ?c is: ?at as: :text in: :control)
+  (xyz.tonk.table.create-row/at of: ?c is: ?at as: :text in: :control cardinality: :many)
   ; Height px, as decimal text.
-  (xyz.tonk.table.create-row/height of: ?c is: ?height as: :text in: :control)
+  (xyz.tonk.table.create-row/height of: ?c is: ?height as: :text in: :control cardinality: :many)
   ; A monotonic integer nonce from the element.
-  (xyz.tonk.table.create-row/time of: ?c is: ?time as: :natural in: :control))
+  (xyz.tonk.table.create-row/time of: ?c is: ?time as: :natural in: :control cardinality: :many))
 
 ; Change `row`'s height.
 (concept (table/resize-row row: ?row height: ?height)
   ; The resized row.
-  (xyz.tonk.table.resize-row/row of: ?c is: ?row as: :entity in: :control)
+  (xyz.tonk.table.resize-row/row of: ?c is: ?row as: :entity in: :control cardinality: :many)
   ; The new height px, as decimal text.
-  (xyz.tonk.table.resize-row/height of: ?c is: ?height as: :text in: :control))
+  (xyz.tonk.table.resize-row/height of: ?c is: ?height as: :text in: :control cardinality: :many))
 
 ; Rules.
 
