@@ -1603,7 +1603,9 @@ impl Scope {
 ///   One that leaves out the key or the value is not decided.
 ///
 /// A retract that names some fields of a concept and not others is a
-/// write that leaves fields out, refused as one.
+/// write that leaves fields out, refused as one. At the top level with
+/// no premise, a retract by a variable entity is refused as any write
+/// with no premise is: it needs its entity.
 fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
     let Head::Retract(read) = &rule.head else {
         return Ok(rule);
@@ -1630,6 +1632,14 @@ fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
     if !collection && !unnamed(&read.entity) && read.named(&bound).is_empty() {
         let every = read.clone();
         if rule.when.is_empty() && rule.unless.is_empty() {
+            // With no premise its entity is written, as any write's is:
+            // a variable there would retract every instance there is.
+            if matches!(read.entity, Term::Variable(_)) {
+                return Err(Error::Refused(format!(
+                    "a write with no premise needs its entity: {}",
+                    read.domain
+                )));
+            }
             rule.once = true;
         }
         rule.when.push(Premise::Read(every));

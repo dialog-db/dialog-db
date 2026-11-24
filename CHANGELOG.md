@@ -37,6 +37,12 @@ What this changes for you:
   whose fields include its own, as every fitting one was read before.
 - A write is not a read and is unchanged: an assert says every field,
   and a retract every field or the entity alone.
+- A retract at the top level by a variable entity and no field,
+  `(retract (todo ?t))`, is refused as `a write with no premise needs
+  its entity`, as one naming fields was. It retracted every to-do.
+  `(retract (todo todo:1))`, and the same in a rule with premises, are
+  unchanged. One field is retracted through its relation,
+  `(retract (xyz.todo/state of: todo:1 is: :open))`.
 - A concept whose body reads another concept, `(concept (doc/plain ?d
   part: ?v) (alt ?d v: ?v))`, is declared as a concept whatever its name.
   Under a name whose first part was a declared concept it was read as a
