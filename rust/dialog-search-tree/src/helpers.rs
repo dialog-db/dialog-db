@@ -58,10 +58,9 @@ mod blocks;
 pub use blocks::*;
 
 use crate::{
-    Accessor, Delta, DialogSearchTreeError, Distribution, Hashed, Key, Manifest, NodeBody,
-    PersistentNode, PersistentTree, Rank, Value,
+    Delta, DialogSearchTreeError, Distribution, Hashed, Key, Manifest, NodeBody, PersistentNode,
+    PersistentTree, Rank, Reading, Value,
 };
-use dialog_effects::archive::prelude::CatalogScope;
 
 /// Traversal order for tree iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -189,7 +188,7 @@ where
                 queue.enqueue([root]);
 
                 while let Some(hash) = queue.dequeue() {
-                    let node = load_node::<Key, Value, Env>(storage, self.catalog(), &hash).await?;
+                    let node: PersistentNode<Key, Value> = self.reading().node(storage, &hash).await?;
 
                     if let NodeBody::Index(index) = node.body() {
                         let children = index
@@ -205,25 +204,6 @@ where
             }
         }
     }
-}
-
-/// Reads a node of `catalog` through `storage` by hash.
-async fn load_node<Key, Value, Env>(
-    storage: &Env,
-    catalog: &CatalogScope,
-    hash: &Blake3Hash,
-) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
-where
-    Key: self::Key + dialog_common::ConditionalSend + ConditionalSync + 'static,
-    Value: self::Value + ConditionalSync + 'static,
-    Value::Archived: for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Env: Provider<Read<PersistentNode<Key, Value>>>
-        + Provider<Preload<PersistentNode<Key, Value>>>
-        + ConditionalSync,
-{
-    Accessor::new(storage, catalog).get_node(hash).await
 }
 
 /// A stream of tree nodes.
@@ -843,7 +823,7 @@ impl TreeDescriptor {
         if self.0.is_empty() {
             return Ok(TreeSpec {
                 spec: Vec::new(),
-                tree: TestTree::empty_in(test_catalog()),
+                tree: TestTree::empty_in(test_subject()),
                 storage,
             });
         }
@@ -913,18 +893,18 @@ impl TreeDescriptor {
             frame_ceiling_factor: 0,
             ..Manifest::default()
         };
-        let mut tree = TestTree::empty_in(test_catalog());
+        let mut tree = TestTree::empty_in(test_subject());
         let mut delta = Delta::zero();
         for key in &collection {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
             let edit = match tree.stored_root() {
                 Some(root) => crate::TransientTree::with_manifest(
-                    test_catalog(),
+                    test_subject(),
                     root.clone(),
                     manifest.clone(),
                 ),
-                None => crate::TransientTree::empty_with_manifest(test_catalog(), manifest.clone()),
+                None => crate::TransientTree::empty_with_manifest(test_subject(), manifest.clone()),
             };
             tree = edit
                 .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
@@ -951,7 +931,7 @@ impl TreeDescriptor {
         // Reload the tree from its hash so the root is freshly loaded during
         // differentials, and
         // re-enable journaling to track root and differential reads.
-        let tree = TestTree::at(test_catalog(), root);
+        let tree = TestTree::at(test_subject(), root);
         storage.enable_journal();
 
         Ok(TreeSpec {
@@ -1003,8 +983,8 @@ impl TreeDescriptor {
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
     ) -> Result<SpecKey, DialogSearchTreeError> {
-        let node =
-            load_node::<SpecKey, Vec<u8>, TestStorage>(storage, &test_catalog(), hash).await?;
+        let node: PersistentNode<SpecKey, Vec<u8>> =
+            Reading::new(test_subject()).node(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body() {
             NodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?,
@@ -1138,8 +1118,8 @@ impl TreeSpec {
         is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let Ok(node) =
-                load_node::<SpecKey, Vec<u8>, TestStorage>(storage, &test_catalog(), hash).await
+            let Ok(node): Result<PersistentNode<SpecKey, Vec<u8>>, _> =
+                Reading::new(test_subject()).node(storage, hash).await
             else {
                 output.push_str(&format!("{prefix}(missing node {hash})\n"));
                 return;

@@ -313,16 +313,18 @@ fn compare(archive: &Chronicle, catalog: &str, hash: &Blake3Hash) -> anyhow::Res
     use dialog_search_tree::{NodeBody, PersistentNode, into_owned};
     type TreeNode = PersistentNode<Key, State<Datum>>;
 
+    let subject = Subject::from("did:test:served".parse::<dialog_capability::Did>()?);
+    // A node read names its subject, and reaches the catalog the node
+    // layer keeps a subject's nodes in: a block of any other is no node.
+    if catalog != dialog_search_tree::nodes::blocks_of(&subject).catalog_name() {
+        return Ok(false);
+    }
     let block = Buffer::from(archive.get(catalog, hash)?.expect("a block it lists"));
     let Ok(stored) = TreeNode::try_from(block.clone()) else {
         return Ok(false);
     };
-    let scope = dialog_effects::archive::prelude::ArchiveScope::new(Subject::from(
-        "did:test:served".parse::<dialog_capability::Did>()?,
-    ))
-    .catalog(catalog);
     // The archive answers a node read at once, from its mapping.
-    let Some(served) = Read::<TreeNode>::new(scope, hash.clone())
+    let Some(served) = Read::<TreeNode>::new(subject, hash.clone())
         .perform(archive)
         .into_now()
         .unwrap_or_else(|_| panic!("the archive answers a read at once"))?

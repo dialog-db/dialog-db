@@ -13,8 +13,8 @@
 //! buffered ops riding on it.
 
 use crate::reads::*;
+use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_effects::archive::prelude::CatalogScope;
 use std::env;
 
 use crate::Blake3Hash;
@@ -77,13 +77,13 @@ pub struct NodeStat {
 /// all-zero root earlier versions stored for an empty tree, or the root an
 /// empty tree derives from its format before its first persist
 /// ([`Corpus::empty_in`](super::Corpus::empty_in)), which no
-/// archive holds yet. Nodes are the blocks of `catalog`, loaded through `env`
-/// ([`load_node`](dialog_search_tree::load_node)), so a node
+/// archive holds yet. Nodes are `subject`'s, read through `env`
+/// ([`nodes::Read`]), so a node
 /// the store keeps is read from memory and every other is verified against
 /// the hash asked for; spilled values and history records outside the tree
 /// are never touched.
 pub async fn capture<Env>(
-    catalog: &CatalogScope,
+    subject: &Subject,
     root: &Blake3Hash,
     env: &Env,
 ) -> Result<Vec<NodeStat>, DialogCorpusError>
@@ -96,13 +96,10 @@ where
     }
     let unpersisted_empty = super::Corpus::empty_root(&Manifest::default())?;
     if root == unpersisted_empty.as_bytes()
-        && dialog_search_tree::load_node::<Key, State<Datum>, _>(
-            env,
-            catalog,
-            &NodeHash::from(*root),
-        )
-        .await?
-        .is_none()
+        && nodes::Read::<CorpusNode>::new(subject.clone(), NodeHash::from(*root))
+            .perform(env)
+            .await?
+            .is_none()
     {
         return Ok(Vec::new());
     }
@@ -113,7 +110,8 @@ where
         let mut next = Vec::new();
         for hash in &frontier {
             let node: PersistentNode<Key, State<Datum>> =
-                dialog_search_tree::load_node(env, catalog, &NodeHash::from(*hash))
+                nodes::Read::<CorpusNode>::new(subject.clone(), NodeHash::from(*hash))
+                    .perform(env)
                     .await?
                     .ok_or_else(|| {
                         DialogCorpusError::Tree(format!("tree node missing at depth {depth}"))
@@ -350,7 +348,7 @@ mod tests {
     use dialog_capability::Provider;
     use dialog_common::{Buffer, Held, Holds};
     use dialog_effects::archive::{ArchiveError, Load};
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -363,7 +361,7 @@ mod tests {
 
     /// Persists a one-fact tree into `blocks` and returns its root.
     async fn persist(blocks: &Blocks, name: &str) -> anyhow::Result<Blake3Hash> {
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         let mut delta = ArchiveDelta::zero();
         tree.apply(
             blocks,
@@ -428,7 +426,7 @@ mod tests {
             impostor,
         };
 
-        let captured = capture(&test_catalog(), &asked, &store).await;
+        let captured = capture(&test_subject(), &asked, &store).await;
 
         assert!(
             matches!(&captured, Err(DialogCorpusError::Tree(message)) if message.contains("did not match")),
@@ -444,14 +442,14 @@ mod tests {
     async fn it_captures_nothing_for_an_unpersisted_empty_tree() -> anyhow::Result<()> {
         let store = Blocks::new();
         assert!(
-            capture(&test_catalog(), &[0u8; 32], &store)
+            capture(&test_subject(), &[0u8; 32], &store)
                 .await?
                 .is_empty()
         );
-        let empty = Corpus::empty_in(test_catalog());
+        let empty = Corpus::empty_in(test_subject());
         assert_ne!(empty.root().as_bytes(), &[0u8; 32]);
         assert!(
-            capture(&test_catalog(), empty.root().as_bytes(), &store)
+            capture(&test_subject(), empty.root().as_bytes(), &store)
                 .await?
                 .is_empty()
         );
