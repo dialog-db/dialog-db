@@ -1275,6 +1275,44 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
     Ok(())
 }
 
+/// A concept whose body reads another concept is a concept, whatever
+/// its name: under a name with a `/` whose first part is a declared
+/// concept it is read through its body, not as a derived attribute that
+/// nothing concludes, and so is one whose field is an entry with a
+/// constant key. In a document of its own or beside its parent alike.
+#[dialog_common::test]
+async fn it_reads_a_concept_over_another_concept_under_a_name_with_a_slash() -> Result<()> {
+    let alt = r#"(concept (alt ?d v: ?v)
+           (xyz.alt/v of: ?d is: ?v as: :text cardinality: :one))
+         (concept (doc ?d title: ?t)
+           (xyz.doc.meta/title of: ?d is: ?t as: :text cardinality: :one))
+         (assert (alt doc:1 v: "x"))
+         (assert (doc doc:1 title: "T"))"#;
+    let plain = "(concept (doc/plain ?d part: ?v) (alt ?d v: ?v))";
+    let keyed = r#"(concept (doc/parts ?d part: {"a" ?v}) (alt ?d v: ?v))"#;
+    for together in [false, true] {
+        let mut notebook = Notebook::open().await?;
+        if together {
+            notebook.submit(&format!("{alt} {plain} {keyed}")).await?;
+        } else {
+            notebook.submit(alt).await?;
+            notebook.submit(plain).await?;
+            notebook.submit(keyed).await?;
+        }
+        assert_eq!(
+            report(&mut notebook, "(select (doc/plain ?d part: ?p))").await?,
+            vec![r#"(xyz.alt doc:1 v: "x")"#],
+            "together: {together}"
+        );
+        assert_eq!(
+            report(&mut notebook, r#"(select (doc/parts ?d part: {"a" ?w}))"#).await?,
+            vec![r#"(xyz.alt doc:1 v: "x")"#],
+            "together: {together}"
+        );
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
