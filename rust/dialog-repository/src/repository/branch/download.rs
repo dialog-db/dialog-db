@@ -25,8 +25,10 @@ use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Resolve;
 use futures_util::StreamExt as _;
 
+use dialog_corpus::history::{History as _, TreeHistory};
+
 use crate::HeldCaches;
-use crate::repository::archive::routes;
+use crate::repository::archive::{erased, routes};
 use crate::repository::snapshot::Snapshot;
 use crate::{Branch, DownloadError, RemoteFallback, RemoteSite, Revision, TreeReference, Upstream};
 
@@ -74,6 +76,11 @@ pub enum Download {
     /// leaf the replica holds. A range the replica never read stays by
     /// reference however much of it changed, so the cost follows what
     /// changed in what this replica uses.
+    ///
+    /// It also brings the revision record of the head it adopts, which
+    /// the next commit reads to carry the skip links along: the replica
+    /// held the record of the head it stood on, and that record's key
+    /// moves with every head.
     ///
     /// It brings tree nodes, not what they point at: a spilled value or
     /// a blob a changed leaf newly references is fetched when it is
@@ -196,11 +203,12 @@ impl<'a> DownloadBranch<'a> {
             Download::Operational => Some(operational_scope()),
             Download::Ranges(scope) => Some(scope),
             Download::QueriedRanges => {
-                let (held, target) = match self.pointed {
-                    Some((tree, held)) => (held, Some(tree)),
+                let (held, target, adopted) = match self.pointed {
+                    Some((tree, held)) => (held, Some(tree), None),
                     None => (
                         branch.revision().map(|held| held.tree),
-                        self.revision.map(|revision| revision.tree),
+                        self.revision.as_ref().map(|revision| revision.tree.clone()),
+                        self.revision,
                     ),
                 };
                 let (Some(held), Some(target)) = (held, target) else {
@@ -224,6 +232,19 @@ impl<'a> DownloadBranch<'a> {
                     .follow(&at(&held), env)
                     .await
                     .map_err(DownloadError::Tree)?;
+                // A commit reads its parent's revision record, to carry the
+                // skip links along. The replica held the record of the head
+                // it stood on, which it wrote or read; the record of the head
+                // it adopts is kept at a key hashed from that head's version,
+                // which the walk above reaches only when the replica held a
+                // leaf beside it. Read it, so the first commit on the
+                // adopted head waits on nothing.
+                if let Some(adopted) = adopted {
+                    TreeHistory::from_root(catalog.clone(), adopted.tree.hash(), erased(env))
+                        .revision_record(&adopted.version())
+                        .await
+                        .map_err(|error| DownloadError::Snapshot(error.into()))?;
+                }
                 return Ok(());
             }
         };
