@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys, and on two of its five load paths fails the query. | Directing. Five approaches and a matrix; E recommended by the agent. |
-| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the four open questions in the top story. F1 confirmed by a run on 0.5.0 (see the last entry). | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Five approaches and a matrix; E recommended by the agent. |
+| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the four open questions in the top story.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -57,7 +57,15 @@ on F1, whose run is recorded below.
 
 ## 2026-11-24, the runs
 
-Two runs were started and had not finished when this was first committed: the existing migration and format tests on main, and a probe on a v0.5.0 worktree outside the repository planting a format 4 body indexed under `org/salary` and querying `org/salary` (F1). Their results are added here when they finish.
+F1, on a v0.5.0 worktree outside the repository, one uncommitted test
+in its `transaction/migration.rs`: `org/salary` of `id:alice` read
+`[700]`; after committing a `{ "format": 4 }` body under `rule:later`
+with `dialog.rule/derives on:org/salary` and a conclusion, the same read
+returned `Err("Fact store: rule hydrate: the rule body is in format 4,
+and this release reads up to 3")`. Confirmed: any rule body a peer on
+main writes, format 4 included, fails a 0.5.0 replica's queries over
+the relations it derives. That holds for main as it stands (approach
+A), not only for format 5.
 
 ## 2026-11-24, Directing: the order of a listed `as`
 

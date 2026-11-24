@@ -29,8 +29,11 @@ skipped. It does not describe v0.5.0 either, which is what O runs: there
 two of five paths fail.
 
 **F1.** On O, a query over a relation that a format 4 or 5 body is
-indexed under fails with `rule hydrate`. Fact as read, and the changelog
-says so; see the ledger for the run.
+indexed under fails with `rule hydrate`. Run on a v0.5.0 worktree,
+2026-11-24: a read of `org/salary` returned `[700]`, and after a format 4
+body was committed with `derives on:org/salary`, the same read returned
+`Err("Fact store: rule hydrate: the rule body is in format 4, and this
+release reads up to 3")`.
 
 A rule's head and trigger indexes are keyed by relation
 (`on:<domain>/<name>`, `rule/statement.rs:100`), so a format 5 rule N
