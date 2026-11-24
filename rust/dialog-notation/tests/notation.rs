@@ -1635,6 +1635,44 @@ async fn it_refuses_a_line_with_no_cardinality_whatever_the_body_holds() -> Resu
     Ok(())
 }
 
+/// A concept a macro's use declares is read by a query below it, as by
+/// a select: the use is expanded before the queries of its document, so
+/// the query reads the concept and is not told to declare it above, as
+/// it is above.
+#[dialog_common::test]
+async fn it_reads_a_concept_a_macro_declares_above_a_query() -> Result<()> {
+    let kind = "(rule (syntax (concept (?name ?t is: ?x)
+           (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one)))
+         (expand (memo-kind ?name)))";
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!(
+            r#"{kind}
+               (memo-kind memo/note)
+               (query (memo/card ?t is: ?c) (memo/note ?t is: ?x) (is ?c {{:text ?x}}))
+               (assert (xyz.memo/text of: memo:1 is: "hello"))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (memo/card ?t is: ?c))").await?,
+        vec![r#"(memo/card memo:1 is: {:text "hello"})"#]
+    );
+    // A select in the same place, as before.
+    let mut selected = Notebook::open().await?;
+    selected
+        .submit(&format!(
+            r#"{kind}
+               (memo-kind memo/note)
+               (assert (xyz.memo/text of: memo:1 is: "hello"))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(&mut selected, "(select (memo/note ?t is: ?x))").await?,
+        vec![r#"(xyz.memo memo:1 text: "hello")"#]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
