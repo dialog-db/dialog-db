@@ -768,6 +768,121 @@ async fn it_drives_a_view_with_a_collected_part_as_the_layers_do() -> Result<()>
     Ok(())
 }
 
+/// A board of lists, its lists each a card of rows, each row with its
+/// chips: a view nested two levels below its root.
+const BOARD: &str = r#"
+    (concept (task ?t list: ?l title: ?title)
+      (xyz.task/list of: ?t is: ?l as: :entity cardinality: :one)
+      (xyz.task/title of: ?t is: ?title as: :text cardinality: :one))
+    (concept (task/tag ?t tag: ?g)
+      (xyz.task/tag of: ?t is: ?g as: :text cardinality: :many))
+    (concept (shelf ?l name: ?name)
+      (xyz.shelf/name of: ?l is: ?name as: :text cardinality: :one))
+
+    (query (task/chip ?t tag: ?g is: ?chip)
+      (task/tag ?t tag: ?g)
+      (view ?chip [:span {:class "tag"} ?g]))
+    (query (task/line ?t list: ?l is: ?line)
+      (task ?t list: ?l title: ?title)
+      (task/chip ?t is: (collect ?chips))
+      (view ?line [:li ?title ?chips]))
+    (query (shelf/card ?l is: ?card)
+      (shelf ?l name: ?name)
+      (task/line _ list: ?l is: (collect ?lines))
+      (view ?card [:section [:h2 ?name] [:ul ?lines]]))"#;
+
+/// A view two levels deep is kept by patches at every level: a chip
+/// added to a row of a card is one insert under that row, a row renamed
+/// is one text, a row added is one insert under its card, and a chip
+/// removed is one remove. The crate's driver gives the patches the
+/// subscriptions driven here give, and every step's tree is the tree
+/// rendered afresh.
+#[dialog_common::test]
+async fn it_maintains_a_view_nested_two_levels_deep() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(
+        &mut notebook,
+        &dialog_notation::read(BOARD)?
+            .iter()
+            .filter(|form| form.head() == Some("concept"))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .await?;
+    write(
+        &mut notebook,
+        r#"(assert (shelf list:home name: "Home"))
+           (assert (task task:1 list: list:home title: "Buy milk"))
+           (assert (task/tag task:1 tag: "errand"))"#,
+    )
+    .await?;
+    let plan = plan_of(&[BOARD], "(select (shelf/card ?l is: ?card))")?;
+    let mut here = Driven::new(&notebook, plan.clone(), None, How::Subscribed).await?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut watched = live.watch(plan, None)?;
+    assert_eq!(
+        watched.poll(&notebook.operator).await?,
+        here.step(&notebook).await?
+    );
+    assert_eq!(
+        here.tree.hiccup(),
+        r#"[:section [:h2 "Home"] [:ul [:li "Buy milk" [:span {:class "tag"} "errand"]]]]"#
+    );
+    let home = || (0, vec![entity("list:home")]);
+    let task = |t: &str| (1, vec![entity(t)]);
+    let steps: Vec<(&str, Vec<Patch>)> = vec![
+        (
+            r#"(assert (task/tag task:1 tag: "shop"))"#,
+            vec![Patch::Insert {
+                parent: vec![home(), task("task:1")],
+                slot: 1,
+                index: 1,
+                instance: chip("shop"),
+            }],
+        ),
+        (
+            r#"(assert (task task:1 list: list:home title: "Buy oat milk"))"#,
+            vec![Patch::SetText {
+                at: vec![home(), task("task:1")],
+                slot: 0,
+                text: "Buy oat milk".into(),
+            }],
+        ),
+        (
+            r#"(assert (task task:2 list: list:home title: "Call mum"))"#,
+            vec![Patch::Insert {
+                parent: vec![home()],
+                slot: 1,
+                index: 1,
+                instance: row("task:2", "Call mum", Vec::new()),
+            }],
+        ),
+        (
+            r#"(retract (task/tag task:1 tag: "errand"))"#,
+            vec![Patch::Remove {
+                at: vec![
+                    home(),
+                    task("task:1"),
+                    (2, vec![Value::String("errand".into())]),
+                ],
+            }],
+        ),
+    ];
+    for (change, expected) in steps {
+        write(&mut notebook, change).await?;
+        let driven = watched.poll(&notebook.operator).await?;
+        assert_eq!(driven, here.step(&notebook).await?, "after {change}");
+        assert_eq!(driven, expected, "after {change}");
+    }
+    assert_eq!(
+        here.tree.hiccup(),
+        r#"[:section [:h2 "Home"] [:ul [:li "Buy oat milk" [:span {:class "tag"} "shop"]] [:li "Call mum"]]]"#
+    );
+    assert_eq!(watched.tree(), here.tree);
+    Ok(())
+}
+
 /// The list card with a count of what is open, and an item a to-do.
 const SUMMARY: &str = r#"
     (query (todo/item ?t list: ?l is: ?item)
