@@ -13,4 +13,5 @@
 | a premise can be planned by the variables inside its patterns | hypothesis | `it_takes_a_record_apart_in_either_order_of_premises`, `it_builds_a_record_in_either_order_of_premises` | confirmed |
 | committing a rule that holds a pattern is refused, and writes nothing | fact | `CommitError::Refused`; `it_refuses_to_commit_a_pattern_rule_on_a_volatile_branch` and `_on_a_filesystem_branch` (#778) | superseded by format 5 |
 | a rule that holds a pattern is stored in rule body format 5, and a rule of terms in format 4 as before | fact | `rule::body::format_for`; `it_commits_a_pattern_rule_on_a_volatile_branch` and `_on_a_filesystem_branch`, `it_keeps_the_name_and_the_bytes_of_a_rule_that_holds_no_pattern` | holds |
-| committing a rule whose map pattern is keyed by anything but text, or that holds a composite constant inside a pattern, is refused, and writes nothing | fact | `TypeError::UnstorablePattern`, `Pattern::unwritable`; the same two tests | holds |
+| committing a rule that holds a composite constant inside a pattern is refused, and writes nothing | fact | `TypeError::UnstorablePattern`; the same two tests | holds |
+| a map pattern keyed by any value is stored, as pairs of a key and a pattern | fact | `it_writes_a_map_pattern_one_way_whatever_its_keys`, `it_stores_a_rule_that_builds_a_record_keyed_by_symbols` | holds |

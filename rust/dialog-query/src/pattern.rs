@@ -37,7 +37,7 @@ use crate::Parameters;
 use crate::Premise;
 use crate::concept::query::ConceptQuery;
 use crate::constraint::{Constraint, Equality};
-use crate::corpus::{Composite, CompositeError, CompositeKind, Type, Value};
+use crate::corpus::{Composite, CompositeError, CompositeKind, Value};
 use crate::error::EvaluationError;
 use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
@@ -634,48 +634,40 @@ impl fmt::Display for Pattern {
 /// or a query is printed.
 ///
 /// A leaf is written as a [`Term`] is: a variable under `?`, a constant
-/// as its value. A map or a list is written as what it is, under the
-/// one key `match`:
+/// as its value. A map or a list is written under the one key `match`,
+/// as a composite value is written for a human reader (see
+/// [`Composite`]): a map as its entries, each a pair of a key and a
+/// pattern, and a list as its items. What takes the entries or the items
+/// a pattern does not name stands beside them under `...`:
 ///
 /// ```text
-/// {author: ?who, pinned: true, ...?others}      [?first, "math", ...?more]
+/// {"author": ?who, "pinned": true, ...?others}
 ///
-/// { "match": {                                  { "match": [
-///     "author": { "?": { "name": "who" } },         { "?": { "name": "first" } },
-///     "pinned": { "boolean:": true },               { "text:": "math" },
-///     "...":    { "?": { "name": "others" } }       { "...": { "?": { "name": "more" } } }
-/// } }                                           ] }
+/// { "match": { "map": [
+///     [ { "text:": "author" }, { "?": { "name": "who" } } ],
+///     [ { "text:": "pinned" }, { "boolean:": true } ]
+///   ], "...": { "?": { "name": "others" } } } }
+///
+/// [?first, "math", ...?more]
+///
+/// { "match": { "list": [
+///     { "?": { "name": "first" } },
+///     { "text:": "math" }
+///   ], "...": { "?": { "name": "more" } } } }
 /// ```
 ///
-/// Under `match` a map is a map pattern and an array is a list pattern,
-/// at any depth, with no `match` again. `...` is a key in both: among a
-/// map's entries, and as the one entry of a list's last item. What is
-/// under it takes the rest.
-///
-/// A map of the one key `?` is a variable there, and a map of one key
-/// that names a type (one that ends in `:`, or `composite:map` and its
-/// kin) is a constant, under the name of its type, so a constant is
-/// written under its type wherever it stands in a pattern. A map is
-/// written with text keys, so a map pattern is written only when every
-/// key it names is text and none is `?`, `...` or the name of a type.
-/// Any other is refused ([`Pattern::unwritable`] says why), and a rule
-/// that holds one is not stored.
-///
-/// One list would read as another: a list with no run whose last item
-/// is a map of a rest and no named entry, `[{...?r}]`. It is written
-/// with `{ "...": [] }` after that item, the rest of the list being the
-/// list of nothing.
+/// Inside a pattern a map or a list is `{ "map": .. }` or
+/// `{ "list": .. }` again, with no `match`. A key is any value a map
+/// holds as a key, text, a symbol or a number alike, and a constant is
+/// written under the name of its type wherever it stands in a pattern.
+/// Every pattern is written one way: the entries in the order the map
+/// holds them, so one rule is always one body.
 impl serde::Serialize for Pattern {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::{Error as _, SerializeMap};
+        use serde::ser::SerializeMap;
         match self {
             Pattern::Term(term) => term.serialize(serializer),
             composite => {
-                if let Some(reason) = composite.unwritable() {
-                    return Err(S::Error::custom(format!(
-                        "the pattern {composite} cannot be written: {reason}"
-                    )));
-                }
                 let mut written = serializer.serialize_map(Some(1))?;
                 written.serialize_entry(MATCH, &Within(composite))?;
                 written.end()
@@ -687,132 +679,88 @@ impl serde::Serialize for Pattern {
 /// The key a map or a list of patterns is written under where a
 /// parameter stands.
 const MATCH: &str = "match";
+/// The key a map pattern's entries are written under, as a map's are.
+const MAP: &str = "map";
+/// The key a list pattern's items are written under, as a list's are.
+const LIST: &str = "list";
 /// The key what takes the rest of a map or of a list is written under.
 const REST: &str = "...";
-/// The key a variable is written under.
-const VARIABLE: &str = "?";
-
-/// Whether a map of the one key `key` is read as a term, and not as a
-/// map pattern of one entry: `?` is a variable, and the name of a type
-/// (`text:`, `composite:map`, or any key that ends in `:`) a constant.
-fn names_a_term(key: &str) -> bool {
-    key == VARIABLE || key.ends_with(':') || Type::ALL.iter().any(|kind| kind.uri() == key)
-}
-
-impl Pattern {
-    /// Why this pattern has no written form, or `None` when it has one.
-    /// A leaf always has one. A map pattern is written as a map with text
-    /// keys, so one that names a key other than text has none, nor one
-    /// that names `?`, `...` or a key ending in `:`, which are how a
-    /// variable, the rest and a constant are read where a pattern is
-    /// written. A rule that holds such a pattern is not stored
-    /// ([`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)).
-    pub fn unwritable(&self) -> Option<String> {
-        match self {
-            Pattern::Term(_) => None,
-            Pattern::Map(map) => map.entries.iter().find_map(|(key, pattern)| match key {
-                Value::String(text) if text == REST || names_a_term(text) => Some(format!(
-                    "a map pattern is written with text keys, and the key {text:?} reads as {} there",
-                    if text == REST {
-                        "the rest"
-                    } else if text == VARIABLE {
-                        "a variable"
-                    } else {
-                        "a constant"
-                    }
-                )),
-                Value::String(_) => pattern.unwritable(),
-                other => Some(format!(
-                    "a map pattern is written with text keys, and the key {other:?} is not text"
-                )),
-            }),
-            Pattern::List(list) => list.items.iter().find_map(Pattern::unwritable),
-        }
-    }
-}
 
 /// A pattern as it is written under `match`.
 struct Within<'a>(&'a Pattern);
 
 /// A term as it is written under `match`: a constant under the name of
 /// its type whoever reads it, where [`Value`] is written bare for a
-/// reader that can tell what it is, as bytes are an array of numbers
-/// for one, which under `match` is a list.
+/// reader that can tell what it is.
 struct Leaf<'a>(&'a Term<Any>);
 
-/// The last item of a list as written: what takes the items after the
-/// others, or the list of nothing where no term does.
-struct Run<'a>(Option<&'a Term<Any>>);
+/// A map pattern's entries, each a pair of a key and a pattern.
+struct Entries<'a>(&'a MapPattern);
+
+/// A list pattern's items.
+struct Items<'a>(&'a ListPattern);
 
 impl serde::Serialize for Within<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::{Error as _, SerializeMap, SerializeSeq};
+        use serde::ser::SerializeMap;
+        let rest = match self.0 {
+            Pattern::Term(term) => return Leaf(term).serialize(serializer),
+            Pattern::Map(map) => map.rest(),
+            Pattern::List(list) => list.run(),
+        };
+        let mut written = serializer.serialize_map(Some(1 + usize::from(rest.is_some())))?;
         match self.0 {
-            Pattern::Term(term) => Leaf(term).serialize(serializer),
-            Pattern::Map(map) => {
-                let rest = map.rest();
-                let mut written = serializer
-                    .serialize_map(Some(map.entries().len() + usize::from(rest.is_some())))?;
-                for (key, pattern) in map.entries() {
-                    let Value::String(key) = key else {
-                        return Err(S::Error::custom(format!(
-                            "a map pattern is written with text keys, and the key {key:?} is not text"
-                        )));
-                    };
-                    written.serialize_entry(key, &Within(pattern))?;
-                }
-                if let Some(rest) = rest {
-                    written.serialize_entry(REST, &Leaf(rest))?;
-                }
-                written.end()
-            }
-            Pattern::List(list) => {
-                // Without it the last item would be read as the run.
-                let closed = list.run().is_none()
-                    && matches!(
-                        list.items().last(),
-                        Some(Pattern::Map(last)) if last.entries().is_empty() && last.rest().is_some()
-                    );
-                let run = list.run().map(|run| Run(Some(run)));
-                let run = run.or(closed.then_some(Run(None)));
-                let mut written = serializer
-                    .serialize_seq(Some(list.items().len() + usize::from(run.is_some())))?;
-                for pattern in list.items() {
-                    written.serialize_element(&Within(pattern))?;
-                }
-                if let Some(run) = run {
-                    written.serialize_element(&run)?;
-                }
-                written.end()
-            }
+            Pattern::Map(map) => written.serialize_entry(MAP, &Entries(map))?,
+            Pattern::List(list) => written.serialize_entry(LIST, &Items(list))?,
+            Pattern::Term(_) => {}
         }
+        if let Some(rest) = rest {
+            written.serialize_entry(REST, &Leaf(rest))?;
+        }
+        written.end()
+    }
+}
+
+impl serde::Serialize for Entries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut written = serializer.serialize_seq(Some(self.0.entries().len()))?;
+        for (key, pattern) in self.0.entries() {
+            written.serialize_element(&(Tagged(key), Within(pattern)))?;
+        }
+        written.end()
+    }
+}
+
+impl serde::Serialize for Items<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut written = serializer.serialize_seq(Some(self.0.items().len()))?;
+        for pattern in self.0.items() {
+            written.serialize_element(&Within(pattern))?;
+        }
+        written.end()
+    }
+}
+
+/// A value under the name of its type.
+struct Tagged<'a>(&'a Value);
+
+impl serde::Serialize for Tagged<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut written = serializer.serialize_map(Some(1))?;
+        written.serialize_entry(self.0.data_type().uri(), &self.0.untagged())?;
+        written.end()
     }
 }
 
 impl serde::Serialize for Leaf<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
         match self.0 {
-            Term::Constant(value) => {
-                let mut written = serializer.serialize_map(Some(1))?;
-                written.serialize_entry(value.data_type().uri(), &value.untagged())?;
-                written.end()
-            }
+            Term::Constant(value) => Tagged(value).serialize(serializer),
             variable => variable.serialize(serializer),
         }
-    }
-}
-
-impl serde::Serialize for Run<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let nothing: &[Run<'_>] = &[];
-        let mut written = serializer.serialize_map(Some(1))?;
-        match self.0 {
-            Some(run) => written.serialize_entry(REST, &Leaf(run))?,
-            None => written.serialize_entry(REST, nothing)?,
-        }
-        written.end()
     }
 }
 
@@ -839,7 +787,13 @@ impl Pattern {
                         "`{other}` stands beside `{MATCH}`, which stands alone"
                     ));
                 }
-                Pattern::within(within)
+                match Pattern::within(within)? {
+                    Pattern::Term(term) => Err(format!(
+                        "under `{MATCH}` stands a map or a list of patterns, not the term {}",
+                        Pattern::Term(term)
+                    )),
+                    composite => Ok(composite),
+                }
             }
             term => Pattern::term(term).map(Pattern::Term),
         }
@@ -849,76 +803,75 @@ impl Pattern {
         Term::from_json(raw).map_err(|error| error.to_string())
     }
 
-    /// What takes the rest of a map or of a list: a term. An array is
-    /// refused, which a term alone would read as bytes written bare and
-    /// under `match` is a list.
+    /// What takes the rest of a map or of a list: a term.
     fn rest(raw: serde_json::Value) -> Result<Term<Any>, String> {
-        match raw {
-            serde_json::Value::Array(_) => Err(format!(
-                "what takes the rest is a variable or a constant, not the list {raw}"
-            )),
-            term => Pattern::term(term),
-        }
+        Pattern::term(raw)
     }
 
-    /// What stands under `match`, at any depth.
+    /// What stands under `match`, at any depth: `{ "map": .. }` or
+    /// `{ "list": .. }`, each with what takes the rest beside it, or a
+    /// term.
     fn within(raw: serde_json::Value) -> Result<Pattern, String> {
-        match raw {
-            serde_json::Value::Array(mut items) => {
-                let run = match items.last() {
-                    Some(serde_json::Value::Object(last))
-                        if last.len() == 1 && last.contains_key(REST) =>
-                    {
-                        items
-                            .pop()
-                            .and_then(|mut last| last.get_mut(REST).map(serde_json::Value::take))
-                    }
-                    _ => None,
-                };
-                let list = ListPattern::new(
-                    items
-                        .into_iter()
-                        .map(Pattern::within)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
-                Ok(match run {
-                    // The rest is the list of nothing: no run.
-                    Some(serde_json::Value::Array(nothing)) if nothing.is_empty() => list,
-                    Some(run) => list.with_run(Pattern::rest(run)?),
-                    None => list,
-                }
-                .into())
+        let serde_json::Value::Object(mut shape) = raw else {
+            return Pattern::term(raw).map(Pattern::Term);
+        };
+        let kind = match (shape.contains_key(MAP), shape.contains_key(LIST)) {
+            (true, false) => MAP,
+            (false, true) => LIST,
+            (true, true) => return Err(format!("`{MAP}` and `{LIST}` stand together")),
+            (false, false) => {
+                return Pattern::term(serde_json::Value::Object(shape)).map(Pattern::Term);
             }
-            serde_json::Value::Object(shape)
-                if shape.len() == 1 && shape.keys().all(|key| names_a_term(key)) =>
-            {
-                Pattern::term(serde_json::Value::Object(shape)).map(Pattern::Term)
-            }
-            serde_json::Value::Object(mut shape) => {
-                let rest = shape.remove(REST).map(Pattern::rest).transpose()?;
-                let map = MapPattern::new(
-                    shape
-                        .into_iter()
-                        .map(|(key, part)| {
-                            if names_a_term(&key) {
-                                return Err(format!(
-                                    "a map pattern cannot name the key `{key}`, which reads as a term"
-                                ));
-                            }
-                            Ok((Value::String(key), Pattern::within(part)?))
-                        })
-                        .collect::<Result<Vec<_>, String>>()?,
-                )
-                .map_err(|error| error.to_string())?;
-                Ok(match rest {
-                    Some(rest) => map.with_rest(rest),
-                    None => map,
-                }
-                .into())
-            }
-            // A constant written bare.
-            bare => Pattern::term(bare).map(Pattern::Term),
+        };
+        let parts = shape.remove(kind).unwrap_or_default();
+        let rest = shape.remove(REST).map(Pattern::rest).transpose()?;
+        if let Some(other) = shape.keys().next() {
+            return Err(format!("`{other}` stands beside `{kind}`"));
         }
+        let serde_json::Value::Array(parts) = parts else {
+            return Err(format!("under `{kind}` stands a list, not {parts}"));
+        };
+        if kind == LIST {
+            let list = ListPattern::new(
+                parts
+                    .into_iter()
+                    .map(Pattern::within)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            return Ok(match rest {
+                Some(run) => list.with_run(run),
+                None => list,
+            }
+            .into());
+        }
+        let entries = parts
+            .into_iter()
+            .map(|entry| {
+                let serde_json::Value::Array(pair) = entry else {
+                    return Err(format!("an entry is a key and a pattern, not {entry}"));
+                };
+                let [key, part]: [serde_json::Value; 2] =
+                    pair.try_into().map_err(|pair: Vec<_>| {
+                        format!("an entry is a key and a pattern, not {} parts", pair.len())
+                    })?;
+                let key = match Pattern::term(key)? {
+                    Term::Constant(key) => key,
+                    variable => {
+                        return Err(format!(
+                            "a key is a value, not the variable {}",
+                            Pattern::Term(variable)
+                        ));
+                    }
+                };
+                Ok((key, Pattern::within(part)?))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let map = MapPattern::new(entries).map_err(|error| error.to_string())?;
+        Ok(match rest {
+            Some(rest) => map.with_rest(rest),
+            None => map,
+        }
+        .into())
     }
 }
 
@@ -999,24 +952,21 @@ pub(crate) fn held<'a>(premises: impl IntoIterator<Item = &'a Premise>) -> Optio
 }
 
 /// The first map or list of terms `premises` hold that a stored rule
-/// body cannot hold, as it is written, with why: one that has no written
-/// form ([`Pattern::unwritable`]), or one that holds a constant map or
-/// list. A composite is written in a stored body as its canonical bytes,
-/// and a rule body's terms are read through a form that holds no bytes,
-/// so such a constant would not read back and the rule would be inert
-/// wherever it is stored.
+/// body cannot hold, as it is written, with why: one that holds a
+/// constant map or list. A composite is written in a stored body as its
+/// canonical bytes, and a rule body's terms are read through a form that
+/// holds no bytes, so such a constant would not read back and the rule
+/// would be inert wherever it is stored.
 pub(crate) fn unstorable<'a>(
     premises: impl IntoIterator<Item = &'a Premise>,
 ) -> Option<(String, String)> {
     premises.into_iter().find_map(|premise| {
         premise.parameters().shapes().find_map(|(_, pattern)| {
-            let reason = pattern.unwritable().or_else(|| {
-                pattern.terms().into_iter().find_map(|term| match term {
-                    Term::Constant(Value::Composite(constant)) => Some(format!(
-                        "the constant {constant:?} inside it is a map or a list, which a stored rule body holds as bytes it does not read back"
-                    )),
-                    _ => None,
-                })
+            let reason = pattern.terms().into_iter().find_map(|term| match term {
+                Term::Constant(Value::Composite(constant)) => Some(format!(
+                    "the constant {constant:?} inside it is a map or a list, which a stored rule body holds as bytes it does not read back"
+                )),
+                _ => None,
             })?;
             Some((pattern.to_string(), reason))
         })

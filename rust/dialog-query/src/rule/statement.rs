@@ -259,8 +259,8 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// those facts, uninstalling it.
 ///
 /// A rule that holds a pattern is stored as any other, its body in
-/// format 5 (see [`body`](crate::rule::body)). One whose pattern has no
-/// written form, a map pattern keyed by anything but text
+/// format 5 (see [`body`](crate::rule::body)). One whose pattern a body
+/// cannot hold, a constant map or list inside it
 /// ([`DeductiveRule::storable`]), has no body: asserting it records a
 /// [`Refusal`] carrying
 /// [`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)

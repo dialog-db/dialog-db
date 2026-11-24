@@ -4,8 +4,8 @@
 //! afresh, held in the session overlay, and kept current by a
 //! subscription. Run on the volatile and the filesystem providers.
 //!
-//! A rule whose pattern a stored body cannot write, a map pattern keyed by
-//! anything but text, is still refused: committing one fails with
+//! A rule whose pattern a stored body cannot hold, one with a constant map
+//! or list inside it, is still refused: committing one fails with
 //! [`CommitError::Refused`], carrying [`TypeError::UnstorablePattern`] and
 //! the rule's entity, and nothing the transaction holds is written.
 
@@ -86,14 +86,30 @@ fn inductive() -> Result<InductiveRule> {
     )?)
 }
 
-/// A deductive rule whose pattern is keyed by the symbol `note/title`,
-/// which a stored body cannot write: a map pattern is written with text
-/// keys.
+/// A deductive rule whose pattern holds a constant map, which a stored
+/// body writes as bytes it does not read back, so it cannot be stored:
+/// `note/payload` of `?this` matches `{"title" ?heading, "by" {"name"
+/// "me"} ..}`.
 fn unwritable() -> Result<DeductiveRule> {
-    let key: CorpusRelation = "note/title".parse()?;
+    let by: Value = Composite::map([(text("name"), text("me"))])?.into();
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.set(
+        "payload".into(),
+        Pattern::Map(
+            MapPattern::new([
+                (text("title"), Pattern::Term(Term::var("heading"))),
+                (text("by"), Pattern::Term(Term::Constant(by))),
+            ])?
+            .with_rest(Term::<Any>::blank()),
+        ),
+    );
     Ok(DeductiveRule::new(
         concept("heading", "note/heading", "text:"),
-        vec![payload_premise(Value::Symbol(key))?],
+        vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("payload", "note/payload", "composite:map"),
+            terms,
+        }))],
     )?)
 }
 
@@ -782,7 +798,11 @@ fn rows() -> ConceptQuery {
 /// record from several of its variables with a map pattern, the whole
 /// row as one record under one attribute. It is what a query of more
 /// than one column compiles to.
-fn row_rule() -> Result<DeductiveRule> {
+///
+/// With `symbols` the row is a record proper, keyed by the attributes
+/// `table/title` and `table/rank`; without, by the text `title` and
+/// `rank`.
+fn row_rule(symbols: bool) -> Result<DeductiveRule> {
     let read = |relation: &str, declared: &str, variable: &str| {
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
@@ -793,8 +813,8 @@ fn row_rule() -> Result<DeductiveRule> {
         }))
     };
     let row = Pattern::Map(MapPattern::new([
-        (text("title"), Pattern::Term(Term::var("title"))),
-        (text("rank"), Pattern::Term(Term::var("rank"))),
+        (column("title", symbols)?, Pattern::Term(Term::var("title"))),
+        (column("rank", symbols)?, Pattern::Term(Term::var("rank"))),
     ])?);
     Ok(DeductiveRule::new(
         concept("row", "table/row", "composite:map"),
@@ -816,18 +836,28 @@ fn records<'a>(rows: impl IntoIterator<Item = &'a ConceptConclusion>) -> Vec<(En
     records
 }
 
-fn record(title: &str, rank: u128) -> Result<Value> {
+/// A row's key for the column `name`: the attribute `table/<name>`
+/// with `symbols`, else the text `name`.
+fn column(name: &str, symbols: bool) -> Result<Value> {
+    Ok(if symbols {
+        Value::Symbol(format!("table/{name}").parse::<CorpusRelation>()?)
+    } else {
+        text(name)
+    })
+}
+
+fn record(symbols: bool, title: &str, rank: u128) -> Result<Value> {
     Ok(Composite::map([
-        (text("title"), text(title)),
-        (text("rank"), Value::UnsignedInt(rank)),
+        (column("title", symbols)?, text(title)),
+        (column("rank", symbols)?, Value::UnsignedInt(rank)),
     ])?
     .into())
 }
 
 /// The case the notation needs: a deductive rule whose conclusion builds
-/// a record from several of its variables with a map pattern, committed
-/// to a branch and asserted into a session's ephemeral overlay, then
-/// subscribed to. Rows arrive when their columns are written, change
+/// a record from several of its variables with a map pattern, keyed by
+/// text and, as a record proper, by attributes, committed to a branch
+/// and asserted into a session's ephemeral overlay, then subscribed to. Rows arrive when their columns are written, change
 /// when a column does, and leave when one is retracted. On a branch
 /// loaded afresh the committed rule's body is format 5 and derives the
 /// same rows.
@@ -835,13 +865,18 @@ fn record(title: &str, rank: u128) -> Result<Value> {
 async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
     let (session, peer) = test_session_with_peer().await;
     let repo = test_repo(&session, &peer).await;
-    let rule = row_rule()?;
-    assert_eq!(rule.storable(), Ok(()));
     let milk: Entity = "id:milk".parse()?;
     let call: Entity = "id:call".parse()?;
 
-    for overlay in [false, true] {
-        let name = if overlay { "overlay" } else { "committed" };
+    for (symbols, overlay) in [(false, false), (false, true), (true, false), (true, true)] {
+        let rule = row_rule(symbols)?;
+        assert_eq!(rule.storable(), Ok(()));
+        let name = format!(
+            "{}-{}",
+            if symbols { "symbols" } else { "text" },
+            if overlay { "overlay" } else { "committed" }
+        );
+        let name = name.as_str();
         let branch = repo.branch(name).open().perform(&session).await?;
         #[allow(deprecated)]
         branch
@@ -875,14 +910,17 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
                 .perform(&session)
                 .try_vec()
                 .await?;
-            assert_eq!(records(&rows), vec![(milk.clone(), record("Buy milk", 1)?)]);
+            assert_eq!(
+                records(&rows),
+                vec![(milk.clone(), record(symbols, "Buy milk", 1)?)]
+            );
         }
 
         let mut subscription = branch.subscribe(rows());
         let first = subscription.poll(&session).await?.expect("initial");
         assert_eq!(
             records(&first.asserted),
-            vec![(milk.clone(), record("Buy milk", 1)?)]
+            vec![(milk.clone(), record(symbols, "Buy milk", 1)?)]
         );
 
         // A row arrives once both its columns are written.
@@ -902,7 +940,7 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
         let arrived = subscription.poll(&session).await?.expect("a row arrived");
         assert_eq!(
             records(&arrived.asserted),
-            vec![(call.clone(), record("Call mum", 2)?)]
+            vec![(call.clone(), record(symbols, "Call mum", 2)?)]
         );
         assert!(arrived.retracted.is_empty());
 
@@ -919,11 +957,11 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
         let changed = subscription.poll(&session).await?.expect("a row changed");
         assert_eq!(
             records(&changed.asserted),
-            vec![(call.clone(), record("Call mum", 3)?)]
+            vec![(call.clone(), record(symbols, "Call mum", 3)?)]
         );
         assert_eq!(
             records(&changed.retracted),
-            vec![(call.clone(), record("Call mum", 2)?)]
+            vec![(call.clone(), record(symbols, "Call mum", 2)?)]
         );
 
         // A column is retracted: the row leaves.
@@ -943,7 +981,7 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
         assert!(left.asserted.is_empty());
         assert_eq!(
             records(&left.retracted),
-            vec![(milk.clone(), record("Buy milk", 1)?)]
+            vec![(milk.clone(), record(symbols, "Buy milk", 1)?)]
         );
     }
     Ok(())
