@@ -33,8 +33,9 @@ use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::Buffer;
 use dialog_corpus::Asset;
+use dialog_corpus::Entity;
 #[cfg(not(feature = "web-integration-tests"))]
-use dialog_corpus::{Changes, Entity, Update as _};
+use dialog_corpus::{Changes, Update as _};
 use dialog_corpus::{
     Datum, ENTITY_KEY_TAG, Fact, HISTORY_KEY_TAG, Instruction, Key, Selector, State, Value,
 };
@@ -3027,7 +3028,6 @@ impl Layered {
 /// hold that leaf (4 of the first 1000 seeds give that layout, and each
 /// of the 4 fetched), and the test asserts that layout before relying on
 /// it.
-#[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_writes_a_durable_layer_again_from_its_own_blocks(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
@@ -3071,7 +3071,6 @@ async fn it_writes_a_durable_layer_again_from_its_own_blocks(s3: S3Address) -> R
 /// first write, does not hold the leaf a lookup of its layer revision's
 /// record starts at, and the test asserts that layout before relying on
 /// it. A restart reads nothing, so it holds no more after it.
-#[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_writes_a_durable_layer_after_a_restart_from_its_own_blocks(
     s3: S3Address,
