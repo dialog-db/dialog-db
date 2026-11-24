@@ -23,19 +23,21 @@
 //! [`compile`](crate::compile()), gives a query whose answer is markup as
 //! its plan.
 //!
-//! A row's values come from any writer of the branch. A template is
-//! refused in the shapes known to let them reach script: an element that
-//! runs, loads or changes how the page is read (`RUNS`: `script`,
-//! `iframe`, `object`, `embed`, `style`, `link`, `meta`, `base`,
-//! `frame`, `frameset`, `applet`), an attribute named `on…` that is no
-//! `on/` event, `srcdoc`, a `style` a value writes, and an attribute that
-//! takes a URL (`URLS`) unless fixed text settles its scheme as `http`,
-//! `https` or `mailto` or starts it with a path, a query or a fragment
-//! (`/`, `?`, `#`), a constant included. A `srcset` a value is written
-//! into is refused, since each of its URLs follows a comma; a constant
-//! one has each of its URLs checked. Names are compared in any
-//! case, and a fixed start with a control character or a space is
-//! refused. This is a refusal of known dangerous shapes and no
+//! A row's values come from any writer of the branch. A template makes
+//! only the elements of one flat table, `ELEMENTS`: the HTML elements of
+//! sections and text, lists, tables, forms and media, and custom
+//! elements, which the page defines. Every other element is refused,
+//! SVG and MathML among them. Of the attributes, it refuses the shapes
+//! known to let a row's values reach script: a name or local name
+//! `on…` that is no `on/` event, `xml/base`, `srcdoc`, a `style` a value
+//! writes, and an attribute that takes a URL (`URLS`) unless fixed text
+//! settles its scheme as `http`, `https` or `mailto` or starts it with
+//! a path, a query or a fragment (`/`, `?`, `#`), a constant included.
+//! A `srcset` a value is written into is refused, since each of its URLs
+//! follows a comma; a constant one has each of its URLs checked. Names
+//! are compared in any case, a namespaced one written with `/` as the
+//! page reads it, `xlink:href`, and a fixed start with a control
+//! character or a space is refused. This is a refusal of known dangerous shapes and no
 //! sanitizer: the back end stays the boundary. It escapes every text and
 //! attribute value it writes and sets them as text and attributes, never
 //! as markup.
@@ -228,9 +230,10 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                     ))
                 })?
                 .to_string();
-            if RUNS.contains(&tag.trim().to_ascii_lowercase().as_str()) {
+            if !made(&tag) {
                 return Err(Error::Unsafe(format!(
-                    "{tree}: a [:{tag} …] runs what it holds"
+                    "{tree}: [:{tag} …] is no element a view makes: a view makes the HTML \
+                     elements of text, lists, tables, forms and media, and custom elements"
                 )));
             }
             // A map right after the tag is the element's attributes, as in
@@ -303,16 +306,146 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
     })
 }
 
-/// The elements that run or load what they hold or name, or change how
-/// the page around them is read: a template never makes one, since a
-/// row's values would be in it.
-const RUNS: [&str; 11] = [
-    "script", "iframe", "object", "embed", "style", "link", "meta", "base", "frame", "frameset",
-    "applet",
+/// The HTML elements a view makes: those of sections and text, lists,
+/// tables, forms and media. Nothing that runs, loads or embeds what it
+/// names (`script`, `iframe`, `object`, `embed`, `frame`), nothing that
+/// changes how the page around it is read (`style`, `link`, `meta`,
+/// `base`, `html`, `head`, `body`), no `template`, and no SVG or MathML,
+/// whose animation elements set any attribute of another: every element
+/// not here is refused.
+const ELEMENTS: [&str; 94] = [
+    // sections and grouping
+    "div",
+    "p",
+    "section",
+    "article",
+    "aside",
+    "header",
+    "footer",
+    "main",
+    "nav",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hgroup",
+    "address",
+    "blockquote",
+    "figure",
+    "figcaption",
+    "hr",
+    "pre",
+    "details",
+    "summary",
+    "dialog",
+    "search",
+    // text
+    "span",
+    "a",
+    "em",
+    "strong",
+    "small",
+    "s",
+    "cite",
+    "q",
+    "dfn",
+    "abbr",
+    "ruby",
+    "rt",
+    "rp",
+    "data",
+    "time",
+    "code",
+    "var",
+    "samp",
+    "kbd",
+    "sub",
+    "sup",
+    "i",
+    "b",
+    "u",
+    "mark",
+    "bdi",
+    "bdo",
+    "br",
+    "wbr",
+    "ins",
+    "del",
+    // lists
+    "ul",
+    "ol",
+    "li",
+    "dl",
+    "dt",
+    "dd",
+    "menu",
+    // tables
+    "table",
+    "caption",
+    "colgroup",
+    "col",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "th",
+    "td",
+    // forms
+    "form",
+    "label",
+    "input",
+    "button",
+    "select",
+    "datalist",
+    "optgroup",
+    "option",
+    "textarea",
+    "output",
+    "progress",
+    "meter",
+    "fieldset",
+    "legend",
+    // media
+    "img",
+    "picture",
+    "source",
+    "audio",
+    "video",
+    "track",
 ];
 
-/// The attributes whose value is a URL a browser follows or loads.
-const URLS: [&str; 12] = [
+/// The names with a `-` that are SVG's and MathML's, not custom
+/// elements.
+const RESERVED: [&str; 8] = [
+    "annotation-xml",
+    "color-profile",
+    "font-face",
+    "font-face-src",
+    "font-face-uri",
+    "font-face-format",
+    "font-face-name",
+    "missing-glyph",
+];
+
+/// Whether a view makes the element `tag`: one of [`ELEMENTS`], or a
+/// custom element, a lowercase name with a `-` that SVG and MathML do
+/// not reserve, which the page defines.
+fn made(tag: &str) -> bool {
+    let tag = tag.trim().to_ascii_lowercase();
+    let custom = tag.starts_with(|first: char| first.is_ascii_lowercase())
+        && tag.contains('-')
+        && tag
+            .chars()
+            .all(|part| part.is_ascii_lowercase() || part.is_ascii_digit() || part == '-')
+        && !RESERVED.contains(&tag.as_str());
+    ELEMENTS.contains(&tag.as_str()) || custom
+}
+
+/// The attributes whose value is a URL a browser follows or loads, older
+/// HTML's among them.
+const URLS: [&str; 20] = [
     "href",
     "xlink:href",
     "src",
@@ -325,6 +458,14 @@ const URLS: [&str; 12] = [
     "background",
     "cite",
     "manifest",
+    "lowsrc",
+    "dynsrc",
+    "longdesc",
+    "usemap",
+    "codebase",
+    "classid",
+    "profile",
+    "archive",
 ];
 
 /// The schemes a URL may name: the web's and mail's.
@@ -359,7 +500,10 @@ fn settled(start: &str, whole: bool) -> bool {
 /// any case. A value is written into the others as text, which the back
 /// end escapes.
 fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
-    let lowered = name.trim().to_ascii_lowercase();
+    // A namespaced name is written with `/`, `:xlink/href`, and compared
+    // as the page reads it, `xlink:href`; its local name is what follows.
+    let lowered = name.trim().to_ascii_lowercase().replace('/', ":");
+    let local = lowered.rsplit(':').next().unwrap_or_default();
     let refuse = |why: &str| Err(Error::Unsafe(format!("[:{tag} {{:{name} …}}]: {why}")));
     let written = |attribute: &Attribute| match attribute {
         Attribute::Variable(_) => true,
@@ -368,8 +512,11 @@ fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
             .any(|piece| matches!(piece, Piece::Variable(_))),
         _ => false,
     };
-    if lowered.starts_with("on") {
+    if lowered.starts_with("on") || local.starts_with("on") {
         return refuse("an attribute named on… is a handler: an event is :on/<type>");
+    }
+    if lowered == "xml:base" {
+        return refuse("xml:base changes what every URL under it is read against");
     }
     if lowered == "srcdoc" {
         return refuse("srcdoc is a document of its own");
@@ -576,7 +723,7 @@ mod safety {
             ("[:a {:ping ?url}]", "ping"),
             ("[:td {:background ?url}]", "background"),
             ("[:q {:cite ?url}]", "cite"),
-            ("[:html {:manifest ?url}]", "manifest"),
+            ("[:html {:manifest ?url}]", "html"),
             ("[:a {:href \"javascript:alert(1)\"}]", "href"),
             ("[:a {:href \"JavaScript:go()\"}]", "href"),
             ("[:a {:href \"data:text/html,x\"}]", "href"),

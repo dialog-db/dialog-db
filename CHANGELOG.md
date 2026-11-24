@@ -114,13 +114,15 @@ What this changes for you:
   `Error::Reserved`. Its own variables are spelled with a `[`, which no
   document can write in a variable. A field may not be labelled `this:`.
   `syntax.meta` is read and never written.
-- A view's template is refused with `Error::Unsafe` in the shapes known
-  to let a row's values reach script: an element that runs or loads
-  (`script`, `iframe`, `object`, `embed`, `style`, `link`, `meta`,
-  `base`, `frame`, `frameset`, `applet`), an attribute named `on…`,
-  `srcdoc`, a `style` a value writes, a `srcset` a value is written
-  into, and a URL attribute whose fixed start neither names `http`,
-  `https` or `mailto` nor is a path, a query or a fragment. It is no
+- A view's template makes only the HTML elements of sections and text,
+  lists, tables, forms and media, and custom elements; every other
+  element, SVG and MathML among them, is refused with `Error::Unsafe`.
+  Of the attributes it refuses the shapes known to let a row's values
+  reach script: a name or local name `on…`, `xml/base`, `srcdoc`, a
+  `style` a value writes, a `srcset` a value is written into, and a URL
+  attribute, older HTML's included, whose fixed start neither names
+  `http`, `https` or `mailto` nor is a path, a query or a fragment. A
+  namespaced name written with `/` is compared as `xlink:href`. It is no
   sanitizer: a back end still escapes every text and attribute value it
   serialises.
 - A set, `{: "errand" : "home"}`, is a value: an answer that holds one
