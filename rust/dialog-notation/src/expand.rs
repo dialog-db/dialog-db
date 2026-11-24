@@ -1315,25 +1315,38 @@ impl Expander {
         // or a rule about syntax first, then a query, which reads
         // concepts, then the rest. A query expanded before a concept it
         // reads would read the concept's name as an attribute's, and
-        // nothing would expand it again.
-        let rank = |tree: &Syntax| match tree.applies() {
-            Some("concept") => 0,
-            Some("rule")
-                if items(tree)
-                    .first()
-                    .and_then(Syntax::applies)
-                    .is_some_and(|word| matches!(word, "syntax" | "warning")) =>
-            {
-                0
+        // nothing would expand it again. The use of a macro may declare
+        // a concept, and is expanded among the rest in the order
+        // written: a query below one is expanded after it, with the rest,
+        // so that it reads what the use declares above it.
+        let core = |tree: &Syntax| {
+            matches!(
+                tree.applies(),
+                Some("concept" | "rule" | "query" | "select" | "assert" | "retract")
+            )
+        };
+        let first_use = trees.iter().position(|tree| !core(tree));
+        let rank = |at: usize| {
+            let tree = &trees[at];
+            match tree.applies() {
+                Some("concept") => 0,
+                Some("rule")
+                    if items(tree)
+                        .first()
+                        .and_then(Syntax::applies)
+                        .is_some_and(|word| matches!(word, "syntax" | "warning")) =>
+                {
+                    0
+                }
+                Some("query") if first_use.is_none_or(|first| at < first) => 1,
+                _ => 2,
             }
-            Some("query") => 1,
-            _ => 2,
         };
         let skipping = std::mem::take(&mut self.skipping);
         let mut pending: Vec<usize> = (0..trees.len())
             .filter(|at| !skipping.contains_key(at))
             .collect();
-        pending.sort_by_key(|at| rank(&trees[*at]));
+        pending.sort_by_key(|at| rank(*at));
         concepts_in_order(&mut pending, &trees);
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
         let mut refused: BTreeMap<usize, Diagnostic> = skipping

@@ -1636,9 +1636,9 @@ async fn it_refuses_a_line_with_no_cardinality_whatever_the_body_holds() -> Resu
 }
 
 /// A concept a macro's use declares is read by a query below it, as by
-/// a select: the use is expanded before the queries of its document, so
-/// the query reads the concept and is not told to declare it above, as
-/// it is above.
+/// a select: a query below the use is expanded after it, so it reads
+/// the concept and is not told to declare it above, as it is above. A
+/// query above the use is, since there the declaration does come after.
 #[dialog_common::test]
 async fn it_reads_a_concept_a_macro_declares_above_a_query() -> Result<()> {
     let kind = "(rule (syntax (concept (?name ?t is: ?x)
@@ -1656,6 +1656,21 @@ async fn it_reads_a_concept_a_macro_declares_above_a_query() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(select (memo/card ?t is: ?c))").await?,
         vec![r#"(memo/card memo:1 is: {:text "hello"})"#]
+    );
+    // Above the use, it reads before the concept is declared: refused,
+    // saying to declare it above, which is so.
+    let mut above = Notebook::open().await?;
+    let refused = above
+        .submit(&format!(
+            "{kind}
+             (query (memo/card ?t is: ?c) (memo/note ?t is: ?x) (is ?c {{:text ?x}}))
+             (memo-kind memo/note)"
+        ))
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("declare the concept above")),
+        "{refused:?}"
     );
     // A select in the same place, as before.
     let mut selected = Notebook::open().await?;
