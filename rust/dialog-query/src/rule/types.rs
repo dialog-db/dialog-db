@@ -387,8 +387,8 @@ impl TypeEnv {
         records: &mut Vec<String>,
     ) -> Result<(), InferenceError> {
         let shape_kind = match pattern {
-            Pattern::Map(_) => ValueType::CompositeMap,
-            Pattern::List(_) => ValueType::CompositeList,
+            Pattern::Map(_) => ValueType::Map,
+            Pattern::List(_) => ValueType::List,
             Pattern::Term(_) => ValueType::Composite,
         };
         let shape = Inferred::Static(Kind::from(shape_kind));
@@ -463,8 +463,8 @@ impl TypeEnv {
     /// on the first value of another kind it yields, where a pattern is
     /// to drop that row.
     fn check_records(ctx: &mut Context, records: &[String]) -> Result<(), InferenceError> {
-        let composite = Primitive::singleton(ValueType::CompositeMap)
-            .union(Primitive::singleton(ValueType::CompositeList));
+        let composite =
+            Primitive::singleton(ValueType::Map).union(Primitive::singleton(ValueType::List));
         for name in records {
             let var = ctx.var_for_name(name);
             let kind = Self::resolve(ctx, var);
