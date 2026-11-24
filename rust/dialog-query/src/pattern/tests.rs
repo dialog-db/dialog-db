@@ -15,7 +15,7 @@ use crate::formula::math::Sum;
 use crate::planner::{Plan, Planner};
 use crate::premise::reading;
 use crate::query::Application as _;
-use crate::rule::body;
+use crate::rule::{Rule, body};
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
 use crate::term::Buffered;
@@ -2219,4 +2219,149 @@ fn it_refuses_bytes_that_are_no_composite() {
         .err()
         .expect("refused");
     assert!(refused.to_string().contains("no map or list"), "{refused}");
+}
+
+/// The constants a stored body writes as bytes of some kind, each under
+/// the name of its type, in every rule body that holds one: a bytes
+/// constant `{"bytes:": [b, ...]}`, an array of integers, and a composite
+/// `{"composite:map": h'..'}`, a byte string. Only a composite is written as a
+/// byte string, so only a composite is read back from one.
+fn bytes_constants(body: &[u8]) -> Vec<(String, Ipld)> {
+    fn walk(node: &Ipld, found: &mut Vec<(String, Ipld)>) {
+        match node {
+            Ipld::Map(entries) => {
+                for (key, value) in entries {
+                    if ["bytes:", "composite:map", "composite:list"].contains(&key.as_str())
+                        && entries.len() == 1
+                    {
+                        found.push((key.clone(), value.clone()));
+                    }
+                    walk(value, found);
+                }
+            }
+            Ipld::List(items) => items.iter().for_each(|item| walk(item, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(
+        &serde_ipld_dagcbor::from_slice::<Ipld>(body).expect("dag-cbor"),
+        &mut found,
+    );
+    found
+}
+
+/// The rules over one constant: as a term in a deductive and an inductive
+/// rule, which are written in format 4, and inside a pattern in a
+/// deductive rule, which is written in format 5.
+fn rules_holding(constant: &Value, declared: &str) -> Vec<(u64, Rule)> {
+    use crate::rule::InductiveRule;
+
+    let term = || {
+        vec![
+            read("note/title", "text:", var("heading")),
+            read("note/blob", declared, Pattern::from(constant.clone())),
+        ]
+    };
+    let inside = Pattern::map([
+        (text("blob"), Pattern::from(constant.clone())),
+        (text("title"), var("heading")),
+    ])
+    .expect("a pattern");
+    let head = || concept("heading", "note/heading", "text:");
+    vec![
+        (
+            4,
+            Rule::from(DeductiveRule::new(head(), term()).expect("compiles")),
+        ),
+        (
+            4,
+            Rule::from(InductiveRule::new(head(), term()).expect("compiles")),
+        ),
+        (
+            5,
+            Rule::from(
+                DeductiveRule::new(head(), vec![read("note/payload", "composite:map", inside)])
+                    .expect("compiles"),
+            ),
+        ),
+    ]
+}
+
+/// A rule's body, the name it is stored under, and the rule its body
+/// reads back as, under that name, written as JSON.
+fn stored(rule: &Rule) -> (Vec<u8>, Entity, serde_json::Value) {
+    use crate::rule::InductiveRule;
+
+    let (body, this, written) = match rule {
+        Rule::Deductive(rule) => (
+            rule.try_encode().expect("a body"),
+            rule.this(),
+            serde_json::to_value(rule.canonical_descriptor()).expect("JSON"),
+        ),
+        Rule::Inductive(rule) => (
+            rule.try_encode().expect("a body"),
+            rule.this(),
+            serde_json::to_value(rule.canonical_descriptor()).expect("JSON"),
+        ),
+    };
+    let read = match rule {
+        Rule::Deductive(_) => {
+            let decoded = DeductiveRule::decode(&body).expect("the body reads back");
+            assert!(decoded.stored_as(&this), "under its name");
+            assert_eq!(decoded.try_encode().as_ref(), Some(&body));
+            serde_json::to_value(decoded.canonical_descriptor()).expect("JSON")
+        }
+        Rule::Inductive(_) => {
+            let decoded = InductiveRule::decode(&body).expect("the body reads back");
+            assert!(decoded.stored_as(&this), "under its name");
+            assert_eq!(decoded.try_encode().as_ref(), Some(&body));
+            serde_json::to_value(decoded.canonical_descriptor()).expect("JSON")
+        }
+    };
+    assert_eq!(read, written, "it reads back as the rule it was");
+    (body, this, written)
+}
+
+/// A bytes constant is written as an array of integers under `bytes:`, in
+/// a format 4 body and inside a pattern in a format 5 body, and reads back
+/// as the same bytes constant under the same name: bytes that are no
+/// composite, and bytes that are the canonical bytes of a composite, which
+/// read back as bytes and not as that composite. A composite constant with
+/// those same bytes is written as a byte string under `composite:map`, so the two
+/// are two rules, of two bodies and two names.
+#[dialog_common::test]
+fn it_keeps_a_bytes_constant_apart_from_a_composite_of_the_same_bytes() {
+    let composite = Composite::map([(text("a"), text("b"))]).expect("a map");
+    let canonical = composite.to_bytes().to_vec();
+    let composite = Value::from(composite);
+    for blob in [vec![0xff, 0x00, 0x01], canonical.clone()] {
+        let bytes = Value::Bytes(blob.clone());
+        let as_bytes = rules_holding(&bytes, "bytes:");
+        for (format, rule) in &as_bytes {
+            let (body, _, _) = stored(rule);
+            assert_eq!(body::format_of(&body), Some(*format));
+            let held = Ipld::List(blob.iter().map(|b| Ipld::Integer((*b).into())).collect());
+            assert_eq!(bytes_constants(&body), vec![("bytes:".to_string(), held)]);
+        }
+        if blob != canonical {
+            continue;
+        }
+        let as_composite = rules_holding(&composite, "composite:map");
+        for ((format, bytes_rule), (_, composite_rule)) in as_bytes.iter().zip(&as_composite) {
+            let (bytes_body, bytes_this, _) = stored(bytes_rule);
+            let (composite_body, composite_this, _) = stored(composite_rule);
+            assert_eq!(body::format_of(&composite_body), Some(*format));
+            assert_eq!(
+                bytes_constants(&composite_body),
+                vec![("composite:map".to_string(), Ipld::Bytes(canonical.clone()))]
+            );
+            assert_ne!(bytes_body, composite_body, "two bodies");
+            assert_ne!(bytes_this, composite_this, "under two names");
+            assert!(matches!(
+                (bytes_rule, composite_rule),
+                (Rule::Deductive(_), Rule::Deductive(_)) | (Rule::Inductive(_), Rule::Inductive(_))
+            ));
+        }
+    }
 }
