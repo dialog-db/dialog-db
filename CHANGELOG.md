@@ -44,7 +44,7 @@ taking away.
 
 ### A rule whose head has a field named `this` is refused, not a panic
 
-[#773](https://github.com/dialog-db/dialog-db/pull/773).
+[#860](https://github.com/dialog-db/dialog-db/pull/860)
 
 `this` is what every query and rule calls the entity, and a rule's
 identity names every head field but the entity. A head field named
@@ -54,7 +54,8 @@ What this changes for you:
 
 - `DeductiveRuleDescriptor::compile` returns
   `TypeError::ReservedField { field }` for a concluded field named
-  `this`. `TypeError` has the new variant.
+  `this`. `TypeError` has the new variant, so a `match` over
+  `TypeError` with no wildcard arm needs one more arm.
 
 Why: an embedder can build such a descriptor without the notation, and
 a descriptor a caller can build must not take the process down.

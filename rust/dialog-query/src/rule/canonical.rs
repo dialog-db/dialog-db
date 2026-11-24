@@ -626,8 +626,6 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use std::panic::catch_unwind;
-
     use serde_json::{Value, json};
 
     use crate::error::TypeError;
@@ -675,11 +673,11 @@ mod tests {
             "when": [knows("this", "x")],
         }))
         .expect("descriptor parses");
-        let compiled = catch_unwind(|| descriptor.compile());
+        let compiled = descriptor.compile();
         assert!(
             matches!(
                 &compiled,
-                Ok(Err(TypeError::ReservedField { field })) if field == "this"
+                Err(TypeError::ReservedField { field }) if field == "this"
             ),
             "{compiled:?}"
         );
