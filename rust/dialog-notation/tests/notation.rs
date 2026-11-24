@@ -2476,3 +2476,48 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
     );
     Ok(())
 }
+
+/// The entity `id` makes in a rule of a number a read gives is the one
+/// `(:id …)` names of the same number written. A written `1` is a natural,
+/// stored and read as one whatever the attribute's `as:`; and a `1`
+/// another writer stores as a signed integer names the same entity too,
+/// since `entity/derive` derives from the value's reference, which is
+/// one for the two `1`s.
+#[dialog_common::test]
+async fn it_names_one_entity_of_a_number_read_and_written() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (todo ?t list: ?l n: ?n)
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                 (xyz.todo/n of: ?t is: ?n as: :integer cardinality: :one))
+               (concept (todo/add list: ?l n: ?n)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+                 (xyz.todo.add/n of: ?c is: ?n as: :integer in: :control))
+               (rule (assert (todo ?t list: ?l n: ?n))
+                 (todo/add list: ?l n: ?n)
+                 (id ?t list: ?l n: ?n))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    notebook
+        .submit(r#"(assert (todo/add list: list:home n: 1))"#)
+        .await?;
+    let made = report(&mut notebook, "(select (todo ?t n: ?n ...))").await?;
+    assert_eq!(made.len(), 1, "{made:?}");
+    notebook
+        .submit(r#"(assert (xyz.todo (:id xyz.todo list: list:home n: 1) tag: (:text "shop")))"#)
+        .await?;
+    let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
+    let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
+    assert_eq!(entity(&tagged[0]), entity(&made[0]), "{made:?} {tagged:?}");
+
+    use dialog_query::formula::entity::derive;
+    let domain = dialog_corpus::Value::String("xyz.todo".into());
+    assert_eq!(
+        derive(&domain, &dialog_corpus::Value::UnsignedInt(1)),
+        derive(&domain, &dialog_corpus::Value::SignedInt(1)),
+        "a natural 1 and a signed 1 derive one entity"
+    );
+    Ok(())
+}

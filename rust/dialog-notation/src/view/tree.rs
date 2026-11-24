@@ -676,6 +676,10 @@ impl Maintainer {
     /// change, and say what it changed in the tree. Only the instances
     /// the rows are behind are looked at, and where the values one shows
     /// changed, the instances under it that show them.
+    ///
+    /// What left is taken before what arrived: a row in both of one
+    /// change stands after it, and the tree says nothing of it if it
+    /// stood before.
     pub fn apply(&mut self, changes: &[Change]) -> Vec<Patch> {
         self.apply_counted(changes, &[])
     }
@@ -1231,5 +1235,30 @@ mod tests {
             }
         }
         assert!(one.asked.get() < 16 * count, "{}", one.asked.get());
+    }
+
+    /// A row both left and arrived in one change stands after it: added
+    /// where it was not, and nothing said where it was.
+    #[test]
+    fn it_takes_a_row_that_left_and_arrived_at_once_as_standing() {
+        let plan = card();
+        let home = row(
+            &plan,
+            0,
+            &[entity("list:home"), Value::String("Home".into())],
+        );
+        let both = || Change {
+            layer: 0,
+            arrived: vec![home.clone()],
+            left: vec![home.clone()],
+        };
+        let mut maintainer = Maintainer::new(plan.clone(), None);
+        let patches = maintainer.apply(&[both()]);
+        assert!(
+            matches!(patches.as_slice(), [Patch::Insert { index: 0, .. }]),
+            "{patches:?}"
+        );
+        assert_eq!(maintainer.apply(&[both()]), []);
+        assert_eq!(maintainer.tree().roots.len(), 1);
     }
 }
