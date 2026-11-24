@@ -1508,15 +1508,14 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
-            // A name with a `.` and no `/` is a domain, which a read
-            // applies as the kernel's before any concept is looked up: a
-            // concept under it would never be read.
+            // A name with a `.` is a domain, read directly, and a
+            // concept's name has none: that is how the two are told apart
+            // (the maintainer, 2026-11-24).
             if Kind::of(&declared.name) == Kind::Domain {
                 return Err(Error::Refused(format!(
                     "{pattern} declares a concept named `{}`, which is a domain's name: a \
-                     concept's name is a name, `todo`, or a name and a `/`, \
-                     `notebook/blocks`, and one with a `.` and no `/` is read as the domain's \
-                     own attributes",
+                     name with a `.` is a domain, read directly, and a concept's name has none, \
+                     `todo` or `notebook/blocks`; that is how the two are told apart",
                     declared.name
                 )));
             }

@@ -70,6 +70,8 @@ The prelude in `rust/dialog-notation/src/prelude.clj` is rules and nothing else.
 
 A pattern is any form, not an application only. `(unless …)` may stand anywhere among the premises and more than once, each premise in it one more "and not": `A (unless B) (unless C)` is `A, not B, not C`.
 
+A concept's name has no `.`: `todo`, or a name and a `/`, `notebook/blocks`. A name with a `.` is a domain, read directly, and that is how a concept and a domain are told apart; a concept declared under a dotted name is refused (the maintainer, 2026-11-24; `it_refuses_a_concept_named_as_a_domain`).
+
 A concept is syntax for what its body says. The variables tie its parameters to the body's fields, so the names need not agree. Writing
 
 ```clj
