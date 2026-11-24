@@ -5126,7 +5126,6 @@ mod tests {
     #[dialog_common::test]
     async fn it_lets_go_of_a_served_node_while_a_sync_point_is_made() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
-        use dialog_effects::archive::prelude::ArchiveScope;
         use dialog_search_tree::nodes::Read;
 
         let directory = tempfile::tempdir()?;
@@ -5137,13 +5136,10 @@ mod tests {
             archive.is_frame("index", segment.blake3_hash()),
             "kept as a frame"
         );
-        let node = Read::<TreeNode>::new(
-            ArchiveScope::new(subject()).catalog("index"),
-            segment.blake3_hash().clone(),
-        )
-        .perform(&archive)
-        .await?
-        .expect("the node is held");
+        let node = Read::<TreeNode>::new(subject(), segment.blake3_hash().clone())
+            .perform(&archive)
+            .await?
+            .expect("the node is held");
         let syncing = hold_the_next_sync(&archive, Duration::from_millis(1500))?;
         assert_eq!(
             syncing.as_deref(),
@@ -5235,7 +5231,6 @@ mod tests {
     #[dialog_common::test]
     fn it_waits_for_the_turn_off_the_runtime_to_write_tree_nodes() -> anyhow::Result<()> {
         use crate::node::tests::{entity_segment, segment_manifest};
-        use dialog_effects::archive::prelude::ArchiveScope;
         use dialog_search_tree::nodes::Write;
 
         let directory = tempfile::tempdir()?;
@@ -5243,18 +5238,16 @@ mod tests {
         let segment = entity_segment("alice", &segment_manifest())?;
         let node = tree_node(&segment).expect("a tree node");
         let told = told_while_waiting(&archive, |archive| async move {
-            // A catalog the file does not number yet: no extent takes it,
-            // so the write waits for the turn.
-            Write::new(ArchiveScope::new(subject()).catalog("fresh"), vec![node])
-                .perform(archive)
-                .await?;
+            // A new file numbers no catalog yet, the subject's index
+            // included: no extent takes it, so the write waits for the turn.
+            Write::new(subject(), vec![node]).perform(archive).await?;
             Ok(())
         })?;
         assert!(
             told,
             "the other task ran while the write waited for the turn"
         );
-        assert!(archive.get("fresh", segment.blake3_hash())?.is_some());
+        assert!(archive.get("index", segment.blake3_hash())?.is_some());
         Ok(())
     }
 

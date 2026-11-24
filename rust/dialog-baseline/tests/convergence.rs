@@ -40,7 +40,7 @@ fn txn_count() -> usize {
 /// The tree a staged batch's tip names.
 fn tree_of(repo: &VolatileRepo, batch: &TransactionBatch) -> Corpus {
     Corpus::at(
-        repo.catalog(),
+        repo.branch().subject(),
         NodeHash::from(*batch.revision().tree.hash()),
     )
 }

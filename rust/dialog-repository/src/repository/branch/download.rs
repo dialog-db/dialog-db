@@ -217,9 +217,9 @@ impl<'a> DownloadBranch<'a> {
                     None => branch.fallback(),
                 };
                 let _loan = routes::lend(branch.routes(), branch.of(), &fallback);
-                let catalog = branch.archive().index();
+                let subject = branch.subject();
                 let at =
-                    |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
+                    |tree: &TreeReference| Index::at(subject.clone(), NodeHash::from(*tree.hash()));
                 at(&target)
                     .follow(&at(&held), env)
                     .await

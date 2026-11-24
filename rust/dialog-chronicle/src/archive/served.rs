@@ -20,7 +20,7 @@ use dialog_corpus::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
     State, VALUE_KEY_TAG,
 };
-use dialog_search_tree::nodes::{Node, Preload, Read, Write, decode};
+use dialog_search_tree::nodes::{Node, Preload, Read, Write, blocks_of, decode};
 use dialog_search_tree::{
     DialogSearchTreeError, KeyParts, Manifest, NodeRows, PersistentNode, RowsKind,
 };
@@ -438,7 +438,8 @@ impl Chronicle {
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        let catalog = read.catalog.catalog_name();
+        let blocks = blocks_of(&read.subject);
+        let catalog = blocks.catalog_name();
         // Rows of another value type than the tree's are read from the
         // block instead, as `PersistentNode::from_rows` declines them.
         if let Some(node) = self
@@ -484,7 +485,7 @@ impl<N: Node> Provider<Write<N>> for Chronicle {
                 block.as_ref(),
             );
         }
-        let catalog = write.catalog.catalog_name().to_string();
+        let catalog = blocks_of(&write.subject).catalog_name().to_string();
         self.off_runtime(
             move |archive| {
                 archive

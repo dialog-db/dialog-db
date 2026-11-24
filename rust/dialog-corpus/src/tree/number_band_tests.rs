@@ -6,7 +6,7 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_search_tree::helpers::test_catalog;
+use dialog_search_tree::helpers::test_subject;
 use dialog_search_tree::{Manifest, PersistentTree, helpers::Blocks};
 use futures_util::{TryStreamExt as _, stream};
 
@@ -26,7 +26,7 @@ async fn tree(value_encoding: u32, facts: Vec<Fact>) -> anyhow::Result<(Corpus, 
         value_encoding,
         ..Manifest::default()
     };
-    let mut tree: Corpus = PersistentTree::empty_with_manifest(test_catalog(), manifest);
+    let mut tree: Corpus = PersistentTree::empty_with_manifest(test_subject(), manifest);
     let mut delta = ArchiveDelta::zero();
     let instructions = facts
         .into_iter()

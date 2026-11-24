@@ -274,10 +274,11 @@ mod native {
         let mut renamed = 0usize;
         let mut stand_ins = 0usize;
         runtime.block_on(async {
-            // The replica answers every catalog's reads, so any will do.
+            // The replica answers every subject's reads, so any will do.
             let did: Did = "did:key:zTonkDataset".parse()?;
-            let catalog = ArchiveScope::new(Subject::from(did)).index();
-            let tree = Corpus::at(catalog.clone(), head.clone());
+            let subject = Subject::from(did);
+            let archive = ArchiveScope::new(subject.clone());
+            let tree = Corpus::at(subject, head.clone());
             let (from, to) = history_region_range();
             let stream = tree.stream_range(from..=to, &replica);
             futures_util::pin_mut!(stream);
@@ -288,7 +289,7 @@ mod native {
                 let Some(version) = datum.version else {
                     continue;
                 };
-                let spilled = match fetch_spilled(&replica, &catalog.archive(), &entry.key).await {
+                let spilled = match fetch_spilled(&replica, &archive, &entry.key).await {
                     Ok(spilled) => spilled,
                     Err(_) => {
                         stand_ins += 1;

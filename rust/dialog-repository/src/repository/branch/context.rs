@@ -12,7 +12,7 @@ use dialog_corpus::tree::CorpusNode;
 use dialog_search_tree::nodes;
 use std::sync::Arc;
 
-use dialog_capability::Provider;
+use dialog_capability::{Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{
@@ -21,7 +21,6 @@ use dialog_corpus::history::{
 };
 use dialog_corpus::{Datum, DialogCorpusError, Key, State, context_entry};
 use dialog_effects::archive::Load as ArchiveLoad;
-use dialog_effects::archive::prelude::CatalogScope;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_search_tree::Cache;
 
@@ -46,7 +45,7 @@ use dialog_corpus::history::context_of;
 pub(crate) async fn published_context<S>(
     head: &Revision,
     contexts: &ContextCache,
-    catalog: &CatalogScope,
+    subject: &Subject,
     store: &S,
 ) -> Result<Option<Arc<Context>>, DialogCorpusError>
 where
@@ -69,7 +68,7 @@ where
         Some(context) => Arc::new(context.clone()),
         None if !head.region => return Ok(None),
         None => {
-            let tree = Index::at(catalog.clone(), NodeHash::from(*head.tree.hash()));
+            let tree = Index::at(subject.clone(), NodeHash::from(*head.tree.hash()));
             Arc::new(head.context_from_region(context_in(&tree, store).await?)?)
         }
     };
@@ -122,7 +121,7 @@ pub(crate) async fn head_observes<S>(
     version: &Version,
     contexts: &ContextCache,
     records: &Cache<Version, RevisionRecord>,
-    catalog: &CatalogScope,
+    subject: &Subject,
     store: &S,
 ) -> Result<Option<bool>, DialogCorpusError>
 where
@@ -155,7 +154,7 @@ where
     {
         return Ok(Some(true));
     }
-    let tree = Index::at(catalog.clone(), NodeHash::from(*head.tree.hash()));
+    let tree = Index::at(subject.clone(), NodeHash::from(*head.tree.hash()));
     Ok(Some(
         region_entry(&tree, &version.origin, store)
             .await?
@@ -169,7 +168,7 @@ where
 pub(crate) async fn full_context<S, H>(
     head: &Revision,
     contexts: &ContextCache,
-    catalog: &CatalogScope,
+    subject: &Subject,
     store: &S,
     history: &H,
 ) -> Result<Arc<Context>, DialogCorpusError>
@@ -186,7 +185,7 @@ where
         + Clone,
     H: History,
 {
-    match published_context(head, contexts, catalog, store).await? {
+    match published_context(head, contexts, subject, store).await? {
         Some(context) => Ok(context),
         None => contexts.context_of(&head.version(), history).await,
     }
@@ -240,7 +239,7 @@ pub(crate) async fn successor<S, H>(
     parent: Option<&Revision>,
     version: Version,
     contexts: &ContextCache,
-    catalog: &CatalogScope,
+    subject: &Subject,
     store: &S,
     history: impl FnOnce() -> H,
 ) -> Result<Successor, DialogCorpusError>
@@ -278,7 +277,7 @@ where
                 context: None,
             });
         }
-        let tree = Index::at(catalog.clone(), NodeHash::from(*parent.tree.hash()));
+        let tree = Index::at(subject.clone(), NodeHash::from(*parent.tree.hash()));
         let held = region_entry(&tree, &version.origin, store).await?;
         let ours = Watermark {
             edition: version.edition,
@@ -296,7 +295,7 @@ where
     }
     let before = match remembered {
         Some(context) => context,
-        None => full_context(parent, contexts, catalog, store, &history()).await?,
+        None => full_context(parent, contexts, subject, store, &history()).await?,
     };
     let mut context = Context::clone(&before);
     context.record(version);
@@ -354,7 +353,7 @@ where
     full_context(
         &head,
         &source.contexts(),
-        &source.catalog(),
+        &source.subject(),
         &env,
         &source.history(env),
     )
