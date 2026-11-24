@@ -95,7 +95,7 @@ use futures_util::TryStreamExt;
 
 use crate::Standing;
 use crate::corpus::Type as ValueType;
-use crate::corpus::Value;
+use crate::corpus::{Composite, Value};
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
@@ -140,6 +140,12 @@ pub enum Aggregator {
     /// ([`ReduceEntry::listed`]).
     #[serde(skip_deserializing)]
     Top,
+    /// The set of distinct present values in the group, compared by
+    /// dag-cbor bytes, as a composite list in the order of those bytes.
+    /// The empty list over a group whose inputs are all absent. Never
+    /// spelled in a rule's `reduce`: only a folding query gives it.
+    #[serde(skip_deserializing)]
+    Distinct,
 }
 
 impl Display for Aggregator {
@@ -153,6 +159,7 @@ impl Display for Aggregator {
             Aggregator::Avg => "avg",
             Aggregator::Last => "last",
             Aggregator::Top => "top",
+            Aggregator::Distinct => "distinct",
         };
         write!(f, "{name}")
     }
@@ -180,9 +187,11 @@ impl Aggregator {
     /// this requirement is non-empty.
     pub fn input_requirement(self) -> Type {
         let primitive = match self {
-            Aggregator::Count | Aggregator::CountDistinct | Aggregator::Last | Aggregator::Top => {
-                Primitive::ALL
-            }
+            Aggregator::Count
+            | Aggregator::CountDistinct
+            | Aggregator::Last
+            | Aggregator::Top
+            | Aggregator::Distinct => Primitive::ALL,
             Aggregator::Sum | Aggregator::Avg => Primitive::NUMERIC,
             Aggregator::Min | Aggregator::Max => Primitive::COMPARABLE,
         };
@@ -221,6 +230,8 @@ impl Aggregator {
         let optional = input.is_optional();
         Some(match self {
             Aggregator::Count | Aggregator::CountDistinct => Type::from(ValueType::UnsignedInt),
+            // A list, never optional: the empty list is its identity.
+            Aggregator::Distinct => Type::from(ValueType::CompositeList),
             Aggregator::Sum => {
                 let integers = Primitive::singleton(ValueType::UnsignedInt)
                     .union(Primitive::singleton(ValueType::SignedInt));
@@ -661,6 +672,15 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
                 distinct.insert(encode(value)?);
             }
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
+        }
+        Aggregator::Distinct => {
+            let mut distinct = BTreeMap::new();
+            for value in values {
+                distinct.entry(encode(&value)?).or_insert(value);
+            }
+            Composite::list(distinct.into_values())
+                .map(|list| Some(Value::Composite(list)))
+                .map_err(|error| fault(entry, error.to_string()))
         }
         Aggregator::Sum => fold_sum(entry, values).map(Some),
         Aggregator::Avg => fold_avg(entry, values),
