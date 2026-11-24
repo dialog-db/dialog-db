@@ -2,7 +2,7 @@
 
 An inventory read from the files by a thread of its own on 2026-11-19, corrected by the managing agent where it was stale, and brought up to the branch on 2026-11-24 after it was moved onto the engine of #778 and #839. T blocks tonk's migration, L blocks landing #773, N neither. Evidence is cited so each row can be checked; rows marked 2026-11-24 were run.
 
-The notebook bar no longer finds failures: 58 forms read, 55 expand and compile without core, 62 of 62 with it, and the table 54 of 54 (`it_measures_how_far_the_notebook_gets`, `it_measures_how_far_the_table_gets`; unchanged on 2026-11-24). What it does not count are the `; GAP:` lines in the sketches: 25 in `notebook.clj`, 22 in `table.clj`, 6 in `core.clj`.
+The notebook bar no longer finds failures: 58 forms read, 55 expand and compile without core, 62 of 62 with it, and the table 54 of 54 (`it_measures_how_far_the_notebook_and_the_table_get`, `tests/view.rs`, on the fixtures that stayed). What it does not count are the `; GAP:` lines in the sketches: 25 in `notebook.clj`, 22 in `table.clj`, 6 in `core.clj`.
 
 | # | gap | evidence | blocks | size | needs first |
 |---|---|---|---|---|---|

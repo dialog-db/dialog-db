@@ -1,6 +1,6 @@
 # The kernel and the core forms
 
-The slim kernel as agreed on 2026-11-11, the core forms defined in it, and what running them through a model showed. Nothing here is implemented in dialog. Spellings are sketches until a reader round and a parser exist.
+The slim kernel as agreed on 2026-11-11, the core forms defined in it, and what running them through a model showed. It is implemented in `rust/dialog-notation`: the core forms are its prelude, `src/prelude.clj`, which is the reference where this note and it differ.
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ A macro is a rule like any other (Irakli, 2026-11-11). Its premise says which fo
 
 ```clj
 (rule (syntax (rule (report ?head) ?head))
-  (expand (query ?head)))
+  (expand (select ?head)))
 ```
 
 - `(expand pattern)` holds for the form being expanded when it has the pattern's shape. It binds the pattern's variables to the form's parts, as rule variables. `(expand pattern in: :head)` holds in that position only; the other position is `:premise`.
@@ -60,7 +60,7 @@ The prelude in `rust/dialog-notation/src/prelude.clj` is rules and nothing else.
 
 ```clojure
 (rule (syntax (rule (report ?head) ?head))
-  (expand (query ?head)))
+  (expand (select ?head)))
 
 (rule (syntax (rule ... ?about
                 (syntax ?body)
