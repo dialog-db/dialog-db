@@ -829,13 +829,12 @@ async fn it_maintains_a_view_nested_two_levels_deep() -> Result<()> {
         here.tree.hiccup(),
         r#"[:section [:h2 "Home"] [:ul [:li "Buy milk" [:span {:class "tag"} "errand"]]]]"#
     );
-    let home = || (0, vec![entity("list:home")]);
-    let task = |t: &str| (1, vec![entity(t)]);
+    let task = |t: &str| item(t);
     let steps: Vec<(&str, Vec<Patch>)> = vec![
         (
             r#"(assert (task/tag task:1 tag: "shop"))"#,
             vec![Patch::Insert {
-                parent: vec![home(), task("task:1")],
+                parent: task("task:1"),
                 slot: 1,
                 index: 1,
                 instance: chip("shop"),
@@ -844,7 +843,7 @@ async fn it_maintains_a_view_nested_two_levels_deep() -> Result<()> {
         (
             r#"(assert (task task:1 list: list:home title: "Buy oat milk"))"#,
             vec![Patch::SetText {
-                at: vec![home(), task("task:1")],
+                at: task("task:1"),
                 slot: 0,
                 text: "Buy oat milk".into(),
             }],
@@ -852,8 +851,8 @@ async fn it_maintains_a_view_nested_two_levels_deep() -> Result<()> {
         (
             r#"(assert (task task:2 list: list:home title: "Call mum"))"#,
             vec![Patch::Insert {
-                parent: vec![home()],
-                slot: 1,
+                parent: items(),
+                slot: 0,
                 index: 1,
                 instance: row("task:2", "Call mum", Vec::new()),
             }],
@@ -861,11 +860,11 @@ async fn it_maintains_a_view_nested_two_levels_deep() -> Result<()> {
         (
             r#"(retract (task/tag task:1 tag: "errand"))"#,
             vec![Patch::Remove {
-                at: vec![
-                    home(),
-                    task("task:1"),
-                    (2, vec![Value::String("errand".into())]),
-                ],
+                at: {
+                    let mut at = task("task:1");
+                    at.push((1, vec![Value::String("errand".into())]));
+                    at
+                },
             }],
         ),
     ];
