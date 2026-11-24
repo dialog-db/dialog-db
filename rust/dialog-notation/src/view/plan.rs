@@ -727,7 +727,7 @@ impl Builder<'_> {
                 premise.variables(&mut names);
                 names
             })
-            .filter(|variable| variable.starts_with("[source-") || variable == crate::view::CALLED)
+            .filter(|variable| variable.starts_with("[source") || variable == crate::view::CALLED)
             .collect();
         let given: BTreeMap<String, Syntax> = premises
             .iter()

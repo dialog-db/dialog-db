@@ -70,6 +70,20 @@ pub const DERIVED: &str = "dialog.notation.concept";
 /// site, `x[3]`, a column, a fold's, a view's. Its name holds a `[`,
 /// which the reader never reads in a variable, so no document can name
 /// it.
+///
+/// Each name the notation makes is one name for one input:
+///
+/// | name | made of | why two inputs never make one name |
+/// |---|---|---|
+/// | `x[3]`, a variable at a site | a variable and the site's number | the suffix is `[`, digits, `]`; the last `[` of the name is the suffix's, as digits hold none, so the name splits into one variable and one number |
+/// | `[q1]x`, a variable of a view's layer | the layer's number and a variable | the prefix ends at the first `]`, as digits hold none |
+/// | `[collect-0]`, `[collect-0-key]`, `[collect-0-value]` | a number | no label or name of a document is in them |
+/// | `[source]label`, `[source-key]` | a label, or nothing | a field's has `]` after `[source` and the key's has `-`, and `[source]` before a label is a fixed prefix |
+/// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
+/// | `dialog.notation.report.q12` | a site's number | digits only |
+/// | `c0`, `c1`, `row`, fields of a report | a column's number | the fields of the notation's own relations, never a document's |
+/// | `dialog.notation.concept.<concept>.<name>` | a concept's name and an attribute's | a concept whose name holds a `.` is refused here, so the concept ends at the first `.` after the prefix |
+/// | `<label>/key`, an entry's key in a rule's head | a field's label | a head with a field named so beside the entry is refused |
 pub fn unwritten(name: &str) -> bool {
     name.contains('[')
 }

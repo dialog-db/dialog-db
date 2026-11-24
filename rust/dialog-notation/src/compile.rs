@@ -1461,8 +1461,17 @@ impl Scope {
                     read.domain, field.label
                 )));
             }
-            // An entry's key is the head's key operand, `entry/key`.
+            // An entry's key is the head's key operand, `entry/key`. A
+            // field of the same head named so would be the same operand.
             if let Some((key, _)) = &field.key {
+                let operand = format!("{}/key", field.label);
+                if fields.iter().any(|other| other.label == operand) {
+                    return Err(Error::Refused(format!(
+                        "{} has a field named {operand}, which is the key of its entry {}: \
+                         the two would be one",
+                        read.domain, field.label
+                    )));
+                }
                 let value = self.term(key, None)?;
                 self.when.push(tie(&format!("{}/key", field.label), value));
             }

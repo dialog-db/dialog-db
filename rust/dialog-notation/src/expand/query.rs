@@ -802,7 +802,10 @@ impl Expander {
             let term = match operand.terms.get(label) {
                 Some(term) if label != "is" => term.clone(),
                 _ => {
-                    let value = Syntax::Variable(format!("[source-{label}]"));
+                    // A field is `[source]` and its label, the entry's
+                    // key `[source-key]`: the one has `]` where the
+                    // other has `-`, so no label names the key.
+                    let value = Syntax::Variable(format!("[source]{label}"));
                     if entry.as_ref() == Some(label) {
                         Syntax::Map(vec![(Syntax::Variable("[source-key]".into()), value)])
                     } else {

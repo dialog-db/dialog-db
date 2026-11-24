@@ -1991,6 +1991,18 @@ impl Expander {
                 })
                 && self.concepts.contains(concept)
             {
+                // The relation is the concept's name, a `.`, and the
+                // attribute's: a concept's name with no `.` ends at the
+                // first `.`, so no other concept and attribute spell it.
+                if concept.contains('.') {
+                    return self.about(&tree, |_| {
+                        Err(Error::Refused(format!(
+                            "{tree} derives `{concept}/{name}` under a concept whose name holds a \
+                             `.`: its relation would be the one another concept and attribute \
+                             spell, and so it is not derived"
+                        )))
+                    });
+                }
                 return self.about(&tree, |_| derived(&tree, concept, name));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
