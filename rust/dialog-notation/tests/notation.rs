@@ -949,6 +949,59 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
     Ok(())
 }
 
+/// An elector in a concept's head chooses one of a field's claims:
+/// `(top ?s)` the one listed first in the line's `as:`. Under `:many` a
+/// write adds a claim and displaces none, so the read gives the best of
+/// what is held. The same elector written on the line's value elects
+/// alike. A listed `as:` with no elector chooses nothing: the read gives
+/// every claim.
+#[dialog_common::test]
+async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (account ?a status: (top ?s))
+                 (xyz.account/status of: ?a is: ?s
+                   as: [:suspended :active :registered] cardinality: :many))
+               (concept (standing ?a status: ?s)
+                 (xyz.account/status of: ?a is: (top ?s)
+                   as: [:suspended :active :registered] cardinality: :many))
+               (concept (statuses ?a status: ?s)
+                 (xyz.account/status of: ?a is: ?s
+                   as: [:suspended :active :registered] cardinality: :many))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    notebook
+        .submit("(assert (account acct:1 status: :registered))")
+        .await?;
+    notebook
+        .submit("(assert (account acct:1 status: :suspended))")
+        .await?;
+    notebook
+        .submit("(assert (account acct:1 status: :active))")
+        .await?;
+    for read in [
+        "(select (account ?a status: ?s))",
+        "(select (standing ?a status: ?s))",
+    ] {
+        assert_eq!(
+            report(&mut notebook, read).await?,
+            vec!["(xyz.account acct:1 status: :suspended)"],
+            "{read}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (statuses ?a status: ?s))").await?,
+        vec![
+            "(xyz.account acct:1 status: :active)",
+            "(xyz.account acct:1 status: :registered)",
+            "(xyz.account acct:1 status: :suspended)",
+        ]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
