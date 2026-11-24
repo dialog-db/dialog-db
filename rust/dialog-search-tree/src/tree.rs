@@ -1258,6 +1258,74 @@ mod tests {
         Ok(())
     }
 
+    /// A range that ends at the last key a subtree holds reads nothing of
+    /// the subtree after it: the index routing to that subtree already says
+    /// its keys begin past the range's end.
+    ///
+    /// A replica that holds a leaf but not its right neighbour paid a
+    /// round trip for that neighbour on every such scan. A commit looks up
+    /// its parent's revision record with one, and when the record was the
+    /// last entry of its leaf, the commit fetched the leaf after it for
+    /// nothing.
+    #[dialog_common::test]
+    async fn it_reads_nothing_past_a_range_that_ends_at_a_boundary() -> Result<()> {
+        use crate::NodeBody;
+        use crate::helpers::JournaledBlocks;
+        use futures_util::StreamExt;
+
+        // Values large enough that a few dozen fill a leaf, so the root
+        // routes to several subtrees.
+        let storage = JournaledBlocks::new();
+        storage.disable_journal();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty_in(crate::helpers::test_catalog());
+        let mut edit = tree.edit();
+        for index in 0..2000u32 {
+            edit = edit
+                .insert(index.to_be_bytes(), vec![1; 2048], &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        tree = edit.persist(&mut delta)?;
+        storage.flush(&mut delta);
+
+        // The last key below the root's second subtree, and that subtree.
+        let accessor =
+            Accessor::<[u8; 4], Vec<u8>, _>::new(&storage, &crate::helpers::test_catalog());
+        let root = accessor.get_node(tree.root()).await?;
+        let NodeBody::Index(index) = root.body() else {
+            anyhow::bail!("the root of 2000 entries of 2KiB is an index");
+        };
+        let links = index.links()?;
+        let Some(next) = links.get(1) else {
+            anyhow::bail!("the root of 2000 entries of 2KiB routes to more than one subtree");
+        };
+        // A separator may be shorter than a key: the first key at or above
+        // it is the separator padded with zeros.
+        let mut boundary = [0u8; 4];
+        let separator = next.separator.as_slice();
+        boundary[..separator.len()].copy_from_slice(separator);
+        let last = u32::from_be_bytes(boundary) - 1;
+        let beyond = next.node.clone();
+
+        storage.clear_journal();
+        storage.enable_journal();
+        let stream = tree.stream_range(last.to_be_bytes()..=last.to_be_bytes(), &storage);
+        futures_util::pin_mut!(stream);
+        let mut found = Vec::new();
+        while let Some(entry) = stream.next().await {
+            found.push(u32::from_be_bytes(entry?.key));
+        }
+
+        assert_eq!(found, vec![last]);
+        assert!(
+            !storage.get_reads().contains(&beyond),
+            "a scan ending at {last} read the subtree whose keys begin at \
+             {separator:?}"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_streams_empty_range() -> Result<()> {
         use futures_util::StreamExt;
