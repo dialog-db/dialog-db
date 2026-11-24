@@ -55,6 +55,14 @@ pub use part::*;
 pub(crate) mod varkey;
 pub use varkey::split_record_components;
 
+/// Whether the key `key` carries its value spilled: the value slot holds
+/// only an order-preserving prefix of the value's encoding, and the
+/// whole value's hash trails the key. `false` for a key that does not
+/// parse.
+pub fn key_value_is_spilled(key: &[u8]) -> bool {
+    varkey::value_is_spilled(key, key.first().copied().unwrap_or(u8::MIN))
+}
+
 /// Tag byte of the history index (the fourth index ordering): the region of
 /// the corpus holding per-instruction claim-lineage records (see
 /// [`history`]). Allocated below the blob index's tag `4`.

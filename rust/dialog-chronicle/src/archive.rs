@@ -36,7 +36,7 @@ mod served;
 mod slot;
 mod tree;
 
-use extent::Owned;
+use extent::{Claim, Extents, Owned};
 use index::{
     FrameHeader, Place, Snapshot, WHOLE, block_key, catalog_in, lineage_key, next, token_id,
 };
@@ -623,20 +623,12 @@ struct Turn<'a> {
 /// this process's own, and those whose owner is gone.
 struct Gathered {
     ours: Vec<Owned>,
-    abandoned: Vec<u64>,
+    abandoned: Vec<Claim>,
     records: Vec<u64>,
     /// Each record's epoch as it was read, to retire it only if the newest
     /// slot still lists it in that epoch.
     epochs: Vec<Option<u64>>,
     appends: Vec<(String, Vec<Buffer>)>,
-}
-
-/// The extents this process writes: those idle, free for a writer to take,
-/// and the records of those a writer has taken.
-#[derive(Default)]
-struct Extents {
-    idle: Vec<Owned>,
-    busy: HashSet<u64>,
 }
 
 /// What this process knows of the blocks extents hold, its own and other
@@ -2059,22 +2051,13 @@ impl Chronicle {
         else {
             return Ok(false);
         };
-        let extents = self.inner.extents.lock();
-        Ok(extents.busy.contains(&record)
-            || extents.idle.iter().any(|owned| owned.record == record))
+        Ok(self.inner.extents.lock().has(record))
     }
 
     /// An extent of this process's for a writer to append to: an idle one,
     /// else a new one claimed.
     fn take_extent(&self) -> io::Result<Owned> {
-        let taken = {
-            let mut extents = self.inner.extents.lock();
-            let taken = extents.idle.pop();
-            if let Some(owned) = &taken {
-                extents.busy.insert(owned.record);
-            }
-            taken
-        };
+        let taken = self.inner.extents.lock().take_idle();
         match taken {
             Some(owned) => Ok(owned),
             None => match self.adopt()? {
@@ -2091,52 +2074,43 @@ impl Chronicle {
     fn adopt(&self) -> io::Result<Option<Owned>> {
         let file = &self.inner.file;
         let snapshot = self.current();
-        let record = {
+        let claim = {
             let mut extents = self.inner.extents.lock();
             let mut found = None;
             for &record in &snapshot.slot.extents {
-                // A process's own locks never exclude its threads: the
-                // ones this process holds are told apart here.
-                if extents.busy.contains(&record)
-                    || extents.idle.iter().any(|owned| owned.record == record)
-                {
-                    continue;
-                }
-                if locks::lock(file, locks::owner(record), true, false)? {
-                    extents.busy.insert(record);
-                    found = Some(record);
+                // A process's own locks never exclude its threads: `own`
+                // passes over the ones this process has.
+                if let Some(claim) = extents.own(file, record)? {
+                    found = Some(claim);
                     break;
                 }
             }
             found
         };
-        let Some(record) = record else {
+        let Some(claim) = claim else {
             return Ok(None);
         };
         // An integration may have retired it since this process's snapshot
         // listed it. It let go of the extent's byte only after writing the
         // slot that says so, so the newest slot tells.
-        let listed = newest(file, false)
-            .map(|slot| slot.extents.contains(&record))
-            .and_then(|listed| {
-                if listed {
-                    Owned::of(snapshot.bytes(), record).map(Some)
-                } else {
-                    Ok(None)
-                }
-            });
-        if !matches!(listed, Ok(Some(_))) {
-            let _ = locks::unlock(file, locks::owner(record));
-            self.inner.extents.lock().busy.remove(&record);
+        let listed = newest(file, false).map(|slot| slot.extents.contains(&claim.record()));
+        let mut extents = self.inner.extents.lock();
+        match listed {
+            Ok(true) => extents.owned(file, snapshot.bytes(), claim).map(Some),
+            Ok(false) => {
+                let _ = extents.let_go(file, claim);
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = extents.let_go(file, claim);
+                Err(error)
+            }
         }
-        listed
     }
 
     /// Returns an extent a writer took, for the next to take.
     fn give_back(&self, owned: Owned) {
-        let mut extents = self.inner.extents.lock();
-        extents.busy.remove(&owned.record);
-        extents.idle.push(owned);
+        self.inner.extents.lock().give_back(owned);
     }
 
     /// Claims an extent for this process, waiting for the writer's turn:
@@ -2151,15 +2125,10 @@ impl Chronicle {
     /// holds the turn anyway, so a writer that later finds the turn taken
     /// writes at once instead of waiting to claim one.
     fn keep_spare(&self, turn: &Turn<'_>) -> io::Result<()> {
-        let has = {
-            let extents = self.inner.extents.lock();
-            !extents.idle.is_empty() || !extents.busy.is_empty()
-        };
+        let has = !self.inner.extents.lock().is_empty();
         if !has {
             let spare = self.claim_in_turn(turn)?;
-            let mut extents = self.inner.extents.lock();
-            extents.busy.remove(&spare.record);
-            extents.idle.push(spare);
+            self.inner.extents.lock().give_back(spare);
         }
         self.keep_lobby(turn)
     }
@@ -2172,16 +2141,13 @@ impl Chronicle {
         let snapshot = self.newest_in_turn(turn)?;
         let file = &self.inner.file;
         {
-            let extents = self.inner.extents.lock();
+            let mut extents = self.inner.extents.lock();
             for &record in &snapshot.slot.extents {
-                if extents.busy.contains(&record)
-                    || extents.idle.iter().any(|owned| owned.record == record)
-                    || extent::used(snapshot.bytes(), record) != Some(0)
-                {
+                if extent::used(snapshot.bytes(), record) != Some(0) {
                     continue;
                 }
-                if locks::lock(file, locks::owner(record), true, false)? {
-                    locks::unlock(file, locks::owner(record))?;
+                if let Some(claim) = extents.own(file, record)? {
+                    extents.let_go(file, claim)?;
                     return Ok(());
                 }
             }
@@ -2194,13 +2160,20 @@ impl Chronicle {
     /// lists one, else a new one. Its record.
     fn leave_extent(&self, turn: &Turn<'_>) -> io::Result<u64> {
         let snapshot = self.newest_in_turn(turn)?;
-        let record = match self.orphan(&snapshot)? {
-            Some(record) => record,
-            None => self.claim_in_turn(turn)?.record,
-        };
-        let unlocked = locks::unlock(&self.inner.file, locks::owner(record));
-        self.inner.extents.lock().busy.remove(&record);
-        unlocked.map(|()| record)
+        let file = &self.inner.file;
+        match self.orphan(&snapshot)? {
+            Some(claim) => {
+                let record = claim.record();
+                self.inner.extents.lock().let_go(file, claim)?;
+                Ok(record)
+            }
+            None => {
+                let owned = self.claim_in_turn(turn)?;
+                let record = owned.record;
+                self.inner.extents.lock().release(file, owned)?;
+                Ok(record)
+            }
+        }
     }
 
     /// Leaves an extent as this process opens the file, holding its left
@@ -2216,17 +2189,16 @@ impl Chronicle {
 
     /// An extent the file lists that a process which died left behind:
     /// empty, owned by none, and not left by a live process. Its owner's
-    /// byte is taken for this process, and the extent marked busy. A
-    /// process's own locks never exclude its threads, so the one this
-    /// process left is told apart here, not by its lock.
-    fn orphan(&self, snapshot: &Snapshot) -> io::Result<Option<u64>> {
+    /// byte is taken for this process, and the extent marked busy (see
+    /// [`Extents::own`]). A process's own locks never exclude its threads,
+    /// so the one this process left is told apart here, not by its lock.
+    fn orphan(&self, snapshot: &Snapshot) -> io::Result<Option<Claim>> {
         let file = &self.inner.file;
         let ours = *self.inner.left_extent.lock();
         let mut extents = self.inner.extents.lock();
         for &record in &snapshot.slot.extents {
             if Some(record) == ours
-                || extents.busy.contains(&record)
-                || extents.idle.iter().any(|owned| owned.record == record)
+                || extents.has(record)
                 || extent::used(snapshot.bytes(), record) != Some(0)
             {
                 continue;
@@ -2238,11 +2210,17 @@ impl Chronicle {
             if !locks::lock(file, locks::left(record), true, false)? {
                 continue;
             }
-            let owned = locks::lock(file, locks::owner(record), true, false)?;
-            locks::unlock(file, locks::left(record))?;
-            if owned {
-                extents.busy.insert(record);
-                return Ok(Some(record));
+            let claim = extents.own(file, record);
+            let unlocked = locks::unlock(file, locks::left(record));
+            let claim = claim?;
+            if let Err(error) = unlocked {
+                if let Some(claim) = claim {
+                    let _ = extents.let_go(file, claim);
+                }
+                return Err(error);
+            }
+            if claim.is_some() {
+                return Ok(claim);
             }
         }
         Ok(None)
@@ -2258,18 +2236,22 @@ impl Chronicle {
             return Ok(());
         };
         let _ = locks::unlock(file, locks::left(left));
-        let mine = snapshot.slot.extents.contains(&left)
+        // Passed over if a thread of this process adopted it to write.
+        let mine = if snapshot.slot.extents.contains(&left)
             && extent::used(snapshot.bytes(), left) == Some(0)
-            && locks::lock(file, locks::owner(left), true, false)?;
-        let record = if mine {
-            self.inner.extents.lock().busy.insert(left);
-            Some(left)
+        {
+            self.inner.extents.lock().own(file, left)?
         } else {
-            self.orphan(&snapshot)?
+            None
         };
-        let Some(record) = record else {
+        let claim = match mine {
+            Some(claim) => Some(claim),
+            None => self.orphan(&snapshot)?,
+        };
+        let Some(claim) = claim else {
             return Ok(());
         };
+        let record = claim.record();
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
         slot.extents.retain(|listed| *listed != record);
@@ -2278,8 +2260,7 @@ impl Chronicle {
         let written = slot
             .write(file)
             .and_then(|()| self::snapshot(file, slot, Some(&self.current())));
-        let _ = locks::unlock(file, locks::owner(record));
-        self.inner.extents.lock().busy.remove(&record);
+        let _ = self.inner.extents.lock().let_go(file, claim);
         self.publish(written?);
         Ok(())
     }
@@ -2290,72 +2271,71 @@ impl Chronicle {
     fn claim_in_turn(&self, turn: &Turn<'_>) -> io::Result<Owned> {
         let snapshot = self.newest_in_turn(turn)?;
         let file = &self.inner.file;
-        if let Some(record) = self.orphan(&snapshot)? {
-            let owned = Owned::of(snapshot.bytes(), record);
-            if owned.is_err() {
-                let _ = locks::unlock(file, locks::owner(record));
-                self.inner.extents.lock().busy.remove(&record);
-            }
-            return owned;
+        if let Some(claim) = self.orphan(&snapshot)? {
+            return self
+                .inner
+                .extents
+                .lock()
+                .owned(file, snapshot.bytes(), claim);
         }
         let mut slot = snapshot.slot.clone();
         slot.sequence += 1;
         // Owned before any slot lists it, so no process adopts it, and
         // marked busy before this process's snapshot lists it, so no thread
-        // of this one does. Only an adopter checking a stale listing can
-        // hold its byte now, and lets go at once. The byte is tried, never
-        // waited for: the turn's holder waiting on a lock could close a
-        // cycle of processes waiting on one another, which the system
-        // refuses (EDEADLK), whether real or only through a process's
-        // threads sharing its locks.
-        let take = |record: u64| -> io::Result<bool> {
-            self.inner.extents.lock().busy.insert(record);
-            let taken = locks::lock(file, locks::owner(record), true, false);
-            if !matches!(taken, Ok(true)) {
-                self.inner.extents.lock().busy.remove(&record);
-            }
-            taken
-        };
+        // of this one does. One a thread of this process has already is
+        // passed over, not taken (see [`Extents::own`]): a gather or an
+        // adopter that read a stale listing can hold a freed extent's
+        // byte. The byte is tried, never waited for: the turn's holder
+        // waiting on a lock could close a cycle of processes waiting on
+        // one another, which the system refuses (EDEADLK), whether real or
+        // only through a process's threads sharing its locks.
         let mut reused = None;
-        for at in (0..slot.extents_free.len()).rev() {
-            if take(slot.extents_free[at])? {
-                reused = Some(slot.extents_free.remove(at));
+        for record in slot.extents_free.iter().rev() {
+            if let Some(claim) = self.inner.extents.lock().own(file, *record)? {
+                reused = Some(claim);
                 break;
             }
         }
-        let (record, reused) = match reused {
-            Some(record) => (record, true),
+        if let Some(claim) = &reused {
+            slot.extents_free.retain(|free| *free != claim.record());
+        }
+        let (claim, reused) = match reused {
+            Some(claim) => (claim, true),
             None => {
                 let record = slot.end;
                 let mut tries = 0;
-                while !take(record)? {
+                let claim = loop {
+                    if let Some(claim) = self.inner.extents.lock().own(file, record)? {
+                        break claim;
+                    }
                     tries += 1;
                     if tries > 1000 {
                         return Err(invalid("a new extent's byte held by another process"));
                     }
                     std::thread::sleep(Duration::from_micros(100));
+                };
+                let written = extent::record(record, self.inner.options.extent, slot.sequence)
+                    .and_then(|(bytes, whole)| {
+                        write_at(file, record, &bytes)?;
+                        crate::file::grow(file, record + whole)?;
+                        Ok(whole)
+                    });
+                match written {
+                    Ok(whole) => slot.end += whole,
+                    Err(error) => {
+                        let _ = self.inner.extents.lock().let_go(file, claim);
+                        return Err(error);
+                    }
                 }
-                let (bytes, whole) =
-                    extent::record(record, self.inner.options.extent, slot.sequence)?;
-                let written = write_at(file, record, &bytes)
-                    .and_then(|()| crate::file::grow(file, record + whole));
-                if let Err(error) = written {
-                    let _ = locks::unlock(file, locks::owner(record));
-                    self.inner.extents.lock().busy.remove(&record);
-                    return Err(error);
-                }
-                slot.end += whole;
-                (record, false)
+                (claim, false)
             }
         };
-        slot.extents.push(record);
+        slot.extents.push(claim.record());
         slot.boot = boot();
         self.know(slot.end);
-        let owned = snapshot_after_claim(self, file, slot, reused, record);
+        let owned = snapshot_after_claim(self, file, slot, reused, claim);
         if owned.is_err() {
             let _ = crate::file::set_len(file, snapshot.slot.end);
-            let _ = locks::unlock(file, locks::owner(record));
-            self.inner.extents.lock().busy.remove(&record);
         }
         owned
     }
@@ -2464,34 +2444,27 @@ impl Chronicle {
         {
             let mut extents = self.inner.extents.lock();
             for &record in &snapshot.slot.extents {
-                if let Some(at) = extents.idle.iter().position(|owned| owned.record == record) {
-                    // An empty one stays ready for the next writer.
-                    if all || extents.idle[at].used > 0 {
-                        // Busy while folded: this process holds its byte,
-                        // so only this set keeps another of its threads
-                        // from taking it (see `adopt`).
-                        extents.busy.insert(record);
-                        ours.push(extents.idle.swap_remove(at));
-                    }
-                } else if !extents.busy.contains(&record)
+                // Busy while folded: this process holds its byte, so only
+                // its marks keep another of its threads from taking it. An
+                // empty one stays ready for the next writer.
+                if let Some(owned) = extents.take_idle_at(record, |owned| all || owned.used > 0) {
+                    ours.push(owned);
+                } else if !extents.has(record)
                     // An empty one is left listed, for a process with no
                     // extent to take without the turn, and its owner byte
                     // is not taken to look: a writer taking it then would
                     // find it held and wait for the turn instead.
                     && extent::used(snapshot.bytes(), record) != Some(0)
-                    && locks::lock(file, locks::owner(record), true, false)?
+                    && let Some(claim) = extents.own(file, record)?
                 {
                     // Read again under the byte, from the mapping, which
                     // shows what the file holds now: its count went back to
                     // nothing if another process claimed it again and died
                     // between the look above and the lock.
                     if extent::used(snapshot.bytes(), record) == Some(0) {
-                        locks::unlock(file, locks::owner(record))?;
+                        extents.let_go(file, claim)?;
                     } else {
-                        // Busy while folded, so no thread of this process
-                        // adopts it meanwhile.
-                        extents.busy.insert(record);
-                        abandoned.push(record);
+                        abandoned.push(claim);
                     }
                 }
             }
@@ -2499,7 +2472,7 @@ impl Chronicle {
         let records: Vec<u64> = ours
             .iter()
             .map(|owned| owned.record)
-            .chain(abandoned.iter().copied())
+            .chain(abandoned.iter().map(Claim::record))
             .collect();
         let epochs = ours
             .iter()
@@ -2507,7 +2480,7 @@ impl Chronicle {
             .chain(
                 abandoned
                     .iter()
-                    .map(|&record| extent::epoch(snapshot.bytes(), record)),
+                    .map(|claim| extent::epoch(snapshot.bytes(), claim.record())),
             )
             .collect();
         let mut gathered = Gathered {
@@ -2632,24 +2605,19 @@ impl Chronicle {
     fn release_fold(&self, gathered: Gathered, folded: bool) {
         let file = &self.inner.file;
         let Gathered {
-            ours,
-            abandoned,
-            records,
-            ..
+            ours, abandoned, ..
         } = gathered;
-        // Let go under the mutex, each byte before its busy mark: a thread
-        // of this process that took it between the two would have its own
-        // lock let go.
+        // Each lets go of its byte before its mark (see `Extents`).
         let mut extents = self.inner.extents.lock();
-        let let_go: Vec<u64> = if folded { records } else { abandoned };
-        for record in &let_go {
-            let _ = locks::unlock(file, locks::owner(*record));
+        for claim in abandoned {
+            let _ = extents.let_go(file, claim);
         }
-        for record in ours.iter().map(|owned| owned.record).chain(let_go) {
-            extents.busy.remove(&record);
-        }
-        if !folded {
-            extents.idle.extend(ours);
+        for owned in ours {
+            if folded {
+                let _ = extents.release(file, owned);
+            } else {
+                extents.give_back(owned);
+            }
         }
     }
 
@@ -2827,8 +2795,26 @@ impl Chronicle {
         let mut new = Vec::new();
         for id in first..first + draft.pending() as u32 {
             let token = draft.get(id).expect("a drafted token");
-            let hash = draft.hash(id).expect("a drafted token's hash");
-            match self.find_token(snapshot, hash, token) {
+            let held = if crate::node::is_packed(token) {
+                // A packed composite names its atoms by drafted ids where
+                // they were new: the file can hold it only if it holds
+                // every one of them by now, and then under their ids. Its
+                // atoms were drafted before it, so they are named already.
+                crate::node::renamed(token, |atom| {
+                    if atom < first {
+                        return Some(atom);
+                    }
+                    tokens
+                        .get((atom - first) as usize)
+                        .copied()
+                        .filter(|held| *held != 0)
+                })
+                .and_then(|named| self.find_token(snapshot, crate::hash::hash(&named), &named))
+            } else {
+                let hash = draft.hash(id).expect("a drafted token's hash");
+                self.find_token(snapshot, hash, token)
+            };
+            match held {
                 Some(held) => tokens.push(held),
                 None => {
                     tokens.push(0);
@@ -2842,8 +2828,9 @@ impl Chronicle {
         if !new.is_empty() {
             let body_offset = start + bytes.len() as u64 + HEADER;
             let (mut body, places) = draft.record(body_offset, &new);
-            // Composite token references use fixed-width IDs, so assigning
-            // file offsets cannot change token lengths or the places above.
+            // A packed composite names its atoms by fixed-width ids, so
+            // naming them by their places changes no token's length, and
+            // no place above.
             for (id, place) in new.iter().zip(&places) {
                 tokens[(*id - first) as usize] = token_id(*place)?;
             }
@@ -2864,15 +2851,15 @@ impl Chronicle {
                     .filter(|end| *end <= body.len())
                     .ok_or_else(|| invalid("a token ends early"))?;
                 let token = &mut body[at..end];
+                // Every drafted id has its name by now: the loop above gave
+                // each new one its place, and the one before named each held
+                // one. A packed token names only ids its own draft returned
+                // before it, so below `first + pending`: the index is in range.
                 crate::node::remap_composite_token(token, |id| {
                     if id < first {
-                        Ok(id)
+                        id
                     } else {
-                        tokens
-                            .get((id - first) as usize)
-                            .copied()
-                            .filter(|mapped| *mapped != 0)
-                            .ok_or_else(|| invalid("a composite token reference is unresolved"))
+                        tokens[(id - first) as usize]
                     }
                 })?;
                 let hash = crate::hash::hash(token);
@@ -3264,16 +3251,27 @@ fn snapshot_after_claim(
     file: &File,
     slot: Slot,
     reused: bool,
-    record: u64,
+    claim: Claim,
 ) -> io::Result<Owned> {
     // The slot's sequence is the extent's epoch, written with a new one's
     // record or over a reused one's.
     let epoch = slot.sequence;
-    slot.write(file)?;
-    archive.publish(snapshot(file, slot, Some(&archive.current()))?);
-    let mut owned = Owned::of(archive.current().bytes(), record)?;
-    if reused {
-        owned.clear(file, epoch)?;
+    let made = slot
+        .write(file)
+        .and_then(|()| snapshot(file, slot, Some(&archive.current())));
+    let mut extents = archive.inner.extents.lock();
+    let made = match made {
+        Ok(made) => made,
+        Err(error) => {
+            let _ = extents.let_go(file, claim);
+            return Err(error);
+        }
+    };
+    archive.publish(made);
+    let mut owned = extents.owned(file, archive.current().bytes(), claim)?;
+    if reused && let Err(error) = owned.clear(file, epoch) {
+        let _ = extents.release(file, owned);
+        return Err(error);
     }
     Ok(owned)
 }
@@ -3598,6 +3596,48 @@ impl Chronicle {
 }
 
 #[cfg(test)]
+impl Chronicle {
+    /// Every token the file holds, by its id, in the order the file holds
+    /// them: what tests count the dictionary by.
+    pub(crate) fn held_tokens(&self) -> io::Result<Vec<(u32, Vec<u8>)>> {
+        let snapshot = self.current();
+        let bytes = snapshot.bytes();
+        let mut tokens = Vec::new();
+        let mut at = DATA as usize;
+        while at < snapshot.slot.end as usize {
+            let (kind, body_at, end) =
+                record_in(bytes, at).ok_or_else(|| invalid("a record that is not whole"))?;
+            if kind == Kind::Tokens {
+                for start in crate::tokens::read_token_record(&bytes[body_at..end], body_at as u64)?
+                {
+                    let id = token_id(start)?;
+                    let token = snapshot.get(id).ok_or_else(|| invalid("a token"))?;
+                    tokens.push((id, token.to_vec()));
+                }
+            }
+            at = end;
+        }
+        Ok(tokens)
+    }
+
+    /// The bytes of every record the file holds, by kind, headers
+    /// included: what tests weigh a file by.
+    pub(crate) fn record_bytes(&self) -> io::Result<HashMap<String, u64>> {
+        let snapshot = self.current();
+        let bytes = snapshot.bytes();
+        let mut kinds = HashMap::new();
+        let mut at = DATA as usize;
+        while at < snapshot.slot.end as usize {
+            let (kind, _, end) =
+                record_in(bytes, at).ok_or_else(|| invalid("a record that is not whole"))?;
+            *kinds.entry(format!("{kind:?}")).or_default() += (end - at) as u64;
+            at = end;
+        }
+        Ok(kinds)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use dialog_capability::{Did, Subject};
@@ -3619,7 +3659,7 @@ mod tests {
         // for a process that has none.
         let extents = archive.current().slot.extents.clone();
         assert_eq!(extents.len(), 2, "a spare, and one for another process");
-        let extent = archive.inner.extents.lock().idle[0].record;
+        let extent = archive.inner.extents.lock().idle_records()[0];
         // Another handle on the file with its own snapshot and its own
         // read of the extents, as another process has (the concurrency
         // tests read from one).
@@ -4193,6 +4233,66 @@ mod tests {
             assert_eq!(
                 reopened.get("index", content.blake3_hash())?.as_deref(),
                 Some(content.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// An append prepared before another one lands names a packed
+    /// composite's new atoms by drafted ids. When the other append wrote
+    /// those atoms and the composite first, the packed token is the one the
+    /// file holds, under the atoms' places, and is not written again.
+    #[dialog_common::test]
+    fn it_reconciles_a_packed_composite_another_append_wrote_first() -> anyhow::Result<()> {
+        use crate::node::tests::segment_block;
+        use dialog_corpus::{Composite, Entity, EntityKey, Fact, Relation, Value};
+        use std::str::FromStr;
+
+        let manifest = Manifest::default();
+        let composite = Value::Composite(Composite::map([
+            (Value::String("x".into()), Value::String("new atom".into())),
+            (Value::String("y".into()), Value::String("another".into())),
+        ])?);
+        let segment = |name: &str| -> anyhow::Result<Buffer> {
+            let fact = Fact {
+                the: Relation::from_str("test/profile")?,
+                of: Entity::from_str(&format!("test:{name}"))?,
+                is: composite.clone(),
+                cause: None,
+            };
+            let key = EntityKey::from_fact(&fact, &manifest).0;
+            Ok(Buffer::from(segment_block(vec![key], &manifest)?))
+        };
+        let first = [segment("first")?];
+        let second = [segment("second")?];
+
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let prepared = archive
+            .prepare(archive.current(), "index", &first)?
+            .expect("blocks the file lacks");
+        archive.append("index", &second)?;
+        archive.flush(prepared, "index", &first)?;
+
+        let control = Chronicle::open(directory.path().join("control"))?;
+        control.append("index", &second)?;
+        control.append("index", &first)?;
+        assert_eq!(
+            archive.stats().tokens,
+            control.stats().tokens,
+            "no token written twice"
+        );
+        let packed = archive
+            .held_tokens()?
+            .into_iter()
+            .filter(|(_, token)| crate::node::is_packed(token))
+            .count();
+        assert_eq!(packed, 1, "the composite is packed once");
+        for block in first.iter().chain(&second) {
+            assert!(archive.is_frame("index", block.blake3_hash()));
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
             );
         }
         Ok(())

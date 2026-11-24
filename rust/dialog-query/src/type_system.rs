@@ -69,8 +69,8 @@ impl Display for Primitive {
                 ValueType::Entity,
                 ValueType::Symbol,
                 ValueType::Record,
-                ValueType::CompositeMap,
-                ValueType::CompositeList,
+                ValueType::Map,
+                ValueType::List,
             ];
             let mut first = true;
             for atom in ATOMS {
@@ -180,8 +180,8 @@ impl Primitive {
             // Position 9 is the `Nothing` atom. A composite is a map or a
             // list, as a number is one of three; a record is a member of
             // the map's, as a sized number type is of its storage type's.
-            ValueType::CompositeMap | ValueType::CompositeRecord => 1 << 10,
-            ValueType::CompositeList => 1 << 11,
+            ValueType::Map | ValueType::CompositeRecord => 1 << 10,
+            ValueType::List => 1 << 11,
             ValueType::Composite => (1 << 10) | (1 << 11),
             // Any number: all three number types.
             ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
@@ -287,8 +287,8 @@ fn value_type_for_bit(pos: u32) -> Option<ValueType> {
         7 => ValueType::Symbol,
         8 => ValueType::Record,
         // 9 is the `Nothing` atom, which no value type is.
-        10 => ValueType::CompositeMap,
-        11 => ValueType::CompositeList,
+        10 => ValueType::Map,
+        11 => ValueType::List,
         _ => return None,
     })
 }

@@ -55,8 +55,8 @@ const VARIANTS: [(&str, Option<ValueType>); 12] = [
     ("int", Some(ValueType::SignedInt)),
     ("float", Some(ValueType::Float)),
     ("record", Some(ValueType::Record)),
-    ("map", Some(ValueType::CompositeMap)),
-    ("list", Some(ValueType::CompositeList)),
+    ("map", Some(ValueType::Map)),
+    ("list", Some(ValueType::List)),
     ("symbol", Some(ValueType::Symbol)),
     ("option", None),
 ];

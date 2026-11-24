@@ -65,7 +65,7 @@ pub struct Equality {
 fn kind_of(side: &Pattern) -> Option<Kind> {
     match side {
         Pattern::Term(term) => term.kind(),
-        _ => Some(Kind::from(ValueType::CompositeMap).union(&Kind::from(ValueType::CompositeList))),
+        _ => Some(Kind::from(ValueType::Map).union(&Kind::from(ValueType::List))),
     }
 }
 
