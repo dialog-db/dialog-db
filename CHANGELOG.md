@@ -710,6 +710,9 @@ What this changes for you:
   `Conclusion::this_uri` (with a default) and
   `ConceptConclusion::this_uri` give the entity's URI as stored.
   `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- **`dialog-answer`**, a new crate with no dependencies: a query's answer
+  as a columnar binary frame whose values a session sends once, read in
+  place. Nothing uses it yet.
 - Nothing stored or synced changes.
 
 Why: copying values was most of a concept read's cost after the scan,
