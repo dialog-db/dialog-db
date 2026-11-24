@@ -585,6 +585,36 @@ mod tests {
         all
     }
 
+    /// A collecting read that is refused is named as its author wrote
+    /// it: no refusal says a variable the compiler made.
+    #[test]
+    fn it_names_a_refused_collecting_read_as_it_was_written() -> Result<(), Error> {
+        let concept =
+            "(concept (n ?n title: ?t) (xyz.n/title of: ?n is: ?t as: :text cardinality: :one))";
+        for read in [
+            "(nothing ?n block: (collect ?b))",
+            "(n ?n other: (collect ?b))",
+        ] {
+            let checked = check(
+                &mut Analyzer::new()?,
+                &format!(
+                    "{concept} (query (n/o ?n is: ?o) (n ?n title: ?t) {read} (is ?o {{:b ?b}}))"
+                ),
+            );
+            let messages: Vec<&str> = checked
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect();
+            assert_eq!(
+                messages,
+                vec![format!("nothing says what {read} is")],
+                "{read}"
+            );
+        }
+        Ok(())
+    }
+
     /// A document means the same in every order of its forms: what it
     /// declares, what each form compiles to, or that it is refused and
     /// why. A name a macro's expansion declares beside a concept of the

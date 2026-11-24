@@ -126,6 +126,32 @@ pub mod value {
     pub use crate::data::items as list;
 }
 
+impl Error {
+    /// The same error with every text it says passed through `say`: what
+    /// puts a form the compiler rewrote back as its author wrote it.
+    pub(crate) fn said(self, say: &dyn Fn(&str) -> String) -> Error {
+        match self {
+            Error::Read(a) => Error::Read(say(&a)),
+            Error::Unknown(a) => Error::Unknown(say(&a)),
+            Error::Ambiguous(a, b) => Error::Ambiguous(say(&a), say(&b)),
+            Error::Refused(a) => Error::Refused(say(&a)),
+            Error::Unsupported(a) => Error::Unsupported(say(&a)),
+            Error::Reserved(a) => Error::Reserved(say(&a)),
+            Error::Clash(a, b, c) => Error::Clash(say(&a), say(&b), say(&c)),
+            Error::Unsafe(a) => Error::Unsafe(say(&a)),
+            Error::Twice(a, b, c) => Error::Twice(say(&a), say(&b), say(&c)),
+            Error::Cycle(a, through) => {
+                Error::Cycle(say(&a), through.iter().map(|part| say(part)).collect())
+            }
+            Error::Endless(endless) => Error::Endless(Box::new(Endless {
+                form: say(&endless.form),
+                past: say(&endless.past),
+                through: endless.through.iter().map(|part| say(part)).collect(),
+            })),
+        }
+    }
+}
+
 /// A form whose expansion does not end, as the expander refused it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endless {

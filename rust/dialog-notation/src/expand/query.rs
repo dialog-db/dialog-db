@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::Error;
 use crate::form::Kind;
 use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
-use crate::syntax::{Parameters, Syntax};
+use crate::syntax::{Parameters, Signature, Syntax};
 
 use super::{Expander, apply, items};
 
@@ -500,24 +500,26 @@ impl Expander {
     /// field of it and no other.
     fn events(&self, node: &crate::view::Node) -> Result<(), Error> {
         for event in crate::view::events(node) {
-            if !self.commands.contains_key(&event.command) {
+            let commands: Vec<&Signature> = self
+                .commands
+                .keys()
+                .filter(|signature| signature.name == event.command)
+                .collect();
+            if commands.is_empty() {
                 return Err(Error::Refused(format!(
                     ":on/{} posts {}, which is no command declared",
                     event.kind, event.command
                 )));
             }
-            let declared = self.syntax.iter().find_map(|rule| {
-                rule.signature
-                    .as_ref()
-                    .filter(|signature| signature.name == event.command)
-            });
             let given: BTreeSet<String> = event
                 .fields
                 .iter()
                 .map(|(label, _)| label.clone())
                 .collect();
-            if let Some(declared) = declared
-                && declared.parameters != given
+            // The command of that name whose fields the event gives, of
+            // however many there are.
+            if !commands.iter().any(|declared| declared.parameters == given)
+                && let Some(declared) = commands.first()
             {
                 return Err(Error::Refused(format!(
                     ":on/{} posts {} with {}: an event gives every field of its command and no \
@@ -676,7 +678,25 @@ impl Expander {
                     .is_some_and(entry)
             } else {
                 match (&collect.place, collect.condition.applies()) {
-                    (Place::Term(label), Some(concept)) => self.entries.get(concept) == Some(label),
+                    (Place::Term(label), Some(concept)) => {
+                        let labels: BTreeSet<String> = collect
+                            .condition
+                            .operand()
+                            .map(|operand| operand.terms.keys().cloned().collect())
+                            .unwrap_or_default();
+                        // A read through several concepts is read
+                        // through each, so they agree on whether the
+                        // field is an entry, or the read is refused.
+                        let fitting = self.fitting(concept, &labels);
+                        let mut keyed = fitting
+                            .iter()
+                            .map(|signature| self.entries.get(*signature) == Some(label));
+                        let first = keyed.next().unwrap_or(false);
+                        if keyed.any(|other| other != first) {
+                            return Err(Self::ambiguous(collect.condition.to_string(), &fitting));
+                        }
+                        first
+                    }
                     _ => false,
                 }
             };
@@ -698,9 +718,21 @@ impl Expander {
                     shared.into_iter().map(Syntax::Variable).collect(),
                 )));
                 columns.extend(variables([&item]));
-                let rules = self.about(&collect.condition, |this| {
-                    this.reported(&columns, std::slice::from_ref(&condition))
-                })?;
+                // A refusal says the read as its author wrote it, never
+                // the variable the compiler put where it collects.
+                let rewritten = condition.to_string();
+                let made = item.to_string();
+                let written = collect.condition.to_string();
+                let term = at(&collect.condition, &collect.place)
+                    .map(|term| term.to_string())
+                    .unwrap_or_default();
+                let rules = self
+                    .about(&collect.condition, |this| {
+                        this.reported(&columns, std::slice::from_ref(&condition))
+                    })
+                    .map_err(|error| {
+                        error.said(&|text| text.replace(&rewritten, &written).replace(&made, &term))
+                    })?;
                 let mut rows = vec![Syntax::Tuple(
                     columns.iter().cloned().map(Syntax::Variable).collect(),
                 )];
@@ -743,23 +775,35 @@ impl Expander {
             Some(entity @ (Syntax::Variable(_) | Syntax::Constant(_))) => entity.clone(),
             _ => Syntax::Variable(crate::view::CALLED.into()),
         };
-        let fields: Vec<String> = self
-            .syntax
-            .iter()
-            .find_map(|rule| {
-                rule.signature
-                    .as_ref()
-                    .filter(|signature| signature.name == concept)
-            })
+        // The concept the call's labels fit, `is:` aside, which is the
+        // query's own.
+        let labels: BTreeSet<String> = operand
+            .terms
+            .keys()
+            .filter(|label| *label != "is")
+            .cloned()
+            .collect();
+        // A view's source is one concept: two the call fits are refused.
+        let declared = match self.fitting(&concept, &labels).as_slice() {
+            [] => None,
+            [one] => Some((*one).clone()),
+            several => return Err(Self::ambiguous(collect.condition.to_string(), several)),
+        };
+        let fields: Vec<String> = declared
+            .as_ref()
             .map(|signature| signature.parameters.iter().cloned().collect())
             .unwrap_or_default();
+        let entry = declared
+            .as_ref()
+            .and_then(|signature| self.entries.get(signature))
+            .cloned();
         let mut terms = BTreeMap::new();
         for label in &fields {
             let term = match operand.terms.get(label) {
                 Some(term) if label != "is" => term.clone(),
                 _ => {
                     let value = Syntax::Variable(format!("[source-{label}]"));
-                    if self.entries.get(&concept) == Some(label) {
+                    if entry.as_ref() == Some(label) {
                         Syntax::Map(vec![(Syntax::Variable("[source-key]".into()), value)])
                     } else {
                         value

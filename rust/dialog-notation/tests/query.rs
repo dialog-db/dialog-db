@@ -261,6 +261,26 @@ async fn it_finds_the_concept_of_one_name_its_labels_fit_in_any_order() -> Resul
         );
     }
     assert_eq!(answers[0], answers[1]);
+    // A use that fits two concepts is read through each, so where one
+    // has the field as an entry and the other as a value it is refused,
+    // naming both, and no variable the compiler made.
+    let mut notebook = Notebook::open().await?;
+    let ambiguous = notebook
+        .submit(&format!(
+            "{entries}
+             (concept (notebook/blocks ?n block: ?x note: ?y)
+               (xyz.tonk.notebook/block of: ?n is: ?x as: :text cardinality: :many)
+               (xyz.tonk.notebook/note of: ?n is: ?y as: :text cardinality: :one))
+             {query}"
+        ))
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&ambiguous, Err(Ok(Error::Ambiguous(form, both)))
+            if form.contains("(collect ?blocks)") && !form.contains("?[")
+                && both.contains("block: note:")),
+        "{ambiguous:?}"
+    );
     assert_eq!(
         answers[0],
         vec![r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a}})"#]

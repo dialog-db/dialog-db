@@ -989,16 +989,18 @@ pub struct Expander {
     /// The names of the concepts declared. A name declared wins over
     /// reading it as an attribute: `todo/add`.
     concepts: BTreeSet<String>,
-    /// The commands declared, each the domain its claims are in.
-    commands: BTreeMap<String, String>,
+    /// The commands declared, each by its signature, with the domain
+    /// its claims are in. Two concepts of one name and other labels are
+    /// two signatures, so neither displaces the other.
+    commands: BTreeMap<Signature, String>,
     /// How many rules about syntax have been kept, ever: what tells a
     /// pass over a document that it declared something.
     declared: usize,
     /// The queries defined, each as it was written, by name.
     queries: BTreeMap<String, Syntax>,
-    /// The concepts that hold a collection, each with the label of the
-    /// field that is one entry of it, `block: {?k ?b}`.
-    entries: BTreeMap<String, String>,
+    /// The concepts that hold a collection, each by its signature, with
+    /// the label of the field that is one entry of it, `block: {?k ?b}`.
+    entries: BTreeMap<Signature, String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -1047,6 +1049,51 @@ pub struct Expander {
 }
 
 impl Expander {
+    /// The concepts declared under `name` that a use written with
+    /// `labels` fits: each has every label written. Two concepts of one
+    /// name and other labels are told apart by what a use writes, never
+    /// by the order they were declared in.
+    fn fitting(&self, name: &str, labels: &BTreeSet<String>) -> Vec<&Signature> {
+        let written = Signature {
+            name: name.to_string(),
+            subject: "concept".into(),
+            parameters: labels.clone(),
+        };
+        let mut found: Vec<&Signature> = self
+            .syntax
+            .iter()
+            .filter_map(|rule| rule.signature.as_ref())
+            .filter(|signature| signature.takes(&written))
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// The concepts under `name` a use written with `labels` fits, each
+    /// as `said` to name them in a refusal.
+    fn ambiguous(said: String, fitting: &[&Signature]) -> Error {
+        Error::Ambiguous(
+            said,
+            fitting
+                .iter()
+                .map(|signature| {
+                    format!(
+                        "({} {})",
+                        signature.name,
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|label| format!("{label}:"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | "),
+        )
+    }
+
     /// A walker that knows the core forms.
     pub fn new() -> Result<Self, Error> {
         let mut expander = Expander::default();
@@ -1376,8 +1423,8 @@ impl Expander {
                 })
             });
             match entry {
-                Some(label) => self.entries.insert(declared.name.clone(), label),
-                None => self.entries.remove(&declared.name),
+                Some(label) => self.entries.insert(declared.clone(), label),
+                None => self.entries.remove(declared),
             };
             self.syntax.retain(|rule| {
                 rule.signature.as_ref() != Some(declared)
@@ -1387,12 +1434,12 @@ impl Expander {
             match &answer {
                 Answer::Syntax(template) if items(&pattern).is_empty() && on_control(template) => {
                     self.commands.insert(
-                        declared.name.clone(),
+                        declared.clone(),
                         template.applies().unwrap_or_default().to_string(),
                     );
                 }
                 _ => {
-                    self.commands.remove(&declared.name);
+                    self.commands.remove(declared);
                 }
             }
         }
@@ -1403,9 +1450,7 @@ impl Expander {
         // Only a premise: an entity is derived when a command is
         // asserted, and never given.
         let read = match (&signature, &answer) {
-            (Some(declared), Answer::Syntax(template))
-                if self.commands.contains_key(&declared.name) =>
-            {
+            (Some(declared), Answer::Syntax(template)) if self.commands.contains_key(declared) => {
                 match (items(template).first(), &pattern) {
                     (Some(own @ Syntax::Variable(_)), Syntax::Application(operator, operand)) => {
                         Some(Definition {
@@ -1634,7 +1679,22 @@ impl Expander {
         };
         match (operator.keyword(), &**operator) {
             // A command declared, and the domain its claims are in.
-            (Some("command"), _) => is(self.commands.get(&name(subject?)?)?.clone()),
+            // A name that is a command under one domain: two commands of
+            // one name in two domains say no one domain, and are no
+            // command here.
+            (Some("command"), _) => {
+                let name = name(subject?)?;
+                let domains: BTreeSet<&String> = self
+                    .commands
+                    .iter()
+                    .filter(|(signature, _)| signature.name == name)
+                    .map(|(_, domain)| domain)
+                    .collect();
+                match domains.len() {
+                    1 => is(domains.into_iter().next()?.clone()),
+                    _ => None,
+                }
+            }
             (Some("domain"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
             }
