@@ -2027,6 +2027,9 @@ mod oracle {
 mod subject_tests;
 
 #[cfg(test)]
+mod self_feeding_tests;
+
+#[cfg(test)]
 mod retract_assert_tests;
 
 #[cfg(test)]
