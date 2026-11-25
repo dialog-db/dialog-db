@@ -1327,6 +1327,15 @@ mod tests {
             ("dialog.n.c/a.b/f", Named::Reserved),
             ("list:home", Named::Entity),
             ("<=", Named::Operator),
+            ("/", Named::Operator),
+            ("", Named::Malformed),
+            ("a/", Named::Malformed),
+            ("/a", Named::Malformed),
+            ("a//b", Named::Malformed),
+            ("a b", Named::Malformed),
+            ("?x", Named::Malformed),
+            ("a.b/c/d", Named::Malformed),
+            ("a.b/", Named::Malformed),
         ] {
             assert_eq!(named(name), kind, "{name}");
         }

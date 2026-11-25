@@ -1981,6 +1981,97 @@ async fn it_names_a_derived_attribute_under_the_concept_before_its_last_slash() 
     Ok(())
 }
 
+/// A name the notation writes itself is refused as `Reserved` at every
+/// public way in, read into a tree, checked whole or form by form, and
+/// said as the document wrote it.
+#[dialog_common::test]
+async fn it_refuses_a_name_the_notation_writes_at_every_way_in() -> Result<()> {
+    use dialog_notation::{Analyzer, Syntax, check, check_forms, read};
+    for name in [
+        "dialog.n.c/list/label",
+        "dialog.n.select",
+        "dialog.n.c.abcdefghijklmnopqrstuvwxyz",
+    ] {
+        let text = format!("(select ({name} ?l is: ?n))");
+        for form in read(&text)? {
+            assert!(
+                matches!(Syntax::try_from(&form), Err(Error::Reserved(said)) if said == name),
+                "{text}"
+            );
+        }
+        for checked in [
+            check(&mut Analyzer::new()?, &text),
+            check_forms(&mut Analyzer::new()?, &text),
+        ] {
+            let refused: Vec<_> = checked.refusals().collect();
+            assert!(
+                refused.iter().any(|refused| refused.message.contains(name)
+                    && matches!(&refused.refusal, Some(Error::Reserved(said)) if said == name)),
+                "{text}: {refused:?}"
+            );
+            assert!(checked.steps.is_empty(), "{text}");
+        }
+    }
+    Ok(())
+}
+
+/// A line, an elector's line and a call at the top level name an
+/// attribute of a domain: one that names none, an undeclared `memo/note`,
+/// a reserved `dialog.n.c/a/b` or a malformed `a.b/c/d`, is refused
+/// naming it as written, and none is read as a stored attribute.
+#[dialog_common::test]
+async fn it_refuses_a_line_that_names_no_attribute_of_a_domain() -> Result<()> {
+    for name in ["memo/note", "dialog.n.c/a/b", "a.b/c/d"] {
+        for text in [
+            format!("(concept (m ?t v: ?x) ({name} of: ?t is: ?x as: :text cardinality: :one))"),
+            format!(
+                "(concept (m ?t v: (min ?x)) ({name} of: ?t is: ?x as: [:a :b] cardinality: :many))"
+            ),
+            format!(
+                "(concept (m ?t v: ?x) ({name} of: ?t is: (min ?x) as: [:a :b] cardinality: :many))"
+            ),
+            format!("({name} x:1 \"a\")"),
+            format!("(select ({name} ?t ?x))"),
+        ] {
+            let mut notebook = Notebook::open().await?;
+            let said = match notebook.submitted(&text).await {
+                Err(error) => format!("{error:#}"),
+                Ok(done) => panic!("{text} was not refused: {done:?}"),
+            };
+            assert!(said.contains(name), "{text}: {said}");
+        }
+    }
+    Ok(())
+}
+
+/// A name is a name: empty, ending or beginning with a `/`, with two
+/// `/` together, with space in it or a variable's `?`, it declares no
+/// concept, query, command or derived attribute, and is refused naming
+/// it.
+#[dialog_common::test]
+async fn it_declares_nothing_under_a_name_that_is_no_name() -> Result<()> {
+    let line = "(xyz.a/v of: ?t is: ?x as: :text cardinality: :one)";
+    for name in ["a/", "/a", "a//b", "a/b/"] {
+        for text in [
+            format!("(concept ({name} ?t v: ?x) {line})"),
+            format!("(query ({name} ?t is: ?x) (xyz.a ?t v: ?x))"),
+            format!(
+                "(concept ({name} subject: ?x)
+                   (xyz.go/subject of: ?c is: ?x as: :entity in: :control cardinality: :many))"
+            ),
+            format!("(concept (a ?t v: ?x) {line}) (rule ({name} ?t ?x) (a ?t v: ?x))"),
+        ] {
+            let mut notebook = Notebook::open().await?;
+            let said = match notebook.submitted(&text).await {
+                Err(error) => format!("{error:#}"),
+                Ok(done) => panic!("{text} was not refused: {done:?}"),
+            };
+            assert!(said.contains(name), "{text}: {said}");
+        }
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
