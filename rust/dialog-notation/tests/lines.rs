@@ -223,6 +223,14 @@ fn it_refuses_a_wrapper_a_document_writes_naming_the_line() -> Result<()> {
             "(xyz.go/n of: ?c is: ?n cardinality: :many in: :control)",
         ),
         (
+            "(select (xyz.todo ?t state: (:one (:among (:entity ?s) cases: [:open :done]))))",
+            "(xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one)",
+        ),
+        (
+            "(select (xyz.todo ?t state: (:among ?s cases: [:open :done])))",
+            "(xyz.todo/state of: ?t is: ?s as: [:open :done])",
+        ),
+        (
             "(select (xyz.n/v of: ?x is: (:integer ?v)))",
             "(xyz.n/v of: ?x is: ?v as: :integer)",
         ),
