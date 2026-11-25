@@ -27,12 +27,29 @@ pub struct ObserveRemoteBranch<'a> {
     edition: RemoteEdition,
 }
 
-/// What observing a head did.
+/// What observing a head did to the head recorded for the remote branch.
+///
+/// An observation says what is recorded, never what a local branch has
+/// taken: recording a head merges nothing into any branch. A watcher
+/// therefore syncs its branch after [`Advanced`](Self::Advanced) and
+/// [`Stale`](Self::Stale) alike, and fetches after
+/// [`Diverged`](Self::Diverged), as [`Replicate`](crate::Replicate) does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {
-    /// The head is ahead of the one known, and is now the one known.
+    /// The head is ahead of the one recorded, and is now the one recorded.
     Advanced(Revision),
-    /// The head is the one known or an earlier one, and was ignored.
+    /// The head is the one recorded or an earlier one, and was not
+    /// recorded again.
+    ///
+    /// Recorded is not taken. Another handle of the remote branch may
+    /// have recorded the head first and merged nothing: a push the remote
+    /// refused because it had moved records where the remote stands, then
+    /// fails with [`PushError::NonFastForward`](crate::PushError::NonFastForward).
+    /// A watcher that drops a stale head can leave its branch behind a
+    /// head that nothing pulls. Pull assuming the upstream instead
+    /// ([`Pull::assuming_upstream`](crate::Pull::assuming_upstream)),
+    /// which asks the remote for nothing and takes nothing when the
+    /// branch already holds the head.
     Stale,
     /// Neither the head nor the one known built on the other, so which is
     /// newer is not known. Nothing was recorded; fetch to learn where the

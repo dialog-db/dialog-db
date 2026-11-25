@@ -622,7 +622,7 @@ async fn a_typed_read_reads_a_formula_output_a_rule_concludes_as_a_stored_one() 
 /// the engine answers with a selecting rule that folds them, reads
 /// through the field's type as over a stored relation. Each entity
 /// holds one value here: what a pick elects among several of them is
-/// [`known_divergence_how_a_typed_read_elects_among_values_of_several_types`].
+/// [`a_typed_read_elects_among_the_values_its_type_reads`].
 #[dialog_common::test]
 async fn a_typed_pick_reads_a_deduced_relation_as_a_stored_one() -> anyhow::Result<()> {
     let (statements, entities) = twinned(
@@ -809,39 +809,33 @@ async fn a_read_bound_to_a_constant_its_type_does_not_read_answers_nothing_store
     Ok(())
 }
 
-/// A known divergence, pinned as it is today: how a typed read elects
-/// among the values of one cell when they are of several types. One
-/// entity holds four values, written under cardinality many one commit
-/// each, stored and deduced alike, in one of two orders:
+/// How a typed read elects among the values of one cell when they are
+/// of several types. A value of another type under the same attribute
+/// belongs to another relation: it takes no part in what a typed read
+/// answers, in its cardinality-one election, or in its pick. One entity
+/// holds four values, written under cardinality many one commit each,
+/// stored and deduced alike, in one of two orders:
 ///
 /// - A: `hello`, `3`, `-3`, `2.5` (the newest is `2.5`)
 /// - B: `3`, `-3`, `2.5`, `hello` (the newest is `hello`)
 ///
-/// | read                     | A stored | A deduced | B stored | B deduced |
-/// |--------------------------|----------|-----------|----------|-----------|
-/// | `natural:`, `pick: max`  | 3        | 3         | 3        | 3         |
-/// | `float:`, `pick: max`    | 3.0      | 3.0       | 3.0      | 3.0       |
-/// | `natural:`, no pick      | 2        | 2         | nothing  | 2         |
-/// | `text:`, `pick: last`    | nothing  | hello     | hello    | hello     |
+/// A stored read answers what a deduced one does, in either order:
 ///
-/// A pick orders numbers by value on both sides, so `max` agrees. Two
-/// differences remain, and their answers flip named assertions:
+/// | read                     | answers |
+/// |--------------------------|---------|
+/// | `natural:`, `pick: max`  | 3       |
+/// | `natural:`, `pick: min`  | 2       |
+/// | `integer:`, `pick: min`  | -3      |
+/// | `float:`, `pick: max`    | 3.0     |
+/// | `natural:`, no pick      | 2       |
+/// | `text:`, `pick: last`    | hello   |
 ///
-/// - A plain cardinality-one read: the stored read elects the newest
-///   value of all and then reads it through the type (B answers
-///   nothing); the deduced read reads every value through the type and
-///   elects the newest of those, as a read through a typed variable
-///   does (B answers `2`).
-/// - A pick: the stored read picks among every value of the cell as it
-///   is stored and then reads the one it picked through the type, so a
-///   value the type does not read can win and leave nothing (`last` in
-///   A picks `2.5`, which `text:` does not read); the deduced read
-///   picks among the values the type reads (`last` answers `hello`).
+/// A plain read answers the newest value its type reads, and a pick
+/// picks among the values its type reads, as the type reads them.
 #[dialog_common::test]
-async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types()
--> anyhow::Result<()> {
-    let nothing = None;
+async fn a_typed_read_elects_among_the_values_its_type_reads() -> anyhow::Result<()> {
     let natural = |n: u128| Some(Value::UnsignedInt(n));
+    let integer = |n: i128| Some(Value::SignedInt(n));
     let float = |n: f64| Some(Value::Float(n));
     let hello = Some(text("hello"));
     // The read, then what each of A stored, A deduced, B stored and B
@@ -852,18 +846,27 @@ async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types(
             [natural(3), natural(3), natural(3), natural(3)],
         ),
         (
+            ("natural:", Some("min")),
+            [natural(2), natural(2), natural(2), natural(2)],
+        ),
+        (
+            ("integer:", Some("min")),
+            [integer(-3), integer(-3), integer(-3), integer(-3)],
+        ),
+        (
             ("float:", Some("max")),
             [float(3.0), float(3.0), float(3.0), float(3.0)],
         ),
         (
             ("natural:", None),
-            [natural(2), natural(2), nothing.clone(), natural(2)],
+            [natural(2), natural(2), natural(2), natural(2)],
         ),
         (
             ("text:", Some("last")),
-            [nothing, hello.clone(), hello.clone(), hello],
+            [hello.clone(), hello.clone(), hello.clone(), hello],
         ),
     ];
+    let mut wrong = Vec::new();
     let orders = [
         (
             "A",
@@ -920,20 +923,25 @@ async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types(
                     .iter()
                     .map(|value| row(&of, value))
                     .collect();
-                assert_eq!(
-                    answers(
-                        &source,
-                        concept(field)?,
-                        Term::var("who"),
-                        Term::var("value")
-                    )
-                    .await?,
-                    expected,
-                    "order {order}, {side}, {declared} pick {pick:?}"
-                );
+                let got = answers(
+                    &source,
+                    concept(field)?,
+                    Term::var("who"),
+                    Term::var("value"),
+                )
+                .await?;
+                if got != expected {
+                    wrong.push(format!(
+                        "order {order}, {side}, {declared} pick {pick:?}: expected {expected:?}, got {got:?}"
+                    ));
+                }
             }
         }
     }
+    assert!(
+        wrong.is_empty(),
+        "reads that elect outside their type: {wrong:#?}"
+    );
     Ok(())
 }
 
