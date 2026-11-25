@@ -17,7 +17,7 @@ use dialog_query::concept::query::ConceptQuery;
 use dialog_query::query::Output as _;
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
-    AttributeStatement, Cardinality, DeductiveRule, Parameters, Relation, Term, TypeError, the,
+    AttributeStatement, Cardinality, DeductiveRule, Parameters, Relation, Term, TypeError,
 };
 use futures_util::TryStreamExt as _;
 use serde_json::{Value as Json, json};
