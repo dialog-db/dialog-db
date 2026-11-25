@@ -113,6 +113,11 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// A rule whose head declares a type its body does not bind, pinned as
+/// tests.
+#[cfg(test)]
+mod head_type_tests;
+
 /// Scans binding rows in place against binding them eagerly, pinned as
 /// tests.
 #[cfg(test)]
