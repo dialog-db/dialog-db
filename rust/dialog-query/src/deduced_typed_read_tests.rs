@@ -9,19 +9,23 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use crate::attribute::AttributeStatement;
+use crate::attribute::{AttributeStatement, Relation};
 use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
 use crate::the;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{ConceptDescriptor, ConceptQuery, Entity, Match, Parameters, Term, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_storage::provider::storage::VolatileSpace;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
+
+/// An attribute, the entity it is of, and the value it holds.
+type Statement = (Relation, Entity, Value);
 
 fn text(text: &str) -> Value {
     Value::String(text.into())
@@ -478,7 +482,7 @@ async fn differences(
                 .iter()
                 .next()
                 .and_then(|(_, field)| field.content_type())
-                .map(crate::type_system::Type::from);
+                .map(Kind::from);
             for (how, this, value) in &terms {
                 let unread = match (value, &kind) {
                     (Term::Constant(constant), Some(kind)) => !kind.reads(constant),
@@ -508,7 +512,7 @@ async fn differences(
 /// checked by [`differences`] over `entities`.
 async fn case(
     case: &str,
-    statements: Vec<(crate::attribute::Relation, Entity, Value)>,
+    statements: Vec<Statement>,
     rules: Vec<serde_json::Value>,
     entities: &[Entity],
 ) -> anyhow::Result<Vec<String>> {
@@ -542,12 +546,9 @@ fn var(name: &str) -> serde_json::Value {
 /// The entity, attribute and value of each of `values`, each under
 /// `twin/stored` and `from` of an entity of its own. The entities.
 fn twinned(
-    from: crate::attribute::Relation,
+    from: Relation,
     values: Vec<(Value, Value)>,
-) -> anyhow::Result<(
-    Vec<(crate::attribute::Relation, Entity, Value)>,
-    Vec<Entity>,
-)> {
+) -> anyhow::Result<(Vec<Statement>, Vec<Entity>)> {
     let mut statements = Vec::new();
     let mut entities = Vec::new();
     for (source, concluded) in values {
@@ -673,7 +674,7 @@ async fn a_typed_pick_reads_a_deduced_relation_as_a_stored_one() -> anyhow::Resu
 async fn commit(
     branch: &dialog_repository::Branch,
     operator: &Operator,
-    statements: Vec<(crate::attribute::Relation, Entity, Value)>,
+    statements: Vec<Statement>,
 ) -> anyhow::Result<()> {
     let mut transaction = branch.transaction();
     for (the, of, is) in statements {
