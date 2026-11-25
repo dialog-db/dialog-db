@@ -1575,6 +1575,14 @@ impl Expander {
         }
         if let Some((part, label)) = slashed(tree) {
             let part = part.clone();
+            // A field of the notation's record of descriptions is the
+            // notation's to write, as `compile` says of it.
+            if label
+                .split_once('/')
+                .is_some_and(|(domain, _)| domain == crate::compile::DESCRIBED)
+            {
+                return self.about(&part, |_| Err(Error::Reserved(label)));
+            }
             let (domain, field) = label.rsplit_once('/').unwrap_or((&label, ""));
             let message = format!(
                 "{part} has the label `{label}:`, which names an attribute of another domain: a \
