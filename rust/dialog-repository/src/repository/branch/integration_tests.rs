@@ -65,9 +65,9 @@ use dialog_effects::{
     Rejection,
     blob::{BlobWriter, Import as BlobImportEffect},
 };
-use dialog_peer::Peer;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_peer::helpers::test_owned;
+use dialog_peer::{Peer, PeerSpace};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -2367,14 +2367,14 @@ fn residents(batch: usize) -> Vec<Instruction> {
 /// A device that authored a subject and published it, and a second device
 /// that adopted its head and holds none of its tree: the two ends of the
 /// tests of what a replica holds once it adopts a head another moved.
-struct Followed {
+struct Followed<S: PeerSpace = VolatileSpace> {
     /// The authoring device's branch, and what it performs through.
     alice: Branch,
-    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    operator: Peer<S, dialog_peer::Session>,
     /// The following device's branch, and the counting env it performs
     /// through.
     bob: Branch,
-    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+    env: Counting<Peer<S, dialog_peer::Session>>,
 }
 
 /// [`Followed`] over `s3`: four batches of residents published, and
@@ -2433,13 +2433,13 @@ enum Follower<'a> {
 /// The author's `repository` published over `s3` with four batches of
 /// residents, and the `follower`'s replica of it, which adopted that head
 /// and read none of it.
-async fn following(
-    operator: Peer<VolatileSpace, dialog_peer::Session>,
-    profile: Peer<VolatileSpace>,
+async fn following<S: PeerSpace>(
+    operator: Peer<S, dialog_peer::Session>,
+    profile: Peer<S>,
     alice_repo: Repository<SignerCredential>,
     s3: &S3Address,
     follower: Follower<'_>,
-) -> Result<Followed> {
+) -> Result<Followed<S>> {
     let site = s3_site_address(s3);
     profile
         .secrets()
@@ -2490,7 +2490,7 @@ async fn following(
     })
 }
 
-impl Followed {
+impl<S: PeerSpace> Followed<S> {
     /// The names the follower reads of `entity`, and how many blocks it
     /// fetched from the remote to read them.
     async fn names_of(&self, entity: &str) -> Result<(Vec<Value>, u64)> {
@@ -2881,12 +2881,12 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
 /// A durable layer an author wrote many rows into and synced, and a
 /// follower that synced it, both on `storage` under keys `seed` derives
 /// (the follower's space included), with the follower's stack.
-struct Layered {
+struct Layered<S: PeerSpace = VolatileSpace> {
     notes: Entity,
     /// The name of the follower's space.
     space: String,
     follower: crate::Stack,
-    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+    env: Counting<Peer<S, dialog_peer::Session>>,
 }
 
 /// The `doc/note` of `doc` as `text`, written into `layer`.
@@ -2899,9 +2899,7 @@ fn noted(doc: &Entity, text: &str, layer: &Entity) -> impl dialog_corpus::Statem
 }
 
 /// The session a test performs through on `peer`.
-async fn session_of(
-    peer: &Peer<VolatileSpace>,
-) -> Result<Peer<VolatileSpace, dialog_peer::Session>> {
+async fn session_of<S: PeerSpace>(peer: &Peer<S>) -> Result<Peer<S, dialog_peer::Session>> {
     Ok(peer
         .session(b"test")
         .space(peer.state())
@@ -2910,12 +2908,12 @@ async fn session_of(
 }
 
 /// [`Layered`] over `s3`, its profile opened at `location` on `storage`.
-async fn layered(
+async fn layered<S: PeerSpace>(
     seed: &Seed,
     s3: &S3Address,
-    storage: &Storage<VolatileSpace>,
+    storage: &Storage<S>,
     location: &Location,
-) -> Result<Layered> {
+) -> Result<Layered<S>> {
     use crate::{LayerDeclaration, LayerType};
     use dialog_corpus::{Changes, Statement as _};
 
@@ -2998,7 +2996,7 @@ async fn layered(
     })
 }
 
-impl Layered {
+impl<S: PeerSpace> Layered<S> {
     /// The follower writes its note as `text`, and how many blocks it
     /// fetched from the remote to write it.
     async fn write(&self, text: &str) -> Result<u64> {
@@ -8203,3 +8201,93 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
     assert_eq!(rows.len(), 2);
     Ok(())
 }
+
+/// A head a refused push recorded reads as stale when the watch delivers
+/// it, while the branch does not hold it, and a sync on that stale head
+/// takes it.
+///
+/// A push to a remote that moved records where the remote stands, then
+/// fails with `PushError::NonFastForward`, and merges nothing. When the
+/// watch then delivers that same head, it is the head recorded, so the
+/// observation is `Observation::Stale`: recorded, not taken. An embedder
+/// that reads a watch must sync its branch on `Stale` as on `Advanced`,
+/// as `Replicate` does (`replicate.rs`), or the branch stays behind a
+/// head nothing pulls.
+///
+/// The local S3 server refuses to watch a cell, so the test delivers the
+/// head as the watch does for each head the remote answers
+/// (`WatchRemoteBranch`): it observes the edition the remote holds.
+#[dialog_common::test]
+async fn it_observes_a_head_a_refused_push_recorded_as_stale_until_a_sync_takes_it(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "stale-after-refusal").await?;
+    devices.name("user:0-0", "mine").await?;
+    devices
+        .alice
+        .commit(stream::iter(vec![named("user:0-1", "theirs")]))
+        .perform(&devices.operator)
+        .await?;
+    devices.alice.push().perform(&devices.operator).await?;
+    let theirs = devices
+        .alice
+        .revision()
+        .context("the author published a head")?;
+
+    let refused = devices.bob.push().perform(&devices.env).await;
+    assert!(
+        matches!(refused, Err(crate::PushError::NonFastForward { .. })),
+        "the remote moved, so the follower's push is refused: {refused:?}"
+    );
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        devices.bob.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the follower pulls from no remote");
+    };
+    let upstream = remote.branch(branch).open().perform(&devices.env).await?;
+    assert_eq!(
+        upstream.revision(),
+        Some(theirs.clone()),
+        "the refused push recorded the head the remote holds"
+    );
+    let (names, _) = devices.names_of("user:0-1").await?;
+    assert!(
+        !names.contains(&Value::String("theirs".into())),
+        "the follower's branch does not hold the author's head: {names:?}"
+    );
+
+    let delivered = upstream
+        .cache()
+        .content()
+        .context("the remote head is recorded")?;
+    let observed = upstream.observe(delivered).perform(&devices.env).await?;
+    assert_eq!(
+        observed,
+        crate::Observation::Stale,
+        "the watch's delivery of a head already recorded is stale"
+    );
+    let (names, _) = devices.names_of("user:0-1").await?;
+    assert!(
+        !names.contains(&Value::String("theirs".into())),
+        "a stale observation takes nothing into the branch: {names:?}"
+    );
+
+    devices
+        .bob
+        .pull(crate::Download::QueriedRanges)
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await?
+        .context("the sync on the stale head takes it")?;
+    for (entity, name) in [("user:0-0", "mine"), ("user:0-1", "theirs")] {
+        let (names, _) = devices.names_of(entity).await?;
+        assert!(
+            names.contains(&Value::String(name.into())),
+            "after the sync the follower holds {entity} {name:?}: {names:?}"
+        );
+    }
+    devices.bob.push().perform(&devices.env).await?;
+    Ok(())
+}
+
+mod races;
