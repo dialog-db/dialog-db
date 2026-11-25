@@ -99,7 +99,9 @@ What this changes for you:
   `(rule (list/label ?l (:control ?n)) …)`, which compiled and issued a
   command into it every round, and a read of one on a layer, `(select
   (list/label ?l (:control ?n)))`, which answered nothing, are refused
-  naming the attribute and the layer. A command is a concept of its own.
+  naming the attribute and the layer, and so is `in: :control` on one,
+  which was kept as a field named `in`. A command is a concept of its
+  own.
 - A line of a concept or a command is a stored attribute: one that names
   a derived attribute, `(concept (list/go label: ?x) (list/label of: ?c
   is: ?x in: :control cardinality: :many))`, is refused at the

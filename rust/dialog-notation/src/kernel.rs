@@ -505,8 +505,18 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     }
     // A derived attribute is what rules conclude, on the default layer:
     // a command is a concept of its own.
+    // `in:` names a layer wherever it is written, on a derived attribute
+    // as anywhere else: it is no field of one.
+    let named_in = operand.terms.get("in").map(|layer| {
+        layer
+            .keyword()
+            .map_or_else(|| layer.to_string(), str::to_string)
+    });
     if let Some(written) = &written
-        && let Some(layer) = fields.iter().find_map(|field| field.layer.as_deref())
+        && let Some(layer) = fields
+            .iter()
+            .find_map(|field| field.layer.clone())
+            .or(named_in)
     {
         return Err(Error::Refused(format!(
             "{node} has `{written}`, a derived attribute, on the {layer} layer: a derived \
