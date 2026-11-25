@@ -81,16 +81,21 @@ fn refusal(documents: &[&str], asked: &str) -> Error {
     let analysis = Analyzer::new()
         .expect("an analyzer")
         .analyze(&parse(&text).expect("forms"));
+    let told = |error: Error| {
+        // What a view's author is told names only what they wrote.
+        session::spoken(&text, &error.to_string());
+        error
+    };
     if let Some(error) = analysis
         .diagnostics
         .iter()
         .find_map(|diagnostic| diagnostic.refusal.clone())
     {
-        return error;
+        return told(error);
     }
     for tree in &analysis.analyzed {
         if let Err(error) = compile(tree) {
-            return error;
+            return told(error);
         }
     }
     panic!("{asked} was not refused")
@@ -396,7 +401,7 @@ async fn the_card_through_its_changes(how: How) -> Result<Vec<Vec<Patch>>> {
             parent: items(),
             slot: 0,
             index: 0,
-            instance: li("todo:1", "Buy milk", "open:"),
+            instance: li("todo:1", "Buy milk", "open"),
         }]
     );
     log.push(added);
@@ -440,7 +445,7 @@ async fn the_card_through_its_changes(how: How) -> Result<Vec<Vec<Patch>>> {
         [Patch::SetAttribute {
             at: item("todo:1"),
             name: "class".into(),
-            value: "done:".into(),
+            value: "done".into(),
         }]
     );
     log.push(completed);
@@ -457,7 +462,7 @@ async fn the_card_through_its_changes(how: How) -> Result<Vec<Vec<Patch>>> {
             parent: items(),
             slot: 0,
             index: 1,
-            instance: li("todo:2", "Call mum", "open:"),
+            instance: li("todo:2", "Call mum", "open"),
         }]
     );
     log.push(second);
@@ -968,7 +973,7 @@ async fn it_counts_what_a_card_collects() -> Result<()> {
                 parent: list,
                 slot: 0,
                 index: 0,
-                instance: li("todo:1", "Buy milk", "open:"),
+                instance: li("todo:1", "Buy milk", "open"),
             },
             Patch::SetText {
                 at: count,
@@ -979,7 +984,7 @@ async fn it_counts_what_a_card_collects() -> Result<()> {
     );
     assert_eq!(
         card_of.tree.hiccup(),
-        r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open:"} "Buy milk"]]]"#
+        r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open"} "Buy milk"]]]"#
     );
     Ok(())
 }
@@ -1014,7 +1019,7 @@ async fn it_keeps_a_views_count_on_a_fold() -> Result<()> {
     );
     assert_eq!(
         watched.tree().hiccup(),
-        r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open:"} "Buy milk"]]] [:article [:h2 "Work"] [:p "0" " open"] [:ul]]"#
+        r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open"} "Buy milk"]]] [:article [:h2 "Work"] [:p "0" " open"] [:ul]]"#
     );
     let mut count = card();
     count.push((1, Vec::new()));
@@ -1032,7 +1037,7 @@ async fn it_keeps_a_views_count_on_a_fold() -> Result<()> {
                     parent: items_of_summary(),
                     slot: 0,
                     index: 1,
-                    instance: li("todo:2", "Call mum", "open:"),
+                    instance: li("todo:2", "Call mum", "open"),
                 },
             ],
         ),
@@ -1465,7 +1470,7 @@ async fn it_renders_a_view_asked_once() -> Result<()> {
         .await?;
     assert_eq!(
         report,
-        [r#"[:article [:h2 "Home"] [:ul [:li {:class "open:"} "Buy milk"]]]"#]
+        [r#"[:article [:h2 "Home"] [:ul [:li {:class "open"} "Buy milk"]]]"#]
     );
     Ok(())
 }

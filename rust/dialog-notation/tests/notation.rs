@@ -465,10 +465,10 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
     Ok(())
 }
 
-/// A parameter a read leaves out matches anything, in a query and in a
-/// premise, as if `...` were written: the field is still read, so an
-/// entity that holds no claim of it is no instance. A write through a
-/// concept says every field.
+/// A read that leaves a field out, saying so with `...`, matches
+/// anything there, in a select, a query and a rule's premise: the field
+/// is still read, so an entity that holds no claim of it is no instance.
+/// A write through a concept says every field.
 #[dialog_common::test]
 async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -480,7 +480,8 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
                (assert (todo todo:1 text: "Call mom" state: :open))
                (assert (todo todo:2 text: "Buy milk" state: :done))
                (assert (xyz.todo/text todo:3 "No state"))
-               (rule (xyz.said ?t text: ?x) (todo ?t text: ?x ...))"#,
+               (rule (xyz.said ?t text: ?x) (todo ?t text: ?x ...))
+               (query (todo/text ?t is: ?x) (todo ?t text: ?x ...))"#,
         )
         .await?;
     let both = vec![
@@ -492,8 +493,11 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
         both
     );
     assert_eq!(
-        report(&mut notebook, "(select (todo ?t text: ?x ...))").await?,
-        both
+        report(&mut notebook, "(select (todo/text ?t is: ?x))").await?,
+        vec![
+            r#"(todo/text todo:1 is: "Call mom")"#,
+            r#"(todo/text todo:2 is: "Buy milk")"#,
+        ]
     );
     assert_eq!(
         report(&mut notebook, "(select (xyz.said ?t text: ?x))").await?,
@@ -975,6 +979,46 @@ async fn it_replaces_a_record_by_retracting_it_and_asserting_it_changed() -> Res
             "(xyz.todo todo:2 list: list:1)",
         ]
     );
+    // A field of many claims tells whether the retract fired: retagging
+    // `x` to `z` leaves `y` and `z`, where an assert alone would leave
+    // `x` too; retagging `y` to `y` keeps `y`.
+    let mut tagged = Notebook::open().await?;
+    tagged
+        .submit(
+            r#"(concept (item ?t title: ?title tag: ?g)
+                 (xyz.item/title of: ?t is: ?title as: :text cardinality: :one)
+                 (xyz.item/tag of: ?t is: ?g as: :text cardinality: :many))
+               (concept (item/retag subject: ?t from: ?from to: ?to)
+                 (xyz.item.retag/subject of: ?c is: ?t as: :entity in: :control cardinality: :many)
+                 (xyz.item.retag/from of: ?c is: ?from as: :text in: :control cardinality: :many)
+                 (xyz.item.retag/to of: ?c is: ?to as: :text in: :control cardinality: :many))
+               (rule (retract (item ?t title: ?title tag: ?from))
+                 (item/retag subject: ?t from: ?from to: ?to)
+                 (item ?t title: ?title tag: ?from))
+               (rule (assert (item ?t title: ?title tag: ?to))
+                 (item/retag subject: ?t from: ?from to: ?to)
+                 (item ?t title: ?title tag: ?from))
+               (assert (item item:1 title: "One" tag: "x"))
+               (assert (item item:1 title: "One" tag: "y"))"#,
+        )
+        .await?;
+    let tags = "(select (xyz.item ?t tag: ?g))";
+    tagged
+        .submit(r#"(assert (item/retag subject: item:1 from: "x" to: "z"))"#)
+        .await?;
+    let after = vec![
+        r#"(xyz.item item:1 tag: "y")"#.to_string(),
+        r#"(xyz.item item:1 tag: "z")"#.to_string(),
+    ];
+    assert_eq!(report(&mut tagged, tags).await?, after);
+    assert_eq!(
+        report(&mut tagged, "(select (xyz.item ?t title: ?x))").await?,
+        vec![r#"(xyz.item item:1 title: "One")"#]
+    );
+    tagged
+        .submit(r#"(assert (item/retag subject: item:1 from: "y" to: "y"))"#)
+        .await?;
+    assert_eq!(report(&mut tagged, tags).await?, after);
     Ok(())
 }
 
@@ -1128,22 +1172,22 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
         .submit(
             r#"(concept (account ?a status: (min ?s))
                  (xyz.account/status of: ?a is: ?s
-                   as: [:suspended :active :registered] cardinality: :many))
+                   as: [:suspended :active :registered :archived] cardinality: :many))
                (concept (standing ?a status: ?s)
                  (xyz.account/status of: ?a is: (min ?s)
-                   as: [:suspended :active :registered] cardinality: :many))
+                   as: [:suspended :active :registered :archived] cardinality: :many))
                (concept (latest ?a status: (max ?s))
                  (xyz.account/status of: ?a is: ?s
-                   as: [:suspended :active :registered] cardinality: :many))
+                   as: [:suspended :active :registered :archived] cardinality: :many))
                (concept (statuses ?a status: ?s)
                  (xyz.account/status of: ?a is: ?s
-                   as: [:suspended :active :registered] cardinality: :many))"#,
+                   as: [:suspended :active :registered :archived] cardinality: :many))"#,
         )
         .await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    // Written in neither the listing's order nor its reverse, so that
-    // neither the first nor the last write is what is elected.
-    for status in [":active", ":suspended", ":registered"] {
+    // Written so that neither the first write nor the last is the least
+    // or the greatest: the elector ranks by the listing, not by when.
+    for status in [":active", ":suspended", ":archived", ":registered"] {
         notebook
             .submit(&format!("(assert (account acct:1 status: {status}))"))
             .await?;
@@ -1160,12 +1204,13 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
     }
     assert_eq!(
         report(&mut notebook, "(select (latest ?a status: ?s))").await?,
-        vec!["(xyz.account acct:1 status: :registered)"]
+        vec!["(xyz.account acct:1 status: :archived)"]
     );
     assert_eq!(
         report(&mut notebook, "(select (statuses ?a status: ?s))").await?,
         vec![
             "(xyz.account acct:1 status: :active)",
+            "(xyz.account acct:1 status: :archived)",
             "(xyz.account acct:1 status: :registered)",
             "(xyz.account acct:1 status: :suspended)",
         ]
@@ -1460,6 +1505,26 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
                 .map(|diagnostic| diagnostic.message.clone()),
         );
     }
+    // What is refused says something: a fold in a derived attribute's
+    // head, and the notebook read without core, which refuses three
+    // uses of what core declares.
+    for text in [
+        format!("{concepts} (rule (list/count-open ?l (count ?t)) (xyz.todo ?t list: ?l))"),
+        include_str!("fixtures/notebook.clj").to_string(),
+    ] {
+        let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, &text);
+        said.extend(
+            checked
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone()),
+        );
+    }
+    assert!(
+        said.iter().any(|said| said.contains("list/count-open")),
+        "{said:?}"
+    );
+    assert!(said.len() > 1, "{said:?}");
     let hashed: Vec<&String> = said
         .iter()
         .chain(&kept)
@@ -2022,14 +2087,14 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
     );
-    // What must not hold may stand anywhere among the premises: the
-    // same rule.
+    // What must not hold may stand anywhere among the premises: before
+    // the read it excludes from, it is the same rule.
     assert_eq!(
         report(
             &mut notebook,
             "(select (io.person ?p name: ?n)
-               (io.person ?p name: (:text ?n))
-               (unless (author ?p ...)))"
+               (unless (author ?p ...))
+               (io.person ?p name: (:text ?n)))"
         )
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
