@@ -21,7 +21,8 @@
 //!   nothing. When another writer moves the branch first, the document
 //!   is run again over the head that won, its `when`s read again.
 //! - Queries, selects and views are answered after the commit, so each
-//!   reads what the whole document left, in the order written.
+//!   reads what the whole document left, form by form: each form's
+//!   answer is its own, and one that fails hides no other.
 //!
 //! It comes in layers. [`stage`] stages a document into a transaction
 //! the caller holds, on a branch or through a stack ([`Stage`]), reads
@@ -81,18 +82,15 @@ impl<T> Writer for T where
 }
 
 /// What applying a document made.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Applied {
     /// The revision the branch stands at after the document: the one it
     /// committed, or the one it stood at when the document wrote
     /// nothing.
     pub revision: Option<Revision>,
-    /// Each query's rows and each select's answers, in the order the
-    /// document asks them.
-    pub answers: Vec<Syntax>,
-    /// Each view the document asks for, rendered once, in the order
-    /// asked.
-    pub rendered: Vec<Rendered>,
+    /// What each form that asks answers, in the order written: each
+    /// form's own, so one that fails hides no other.
+    pub answers: Answers,
     /// What there is to say about the document that refuses nothing:
     /// its warnings.
     pub diagnostics: Vec<Diagnostic>,
@@ -118,19 +116,6 @@ pub enum ApplyError {
     /// The commit failed: nothing of the document was applied.
     #[error(transparent)]
     Commit(#[from] CommitError),
-    /// The document was applied, and a query, a select or a view of it
-    /// could not be answered after the commit.
-    #[error("the document was applied, and then {}", .0.error)]
-    Unanswered(Box<Unanswered>),
-}
-
-/// A document applied and then not answered: [`ApplyError::Unanswered`].
-#[derive(Debug)]
-pub struct Unanswered {
-    /// The revision the document left the branch at.
-    pub revision: Option<Revision>,
-    /// Why it was not answered.
-    pub error: LiveError,
 }
 
 mod sealed {
@@ -372,64 +357,108 @@ fn read(checked: &Checked) -> usize {
         .map_or(0, |last| last + 1)
 }
 
-/// What a document's queries, selects and views answer.
-#[derive(Debug, Clone, Default)]
+/// What a document's queries, selects and views answer, form by form.
+#[derive(Debug, Default)]
 pub struct Answers {
-    /// Each query's rows and each select's answers, in the order the
-    /// document asks them.
-    pub answers: Vec<Syntax>,
-    /// Each view the document asks for, rendered once, in the order
-    /// asked.
-    pub rendered: Vec<Rendered>,
+    /// Each form that asks, in the order written.
+    pub forms: Vec<FormAnswer>,
 }
 
-/// The answers to the queries, selects and views of `checked`, read
-/// from `branch` as it stands: after the caller committed what [`stage`]
-/// staged, what the whole document left.
-pub async fn answer<E: Reader>(
-    branch: &Branch,
-    checked: &Checked,
-    env: &E,
-) -> Result<Answers, LiveError> {
+/// What one form that asks answers.
+#[derive(Debug)]
+pub struct FormAnswer {
+    /// Which form, counted from 0 among the forms read, as
+    /// [`FormReport::form`] counts it.
+    pub form: usize,
+    /// Its answer, or why it has none: its own, whatever the other
+    /// forms answer.
+    pub answered: Result<Answer, LiveError>,
+}
+
+/// What a form that asks answers.
+#[derive(Debug, Clone)]
+pub enum Answer {
+    /// A query's rows or a select's answers.
+    Rows(Vec<Syntax>),
+    /// A view, rendered once.
+    Rendered(Vec<Rendered>),
+}
+
+/// The answers to the queries, selects and views of `checked`, form by
+/// form, read from `branch` as it stands: after the caller committed
+/// what [`stage`] staged, what the whole document left. A form that
+/// cannot be answered says why in its own entry, and the forms after it
+/// are answered still.
+pub async fn answer<E: Reader>(branch: &Branch, checked: &Checked, env: &E) -> Answers {
     let live = Live::new(branch.clone());
-    let mut answered = Answers::default();
-    for step in &checked.steps {
-        match step {
-            Step::Query(query) => {
-                // A query's own rule, when it has several premises, is
-                // laid over the branch for the query alone: nothing of
-                // it is written.
-                let mut layer = branch.query();
-                if let Some(rule) = &query.rule {
-                    layer = layer.with(rule.clone());
-                }
-                let rows: Vec<ConceptConclusion> = layer
-                    .select(query.select.clone())
-                    .perform(env)
-                    .try_vec()
-                    .await?;
-                for row in &rows {
-                    answered.answers.push(query.row(row)?);
-                }
+    let mut answers = Answers::default();
+    for (step, at) in checked.steps.iter().zip(&checked.step_forms) {
+        let answered = match step {
+            Step::Query(query) => rows(branch, query, env).await.map(Answer::Rows),
+            Step::Select(selection) => live.select(selection, env).await.map(Answer::Rows),
+            Step::View(plan) => live
+                .render(plan, plan.given.as_ref(), env)
+                .await
+                .map(|rendered| Answer::Rendered(vec![rendered])),
+            _ => continue,
+        };
+        // A form of several steps that ask is one entry: its answers
+        // together, or its first error.
+        match answers.forms.last_mut() {
+            Some(last) if last.form == *at => {
+                last.answered = match (
+                    std::mem::replace(&mut last.answered, Ok(Answer::Rows(Vec::new()))),
+                    answered,
+                ) {
+                    (Ok(Answer::Rows(mut before)), Ok(Answer::Rows(more))) => {
+                        before.extend(more);
+                        Ok(Answer::Rows(before))
+                    }
+                    (Ok(Answer::Rendered(mut before)), Ok(Answer::Rendered(more))) => {
+                        before.extend(more);
+                        Ok(Answer::Rendered(before))
+                    }
+                    (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+                    (Ok(before), Ok(_)) => Ok(before),
+                };
             }
-            Step::Select(selection) => {
-                answered.answers.extend(live.select(selection, env).await?);
-            }
-            Step::View(plan) => {
-                answered
-                    .rendered
-                    .push(live.render(plan, plan.given.as_ref(), env).await?);
-            }
-            _ => {}
+            _ => answers.forms.push(FormAnswer {
+                form: *at,
+                answered,
+            }),
         }
     }
-    Ok(answered)
+    answers
+}
+
+/// The rows `query` answers on `branch`, its own rule, when it has
+/// several premises, laid over the branch for it alone.
+async fn rows<E: Reader>(
+    branch: &Branch,
+    query: &crate::Query,
+    env: &E,
+) -> Result<Vec<Syntax>, LiveError> {
+    let mut layer = branch.query();
+    if let Some(rule) = &query.rule {
+        layer = layer.with(rule.clone());
+    }
+    let found: Vec<ConceptConclusion> = layer
+        .select(query.select.clone())
+        .perform(env)
+        .try_vec()
+        .await?;
+    Ok(found
+        .iter()
+        .map(|row| query.row(row))
+        .collect::<Result<_, Error>>()?)
 }
 
 /// Apply `checked`, what [`check`](crate::check) made of a document, to
 /// `branch`: [`stage`] it in a transaction of the branch, commit once,
 /// built again over the head that won when another writer moves the
-/// branch first, and [`answer`] it from what the commit left. See the
+/// branch first, and [`answer`] it from what the commit left: once it
+/// has committed it errs no more, and a form that cannot be answered
+/// says so in [`Applied::answers`]. See the
 /// [module docs](self).
 ///
 /// A document with a refusal is [`ApplyError::Refused`], with the first
@@ -456,16 +485,10 @@ pub async fn apply<E: Writer>(
         .await?;
     branch.refresh(env).await.map_err(CommitError::from)?;
     let revision = branch.revision();
-    let answered = answer(branch, checked, env).await.map_err(|error| {
-        ApplyError::Unanswered(Box::new(Unanswered {
-            revision: revision.clone(),
-            error,
-        }))
-    })?;
+    let answers = answer(branch, checked, env).await;
     Ok(Applied {
         revision,
-        answers: answered.answers,
-        rendered: answered.rendered,
+        answers,
         diagnostics: checked.diagnostics.clone(),
         report: report.into_inner().unwrap_or_else(PoisonError::into_inner),
     })

@@ -32,18 +32,21 @@ What this changes for you:
   commits; its `DocumentReport` says per form whether it was refused
   and what it did (`Did`: asserted, retracted, issued, installed, a
   `when` read and then each match it wrote, asked, or the same as an
-  earlier form). `answer(&branch, &checked, &env)` answers the queries,
-  selects and views after the caller's commit. `apply(&branch, &checked,
-  &env) -> Result<Applied, ApplyError>` is the two on a branch, with the
-  `Writer` bound it takes. `Applied` holds the revision, the answers in
-  document order, the rendered views, the warnings and the report.
+  earlier form). `answer(&branch, &checked, &env) -> Answers` answers
+  the queries, selects and views after the caller's commit, form by form:
+  each `FormAnswer` names its form as the report does and holds its own
+  `Result<Answer, LiveError>`, `Answer::Rows` or `Answer::Rendered`, so a
+  form that fails hides no other. `apply(&branch, &checked, &env) ->
+  Result<Applied, ApplyError>` is the two on a branch, with the `Writer`
+  bound it takes. `Applied` holds the revision, the answers, the
+  warnings and the report.
+- `ApplyError` is what writes nothing: `Refused` (the first refusal),
+  `Notation` and `Evaluation` (a write's `when` failed as it ran), and
+  `Commit`. Once the document has committed, a form not answered is its
+  own entry's error.
 - New on `Checked`: `repeats`, each form that came to a rule an earlier
   form came to, with that form, and `whole`, whether a refusal of one
-  form refuses every form (`check`) or its own alone (`check_forms`). `ApplyError` is `Refused` (the first
-  refusal; nothing applied), `Notation` and `Evaluation` (a write's
-  `when` failed as it ran; nothing applied), `Commit`, and `Unanswered`
-  (the document committed and a query, select or view of it failed,
-  with the revision and the error, boxed).
+  form refuses every form (`check`) or its own alone (`check_forms`).
 - A write's `when` reads the forms before it in its document: an assert
   and then a retract by the entity alone retracts what the assert wrote,
   and a `when` matches a claim an earlier form asserted. It read the

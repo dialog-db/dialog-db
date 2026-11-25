@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use dialog_notation::live::LiveError;
-use dialog_notation::{Analyzer, ApplyError, Diagnostic, apply, check};
+use dialog_notation::{Analyzer, Answer, ApplyError, Diagnostic, apply, check};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_repository::Branch;
@@ -153,15 +153,22 @@ impl Notebook {
             }
             Err(error) => return Err(unwrapped(error)),
         };
-        let mut report: Vec<String> = applied.answers.iter().map(ToString::to_string).collect();
-        for tree in &applied.rendered {
-            for root in &tree.roots {
-                report.push(
-                    dialog_notation::Rendered {
-                        roots: vec![root.clone()],
+        let mut report: Vec<String> = Vec::new();
+        for form in applied.answers.forms {
+            match form.answered.map_err(live)? {
+                Answer::Rows(rows) => report.extend(rows.iter().map(ToString::to_string)),
+                Answer::Rendered(trees) => {
+                    for tree in &trees {
+                        for root in &tree.roots {
+                            report.push(
+                                dialog_notation::Rendered {
+                                    roots: vec![root.clone()],
+                                }
+                                .hiccup(),
+                            );
+                        }
                     }
-                    .hiccup(),
-                );
+                }
             }
         }
         // Sorted, so a report reads the same whatever order the rows came
@@ -176,10 +183,14 @@ impl Notebook {
 fn unwrapped(error: ApplyError) -> anyhow::Error {
     match error {
         ApplyError::Notation(error) => anyhow::Error::new(error),
-        ApplyError::Unanswered(unanswered) => match unanswered.error {
-            LiveError::Notation(error) => anyhow::Error::new(error),
-            other => anyhow::Error::new(other),
-        },
+        other => anyhow::Error::new(other),
+    }
+}
+
+/// The notation's own error where a form was not answered with one.
+fn live(error: LiveError) -> anyhow::Error {
+    match error {
+        LiveError::Notation(error) => anyhow::Error::new(error),
         other => anyhow::Error::new(other),
     }
 }

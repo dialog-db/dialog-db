@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use dialog_notation::{
-    Analyzer, Applied, ApplyError, Did, Error, apply, check, check_forms, stage,
+    Analyzer, Answer, Applied, ApplyError, Did, Error, apply, check, check_forms, stage,
 };
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
@@ -58,16 +58,22 @@ impl Document {
 
     /// What `select` answers, each as text, sorted.
     async fn answers(&mut self, select: &str) -> Result<Vec<String>> {
-        let mut answers: Vec<String> = self
-            .apply(select)
-            .await?
-            .answers
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let mut answers = rows(self.apply(select).await?)?;
         answers.sort();
         Ok(answers)
     }
+}
+
+/// Every row the forms of `applied` that ask answer, as text, in the
+/// order asked, refused where a form was not answered.
+fn rows(applied: Applied) -> Result<Vec<String>> {
+    let mut all = Vec::new();
+    for form in applied.answers.forms {
+        if let Answer::Rows(rows) = form.answered? {
+            all.extend(rows.iter().map(ToString::to_string));
+        }
+    }
+    Ok(all)
 }
 
 /// Each form of a document reads what the forms before it wrote: a
@@ -198,7 +204,7 @@ async fn it_answers_a_select_from_what_the_whole_document_left() -> Result<()> {
                (assert (k x:2 lvl: "b"))"#,
         )
         .await?;
-    let mut answers: Vec<String> = applied.answers.iter().map(ToString::to_string).collect();
+    let mut answers = rows(applied)?;
     answers.sort();
     assert_eq!(
         answers,
@@ -397,6 +403,50 @@ async fn it_stages_a_document_into_a_stacks_transaction() -> Result<()> {
     assert_eq!(
         document.answers("(select (m ?t tag: ?g))").await?,
         vec![r#"(xyz.m x:7 tag: "stacked")"#]
+    );
+    Ok(())
+}
+
+/// Each form that asks has an answer of its own: a select that fails as
+/// it is evaluated says so in its entry, and the select after it is
+/// answered still, each entry naming its form as the report does. No
+/// document makes a select fail at evaluation today (see `told` in
+/// `src/live.rs`), so the first select's query is given no terms here,
+/// which Dialog-DB refuses as it evaluates.
+#[dialog_common::test]
+async fn it_answers_each_form_apart_so_one_failing_hides_no_other() -> Result<()> {
+    let mut document = Document::open().await?;
+    let mut checked = check(
+        &mut document.analyzer,
+        r#"(assert (k x:1 lvl: "a"))
+           (select (k ?t lvl: ?l))
+           (select (k x:1 lvl: ?l))"#,
+    );
+    let Some(dialog_notation::Step::Query(query)) = checked
+        .steps
+        .iter_mut()
+        .find(|step| matches!(step, dialog_notation::Step::Query(_)))
+    else {
+        panic!("no query: {:?}", checked.step_forms);
+    };
+    query.select.terms = dialog_query::Parameters::new();
+    let applied = apply(&document.branch, &checked, &document.operator).await?;
+    let forms: Vec<usize> = applied.answers.forms.iter().map(|form| form.form).collect();
+    assert_eq!(forms, vec![1, 2]);
+    assert!(
+        matches!(
+            &applied.answers.forms[0].answered,
+            Err(dialog_notation::live::LiveError::Evaluation(_))
+        ),
+        "{:?}",
+        applied.answers.forms[0].answered
+    );
+    let Ok(Answer::Rows(rows)) = &applied.answers.forms[1].answered else {
+        panic!("{:?}", applied.answers.forms[1].answered);
+    };
+    assert_eq!(
+        rows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        vec![r#"(xyz.k x:1 lvl: "a")"#]
     );
     Ok(())
 }

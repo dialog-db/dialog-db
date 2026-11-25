@@ -78,7 +78,7 @@
 //! a record with the entity in it, and count that:
 //!
 //! ```
-//! # use dialog_notation::{Analyzer, apply, check};
+//! # use dialog_notation::{Analyzer, Answer, apply, check};
 //! # use dialog_peer::helpers::{test_repo, test_session_with_peer};
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
@@ -107,7 +107,12 @@
 //! # let checked = check(&mut Analyzer::new()?, document);
 //! # assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
 //! let applied = apply(&branch, &checked, &operator).await?;
-//! let answers: Vec<String> = applied.answers.iter().map(ToString::to_string).collect();
+//! let mut answers = Vec::new();
+//! for form in applied.answers.forms {
+//!     if let Answer::Rows(rows) = form.answered? {
+//!         answers.extend(rows.iter().map(ToString::to_string));
+//!     }
+//! }
 //! assert_eq!(
 //!     answers,
 //!     [
@@ -155,8 +160,8 @@ mod written;
 pub use analyze::{Analysis, Analyzer};
 #[cfg(feature = "repository")]
 pub use apply::{
-    Answers, Applied, ApplyError, Did, DocumentReport, FormReport, Stage, Unanswered, answer,
-    apply, stage,
+    Answer, Answers, Applied, ApplyError, Did, DocumentReport, FormAnswer, FormReport, Stage,
+    answer, apply, stage,
 };
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
