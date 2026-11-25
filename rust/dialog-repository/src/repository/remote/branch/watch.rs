@@ -17,6 +17,11 @@ use crate::{ConnectedBranch, Observation, RemoteSite, WatchRemoteBranchError};
 /// A pull or push assuming the upstream then acts on it with no round
 /// trip of its own.
 ///
+/// The watch records heads and merges none. Whoever reads it syncs the
+/// branch on every [`Observation::Advanced`] and [`Observation::Stale`]:
+/// a stale head is one already recorded, perhaps by a push the remote
+/// refused, which merged nothing. See [`Observation`].
+///
 /// A remote that cannot follow a cell refuses the watch with
 /// `Rejection::Unsupported`, and the branch is fetched instead.
 pub struct WatchRemoteBranch<'a> {
