@@ -4468,4 +4468,46 @@ mod tests {
             "{refused}"
         );
     }
+
+    /// A name of words joined by `/` with no `.` is a concept's or a
+    /// derived attribute's, never a stored attribute: under no concept
+    /// of its name, nor one of its first part, it is refused naming
+    /// what is missing, wherever it stands, and never read as a relation
+    /// named by its first word, `(foo ?x x: ?n)`, which for a word of
+    /// the notation would be its form, `(rule ?x x: ?n)`. A dotted one
+    /// is a stored attribute, its two terms the entity and the value.
+    #[test]
+    fn it_refuses_a_slashed_name_no_concept_declares_wherever_it_stands() {
+        let concept = "(concept (t ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))";
+        for word in ["foo", "select", "rule", "unless", "is", "count"] {
+            for text in [
+                format!("{concept} (rule ({word}/x ?x ?n) (t ?x name: ?n))"),
+                format!("{concept} (select ({word}/x ?x ?n))"),
+                format!("{concept} (rule (t ?x name: ?n) ({word}/x ?x ?n))"),
+                format!("{concept} (select (t ?x name: ?n) (unless ({word}/x ?x ?n)))"),
+            ] {
+                let says = format!(
+                    "`{word}/x` names no attribute of a domain, which holds a `.`, `xyz.{word}/x`, \
+                     and no concept `{word}/x`, nor a concept `{word}` it would be derived \
+                     under, is declared above what reads it"
+                );
+                let refused = expanded("", &text).unwrap_err().to_string();
+                assert!(refused.contains(&says), "{text}: {refused}");
+                let checked =
+                    crate::check::check(&mut crate::analyze::Analyzer::new().unwrap(), &text);
+                assert!(
+                    checked
+                        .diagnostics
+                        .iter()
+                        .any(|said| said.message.contains(&says)),
+                    "{text}: {:?}",
+                    checked.diagnostics
+                );
+            }
+        }
+        assert_eq!(
+            expanded("", "(select (xyz.t/name ?x ?n))").unwrap(),
+            vec!["(rule (report (xyz.t ?x name: ?n)) (xyz.t ?x name: ?n))"]
+        );
+    }
 }
