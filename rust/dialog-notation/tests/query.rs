@@ -1,7 +1,7 @@
 //! Queries, the second layer, asked on a real branch.
 //!
 //! A query reads rows from concepts and rules, nests, and collects: the
-//! whole of a field is `(collect ?x)` on the term of a read, one row with
+//! whole of a field is `(distinct ?x)` on the term of a read, one row with
 //! a map, `{}` for none. Asking is `(select …)`. Each test is a claim of
 //! design/macros/design-queries.md, with the answers its tables give.
 
@@ -51,7 +51,7 @@ const TODOS: &str = r#"
 const CARD: &str = r#"
     (query (todo/card ?t is: ?card)
       (todo ?t title: ?title)
-      (todo/tag ?t tag: (collect ?tags))
+      (todo/tag ?t tag: (distinct ?tags))
       (is ?card {:title ?title :tags ?tags}))
 "#;
 
@@ -124,7 +124,7 @@ async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
         .submit(
             "(query (notebook/outline ?n is: ?outline)
                (notebook/named ?n title: ?title)
-               (notebook/blocks ?n block: (collect ?blocks))
+               (notebook/blocks ?n block: (distinct ?blocks))
                (is ?outline {:title ?title :blocks ?blocks}))",
         )
         .await?;
@@ -244,7 +244,7 @@ async fn it_finds_the_concept_of_one_name_its_labels_fit_in_any_order() -> Resul
        (xyz.tonk.notebook/title of: ?n is: ?title as: :text cardinality: :one))
      (query (notebook/outline ?n is: ?outline)
        (notebook/named ?n title: ?title)
-       (notebook/blocks ?n block: (collect ?blocks))
+       (notebook/blocks ?n block: (distinct ?blocks))
        (is ?outline {:title ?title :blocks ?blocks}))";
     let mut answers = Vec::new();
     for (first, second) in [(entries, notes), (notes, entries)] {
@@ -286,13 +286,13 @@ async fn it_finds_the_concept_of_one_name_its_labels_fit_in_any_order() -> Resul
     let ambiguous = notebook
         .submit(&format!(
             "{entries} {both} {}",
-            query.replace("(collect ?blocks))", "(collect ?blocks) ...)")
+            query.replace("(distinct ?blocks))", "(distinct ?blocks) ...)")
         ))
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
         matches!(&ambiguous, Err(Ok(Error::Ambiguous(form, both)))
-            if form.contains("(collect ?blocks)") && !form.contains("?[")
+            if form.contains("(distinct ?blocks)") && !form.contains("?[")
                 && both.contains("block: note:")),
         "{ambiguous:?}"
     );
@@ -335,7 +335,7 @@ fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
     );
     let outline = "(query (notebook/outline ?n is: ?outline)
            (notebook/named ?n title: ?title)
-           (notebook/blocks ?n block: (collect ?blocks))
+           (notebook/blocks ?n block: (distinct ?blocks))
            (is ?outline {:title ?title :blocks ?blocks}))
          (select (notebook/outline ?n is: ?outline))";
     assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 1);
@@ -541,7 +541,7 @@ async fn it_counts_what_was_collected() -> Result<()> {
         .submit(
             "(query (todo/counted ?t is: ?card)
                (todo ?t title: ?title)
-               (todo/tag ?t tag: (collect ?tags))
+               (todo/tag ?t tag: (distinct ?tags))
                (is ?card {:title ?title :tags (count ?tags)}))",
         )
         .await?;
@@ -556,7 +556,7 @@ async fn it_counts_what_was_collected() -> Result<()> {
         &mut notebook,
         "(query (todo/summed ?t is: ?n)
            (todo ?t title: ?title)
-           (todo/tag ?t tag: (collect ?tags))
+           (todo/tag ?t tag: (distinct ?tags))
            (is ?n (sum ?tags)))",
     )
     .await;
@@ -602,7 +602,7 @@ async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
         .submit(
             "(query (notebook/outline ?n is: ?outline)
                (notebook/named ?n title: ?title)
-               (notebook/blocks ?n block: (collect ?blocks))
+               (notebook/blocks ?n block: (distinct ?blocks))
                (is ?outline {:title ?title :blocks ?blocks}))",
         )
         .await?;
@@ -619,7 +619,7 @@ async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
 /// The outline: a notebook's title and the whole of its blocks, a map.
 const OUTLINE: &str = "(query (notebook/outline ?n is: ?outline)
        (notebook/named ?n title: ?title)
-       (notebook/blocks ?n block: (collect ?blocks))
+       (notebook/blocks ?n block: (distinct ?blocks))
        (is ?outline {:title ?title :blocks ?blocks :count (count ?blocks)}))";
 
 /// The answers of a selection, its rows asked once and its folds kept
@@ -716,7 +716,7 @@ const LABELLED: &str = r#"
       (xyz.item/source of: ?t is: ?s as: :text cardinality: :one))
     (query (item/card ?t is: ?card)
       (item ?t title: ?title)
-      (item/tag ?t tag: (collect ?tags) ...)
+      (item/tag ?t tag: (distinct ?tags) ...)
       (is ?card {:title ?title :tags ?tags}))"#;
 
 /// A collected read through two definitions is one query: each
@@ -764,7 +764,7 @@ fn it_puts_a_collected_call_together_in_memory() -> Result<()> {
            (is ?chip {:tag ?g}))
          (query (todo/chips ?t is: ?card)
            (todo ?t title: ?title)
-           (todo/chip ?t is: (collect ?chips))
+           (todo/chip ?t is: (distinct ?chips))
            (is ?card {:title ?title :chips ?chips}))
          (select (todo/chips ?t is: ?card))";
     assert_eq!(folds(&format!("{TODOS}{chips}"))?, 0);
@@ -785,7 +785,7 @@ async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result
         (query (todo/day ?t is: ?card)
           (todo ?t title: ?title)
           (todo/note ?t day: ?d ...)
-          (todo/note ?t day: ?d text: (collect ?texts))
+          (todo/note ?t day: ?d text: (distinct ?texts))
           (is ?card {:title ?title :day ?d :texts ?texts}))"#;
     assert_eq!(
         folds(&format!("{TODOS}{noted}(select (todo/day ?t is: ?card))"))?,
@@ -816,7 +816,7 @@ async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
                (notebook/block ?b source: ?s))
              (query (notebook/outline ?n is: ?outline)
                (notebook/named ?n title: ?title)
-               (notebook/source ?n is: (collect ?sources))
+               (notebook/source ?n is: (distinct ?sources))
                (is ?outline {:title ?title :blocks ?sources}))",
         )
         .await?;
@@ -837,7 +837,7 @@ async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
     Ok(())
 }
 
-/// `collect` in the entity position: the to-dos of a list that are open,
+/// `distinct` in the entity position: the to-dos of a list that are open,
 /// a set of entities, and `{:}` for a list with none.
 #[dialog_common::test]
 async fn it_collects_in_the_entity_position() -> Result<()> {
@@ -851,7 +851,7 @@ async fn it_collects_in_the_entity_position() -> Result<()> {
                  (xyz.task/state of: ?t is: ?s as: [:open :done] cardinality: :one))
                (query (list/open ?l is: ?open)
                  (list ?l name: ?name)
-                 (task (collect ?open) list: ?l state: :open))
+                 (task (distinct ?open) list: ?l state: :open))
 
                (assert (list list:home name: "Home"))
                (assert (list list:work name: "Work"))
@@ -878,11 +878,11 @@ async fn it_collects_in_the_entity_position() -> Result<()> {
 async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
     let index = r#"
         (query (todo/titles is: ?titles)
-          (todo _ title: (collect ?titles)))
+          (todo _ title: (distinct ?titles)))
         (query (todo/deck is: ?deck)
-          (todo/card _ is: (collect ?deck)))
+          (todo/card _ is: (distinct ?deck)))
         (query (todo/size is: ?size)
-          (todo/card _ is: (collect ?deck))
+          (todo/card _ is: (distinct ?deck))
           (is ?size {:cards (count ?deck)}))
     "#;
     let mut notebook = todos().await?;
@@ -929,7 +929,7 @@ async fn it_refuses_a_query_of_an_entity_that_only_collects() -> Result<()> {
     let error = refused(
         &mut notebook,
         "(query (todo/bag ?t is: ?tags)
-           (todo/tag ?t tag: (collect ?tags)))",
+           (todo/tag ?t tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -955,7 +955,7 @@ async fn it_refuses_an_unbound_term_in_a_collecting_read() -> Result<()> {
         &mut notebook,
         "(query (todo/loose ?t is: ?tags)
            (todo ?t title: ?title)
-           (todo/tag ?u tag: (collect ?tags)))",
+           (todo/tag ?u tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -965,7 +965,7 @@ async fn it_refuses_an_unbound_term_in_a_collecting_read() -> Result<()> {
     Ok(())
 }
 
-/// `collect` stands in a query and nowhere else: not in a rule, not in a
+/// `distinct` stands in a query and nowhere else: not in a rule, not in a
 /// concept, and the whole of a field is never written.
 #[dialog_common::test]
 async fn it_refuses_collect_outside_a_query() -> Result<()> {
@@ -973,7 +973,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     let in_rule = refused(
         &mut notebook,
         "(rule (xyz.tagged ?t tags: ?tags)
-           (todo/tag ?t tag: (collect ?tags)))",
+           (todo/tag ?t tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -984,7 +984,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     let in_concept = refused(
         &mut notebook,
         "(concept (todo/tags ?t tags: ?tags)
-           (xyz.todo/tag of: ?t is: (collect ?tags) as: :text cardinality: :many))",
+           (xyz.todo/tag of: ?t is: (distinct ?tags) as: :text cardinality: :many))",
     )
     .await;
     assert!(
@@ -994,7 +994,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     );
     let whole = refused(
         &mut notebook,
-        "(assert (notebook/blocks notebook:1 block: (collect ?blocks)))",
+        "(assert (notebook/blocks notebook:1 block: (distinct ?blocks)))",
     )
     .await;
     assert!(
@@ -1004,7 +1004,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     );
     let in_head = refused(
         &mut notebook,
-        "(rule (assert (notebook/blocks ?n block: (collect ?blocks)))
+        "(rule (assert (notebook/blocks ?n block: (distinct ?blocks)))
            (notebook/named ?n title: \"x\"))",
     )
     .await;
@@ -1062,7 +1062,7 @@ async fn it_refuses_a_query_that_calls_itself() -> Result<()> {
         &mut notebook,
         "(query (todo/loop ?t is: ?x)
            (todo ?t title: ?title)
-           (todo/loop ?t is: (collect ?x)))",
+           (todo/loop ?t is: (distinct ?x)))",
     )
     .await;
     assert!(
@@ -1389,7 +1389,7 @@ async fn it_takes_an_answer_apart_by_its_keys_in_any_order() -> Result<()> {
     Ok(())
 }
 
-/// A pin, not a decision (gaps row 53): what `(collect ?x)` gathers is a
+/// A pin, not a decision (gaps row 53): what `(distinct ?x)` gathers is a
 /// set, so two entities whose field holds the same value are collected
 /// once, and a count over the collection counts the value once.
 #[dialog_common::test]
@@ -1399,9 +1399,9 @@ async fn it_pins_that_a_collection_is_a_set() -> Result<()> {
         .submit(
             r#"(concept (memo ?m text: ?x)
                  (xyz.memo/text of: ?m is: ?x as: :text cardinality: :one))
-               (query (memo/texts is: ?all) (memo _ text: (collect ?all)))
+               (query (memo/texts is: ?all) (memo _ text: (distinct ?all)))
                (query (memo/size is: ?size)
-                 (memo _ text: (collect ?all))
+                 (memo _ text: (distinct ?all))
                  (is ?size {:texts (count ?all)}))
                (assert (memo memo:1 text: "same"))
                (assert (memo memo:2 text: "same"))
@@ -1441,12 +1441,12 @@ async fn it_tells_a_count_what_it_counts() -> Result<()> {
     assert!(
         matches!(&counted, Err(said) if said.contains("count counts what was collected")
             && said.contains("a set")
-            && said.contains("(collect ?cards)")),
+            && said.contains("(distinct ?cards)")),
         "{counted:?}"
     );
     let summed = refused(
         &mut notebook,
-        "(query (q/sum is: ?s) (item _ title: (collect ?all)) (is ?s {:n (sum ?all)}))",
+        "(query (q/sum is: ?s) (item _ title: (distinct ?all)) (is ?s {:n (sum ?all)}))",
     )
     .await;
     assert!(
@@ -1454,6 +1454,32 @@ async fn it_tells_a_count_what_it_counts() -> Result<()> {
             && said.contains("`count-distinct`")
             && said.contains("`avg`")),
         "{summed:?}"
+    );
+    Ok(())
+}
+
+/// What a read gathers is marked `(distinct ?x)`, Datomic's word for the
+/// set of a variable's distinct values; `(collect ?x)`, the word before
+/// it, is refused saying so, wherever it stands.
+#[dialog_common::test]
+async fn it_refuses_collect_as_the_word_before_distinct() -> Result<()> {
+    let mut notebook = todos().await?;
+    for text in [
+        "(query (todo/titles is: ?all) (todo _ title: (collect ?all)))",
+        "(select (todo ?t title: (collect ?all)))",
+    ] {
+        let said = refused(&mut notebook, text).await;
+        assert!(
+            matches!(&said, Error::Refused(why) if why.contains("`collect` is written `distinct`")),
+            "{text}: {said:?}"
+        );
+    }
+    notebook
+        .submit("(query (todo/titles is: ?all) (todo _ title: (distinct ?all)))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (todo/titles is: ?all))").await?,
+        vec![r#"(todo/titles is: {: "Buy milk" : "Call mum"})"#]
     );
     Ok(())
 }

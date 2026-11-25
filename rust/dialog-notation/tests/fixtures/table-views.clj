@@ -45,10 +45,10 @@
 ; displays are. YAML 512-540.
 (query (table/ui ?t is: ?ui)
   (table ?t name: ?name)
-  (table/sheet-row _ is: (collect ?sheets))
-  (table/cell-row _ is: (collect ?cells))
-  (table/column-row _ is: (collect ?columns))
-  (table/rowsize-row _ is: (collect ?sizes))
+  (table/sheet-row _ is: (distinct ?sheets))
+  (table/cell-row _ is: (distinct ?cells))
+  (table/column-row _ is: (distinct ?columns))
+  (table/rowsize-row _ is: (distinct ?sizes))
   (view ?ui
     [:tonk-table {:subject ?t
                   :on/createsheet (table/create-sheet table: .detail.sheetTable
@@ -86,5 +86,5 @@
 ; once, and stands empty when there is no table, as tonk's YAML keeps the
 ; outer div and repeats the display inside it. YAML 543-549.
 (query (table/directory is: ?directory)
-  (table/ui _ is: (collect ?tables))
+  (table/ui _ is: (distinct ?tables))
   (view ?directory [:div {:class "table-directory"} ?tables]))

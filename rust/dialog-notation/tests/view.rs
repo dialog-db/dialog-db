@@ -49,7 +49,7 @@ const CARD: &str = r#"
       (view ?item [:li {:class ?s} ?title]))
     (query (list/card ?l is: ?card)
       (list ?l name: ?name)
-      (todo/item _ list: ?l is: (collect ?items))
+      (todo/item _ list: ?l is: (distinct ?items))
       (view ?card
         [:article
           [:h2 ?name]
@@ -574,7 +574,7 @@ const TAGGED: &str = r#"
     ; The row takes all its chips: none is no chip, and the row stays.
     (query (task/row ?t is: ?row)
       (task ?t title: ?title)
-      (task/chip ?t is: (collect ?chips))
+      (task/chip ?t is: (distinct ?chips))
       (view ?row [:li ?title ?chips]))
 
     ; The tag's read required: a row for each way it holds.
@@ -825,11 +825,11 @@ const BOARD: &str = r#"
       (view ?chip [:span {:class "tag"} ?g]))
     (query (task/line ?t list: ?l is: ?line)
       (task ?t list: ?l title: ?title)
-      (task/chip ?t is: (collect ?chips))
+      (task/chip ?t is: (distinct ?chips))
       (view ?line [:li ?title ?chips]))
     (query (shelf/card ?l is: ?card)
       (shelf ?l name: ?name)
-      (task/line _ list: ?l is: (collect ?lines))
+      (task/line _ list: ?l is: (distinct ?lines))
       (view ?card [:section [:h2 ?name] [:ul ?lines]]))"#;
 
 /// A view two levels deep is kept by patches at every level: a chip
@@ -930,8 +930,8 @@ const SUMMARY: &str = r#"
       (view ?item [:li {:class ?s} ?title]))
     (query (list/summary ?l is: ?card)
       (list ?l name: ?name)
-      (todo (collect ?open) list: ?l state: :open ...)
-      (todo/item _ list: ?l is: (collect ?items))
+      (todo (distinct ?open) list: ?l state: :open ...)
+      (todo/item _ list: ?l is: (distinct ?items))
       (is ?count (count ?open))
       (view ?card
         [:article
@@ -1393,7 +1393,7 @@ async fn it_shows_a_field_labelled_key_beside_an_entry_apart_from_its_key() -> R
     let board = r#"
         (query (room/board ?r is: ?board)
           (room ?r name: ?name)
-          (shelf/missing _ room: ?r is: (collect ?shelves))
+          (shelf/missing _ room: ?r is: (distinct ?shelves))
           (view ?board [:article [:h2 ?name] ?shelves]))"#;
     let mut notebook = Notebook::open().await?;
     write(&mut notebook, concepts).await?;
@@ -1421,7 +1421,7 @@ async fn it_shows_a_query_not_found_as_its_source() -> Result<()> {
     let board = r#"
         (query (list/board ?l is: ?board)
           (list ?l name: ?name)
-          (todo/missing _ list: ?l is: (collect ?items))
+          (todo/missing _ list: ?l is: (distinct ?items))
           (view ?board [:article [:h2 ?name] ?items]))"#;
     let mut notebook = Notebook::open().await?;
     write(&mut notebook, CONCEPTS).await?;
@@ -1526,7 +1526,7 @@ async fn it_refuses_what_a_view_may_not_say() -> Result<()> {
     let whole = refusal(
         &[CONCEPTS],
         "(query (list/x ?l is: ?x) (list ?l name: ?name)
-           (todo (collect ?all) list: ?l ...)
+           (todo (distinct ?all) list: ?l ...)
            (view ?x [:ul ?all]))
          (select (list/x ?l is: ?x))",
     );
