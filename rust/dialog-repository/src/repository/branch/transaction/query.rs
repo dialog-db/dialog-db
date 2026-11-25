@@ -247,8 +247,11 @@ mod tests {
     use crate::schema::DidExt as _;
     use dialog_corpus::Entity;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer::{Peer, Session};
     use dialog_query::query::Output;
+    use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
+    use dialog_storage::provider::storage::VolatileSpace;
 
     mod people {
 
@@ -524,19 +527,18 @@ mod tests {
     /// A rule deriving `conclusion` from each `test/name`, read under
     /// cardinality one.
     fn naming(conclusion: &str) -> anyhow::Result<dialog_query::DeductiveRule> {
-        let descriptor: dialog_query::rule::DeductiveRuleDescriptor =
-            serde_json::from_value(serde_json::json!({
-                "deduce": { "with": { "name": { "the": conclusion, "as": "text:" } } },
-                "when": [{
-                    "assert": { "with": { "name": {
-                        "the": "test/name", "as": "text:", "cardinality": "one"
-                    } } },
-                    "where": {
-                        "this": { "?": { "name": "this" } },
-                        "name": { "?": { "name": "name" } }
-                    }
-                }]
-            }))?;
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "name": { "the": conclusion, "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": {
+                    "the": "test/name", "as": "text:", "cardinality": "one"
+                } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
         Ok(descriptor.compile()?)
     }
 
@@ -544,10 +546,7 @@ mod tests {
     async fn derived(
         query: super::TransactionQuery<'_>,
         rule: &dialog_query::DeductiveRule,
-        operator: &dialog_peer::Peer<
-            dialog_storage::provider::storage::VolatileSpace,
-            dialog_peer::Session,
-        >,
+        operator: &Peer<VolatileSpace, Session>,
     ) -> anyhow::Result<Vec<String>> {
         let mut terms = dialog_query::Parameters::new();
         terms.insert("this".into(), Term::var("this"));
