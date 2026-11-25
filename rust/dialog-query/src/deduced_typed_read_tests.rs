@@ -19,6 +19,9 @@ use crate::the;
 use crate::types::Any;
 use crate::{ConceptDescriptor, ConceptQuery, Entity, Match, Parameters, Term, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
+use dialog_storage::provider::storage::VolatileSpace;
+
+type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
 fn text(text: &str) -> Value {
     Value::String(text.into())
@@ -346,6 +349,640 @@ async fn a_typed_field_reads_a_deduced_number_as_a_stored_one() -> anyhow::Resul
     for shape in [Shape::Exact, Shape::Relation, Shape::Fixpoint] {
         wrong.extend(twin(&numbers, Value::Float(7.5), &types, shape).await?);
     }
+    assert!(
+        wrong.is_empty(),
+        "reads that differ from the stored twin: {wrong:#?}"
+    );
+    Ok(())
+}
+
+/// What a read of `concept` answers under `this` and `value`, each row
+/// as its entity and value with their types, sorted.
+async fn answers(
+    source: &TestEnv<'_>,
+    concept: ConceptDescriptor,
+    this: Term<Any>,
+    value: Term<Any>,
+) -> anyhow::Result<Vec<String>> {
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), this.clone());
+    terms.insert("value".into(), value.clone());
+    let rows = ConceptQuery {
+        terms,
+        predicate: concept,
+    }
+    .evaluate(Match::new().seed(), source)
+    .try_vec()
+    .await?;
+    let mut answers = rows
+        .iter()
+        .map(|row| {
+            let this = match &this {
+                Term::Constant(this) => this.clone(),
+                _ => row.lookup(&this)?.content()?,
+            };
+            let value = match &value {
+                Term::Constant(value) => value.clone(),
+                _ => row.lookup(&value)?.content()?,
+            };
+            Ok(format!("{this:?} {value:?}"))
+        })
+        .collect::<Result<Vec<String>, crate::EvaluationError>>()?;
+    answers.sort();
+    Ok(answers)
+}
+
+/// The types a read is made under in [`differences`].
+const TYPES: [&str; 9] = [
+    "text:",
+    "entity:",
+    "boolean:",
+    "natural:",
+    "integer:",
+    "float:",
+    "number:",
+    "natural:8",
+    "float:32",
+];
+
+/// The constants a read binds its value to in [`differences`]: one of
+/// each type, the wrong type for every read but one.
+fn constants() -> Vec<Value> {
+    vec![
+        text("hello"),
+        Value::Boolean(true),
+        Value::UnsignedInt(3),
+        Value::SignedInt(-3),
+        Value::Float(3.0),
+        Value::Float(2.5),
+    ]
+}
+
+/// How a field reads in [`differences`]: under each cardinality with
+/// no aggregator.
+fn plain() -> Vec<(Option<&'static str>, Option<&'static str>)> {
+    CARDINALITIES
+        .iter()
+        .map(|cardinality| (*cardinality, None))
+        .collect()
+}
+
+/// Every read of `twin/deduced` that answers other than it should,
+/// under each of [`TYPES`] and each of `reads` (a cardinality and a
+/// `pick`): with the entity unbound, bound to each of `entities`, and
+/// with the value bound to each of [`constants`]. A read answers what
+/// the identical read of `twin/stored` answers, except that a read
+/// whose value is bound to a constant its type does not read answers
+/// nothing: no fact of the field holds a value of another type (the
+/// stored read answers there, which
+/// [`known_divergence_a_stored_read_answers_a_constant_its_type_does_not_read`]
+/// pins). A read whose value is bound to a number may miss rows the
+/// stored read finds, and never answers one it does not:
+/// [`known_divergence_a_deduced_read_misses_a_number_constant_of_another_type`]
+/// pins what each side answers there.
+async fn differences(
+    source: &TestEnv<'_>,
+    entities: &[Entity],
+    case: &str,
+    reads: &[(Option<&str>, Option<&str>)],
+    types: &[&str],
+) -> anyhow::Result<Vec<String>> {
+    let mut terms: Vec<(String, Term<Any>, Term<Any>)> =
+        vec![("unbound".into(), Term::var("who"), Term::var("value"))];
+    for of in entities {
+        terms.push((
+            format!("this {of}"),
+            Term::Constant(Value::Entity(of.clone())),
+            Term::var("value"),
+        ));
+    }
+    for constant in constants() {
+        terms.push((
+            format!("value {constant:?}"),
+            Term::var("who"),
+            Term::Constant(constant),
+        ));
+    }
+    let mut wrong = Vec::new();
+    for (cardinality, pick) in reads {
+        for declared in types {
+            let read = |the: &str| {
+                let mut field = field(the, Some(declared), *cardinality);
+                if let Some(pick) = pick {
+                    field["pick"] = (*pick).into();
+                }
+                concept(field)
+            };
+            let kind = read("twin/stored")?
+                .with()
+                .iter()
+                .next()
+                .and_then(|(_, field)| field.content_type())
+                .map(crate::type_system::Type::from);
+            for (how, this, value) in &terms {
+                let unread = match (value, &kind) {
+                    (Term::Constant(constant), Some(kind)) => !kind.reads(constant),
+                    _ => false,
+                };
+                let expected = if unread {
+                    Vec::new()
+                } else {
+                    answers(source, read("twin/stored")?, this.clone(), value.clone()).await?
+                };
+                let deduced =
+                    answers(source, read("twin/deduced")?, this.clone(), value.clone()).await?;
+                let missed = matches!(value, Term::Constant(constant) if constant.data_type().is_number())
+                    && deduced.iter().all(|row| expected.contains(row));
+                if expected != deduced && !missed {
+                    wrong.push(format!(
+                        "{case}, {declared} under {cardinality:?} {pick:?}, {how}: expected {expected:?}, deduced {deduced:?}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(wrong)
+}
+
+/// `statements` committed to a fresh branch, read with `rules`, and
+/// checked by [`differences`] over `entities`.
+async fn case(
+    case: &str,
+    statements: Vec<(crate::attribute::Relation, Entity, Value)>,
+    rules: Vec<serde_json::Value>,
+    entities: &[Entity],
+) -> anyhow::Result<Vec<String>> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut transaction = branch.transaction();
+    for (the, of, is) in statements {
+        transaction = transaction.assert(AttributeStatement {
+            the,
+            of,
+            is,
+            cause: None,
+            cardinality: None,
+        });
+    }
+    transaction.commit().publish().perform(&operator).await?;
+    let mut registry = RuleRegistry::new();
+    for rule in rules {
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(rule)?;
+        registry.register(rule.compile()?)?;
+    }
+    let source = TestEnv::new(&branch, &operator, registry);
+    differences(&source, entities, case, &plain(), &TYPES).await
+}
+
+fn var(name: &str) -> serde_json::Value {
+    serde_json::json!({ "?": { "name": name } })
+}
+
+/// The entity, attribute and value of each of `values`, each under
+/// `twin/stored` and `from` of an entity of its own. The entities.
+fn twinned(
+    from: crate::attribute::Relation,
+    values: Vec<(Value, Value)>,
+) -> anyhow::Result<(
+    Vec<(crate::attribute::Relation, Entity, Value)>,
+    Vec<Entity>,
+)> {
+    let mut statements = Vec::new();
+    let mut entities = Vec::new();
+    for (source, concluded) in values {
+        let of = Entity::new()?;
+        statements.push((from.clone(), of.clone(), source));
+        statements.push((the!("twin/stored"), of.clone(), concluded));
+        entities.push(of);
+    }
+    Ok((statements, entities))
+}
+
+/// A rule whose head binds a constant: every entity with `twin/source`
+/// concludes the integer `-3`.
+#[dialog_common::test]
+async fn a_typed_read_reads_a_constant_a_rule_concludes_as_a_stored_one() -> anyhow::Result<()> {
+    let (statements, entities) = twinned(
+        the!("twin/source"),
+        vec![
+            (text("a"), Value::SignedInt(-3)),
+            (text("b"), Value::SignedInt(-3)),
+        ],
+    )?;
+    let rule = serde_json::json!({
+        "deduce": { "with": { "value": field("twin/deduced", None, Some("many")) } },
+        "when": [
+            {
+                "assert": { "with": { "flag": field("twin/source", None, Some("many")) } },
+                "where": { "this": var("this"), "flag": var("flag") }
+            },
+            { "assert": "==", "where": { "this": var("value"), "is": -3 } }
+        ]
+    });
+    let wrong = case("a constant head", statements, vec![rule], &entities).await?;
+    assert!(
+        wrong.is_empty(),
+        "reads that differ from the stored twin: {wrong:#?}"
+    );
+    Ok(())
+}
+
+/// A rule whose head field is a formula's output: `twin/deduced` is
+/// `twin/source` plus one.
+#[dialog_common::test]
+async fn a_typed_read_reads_a_formula_output_a_rule_concludes_as_a_stored_one() -> anyhow::Result<()>
+{
+    let (statements, entities) = twinned(
+        the!("twin/source"),
+        vec![
+            (Value::UnsignedInt(3), Value::UnsignedInt(4)),
+            (Value::UnsignedInt(7), Value::UnsignedInt(8)),
+        ],
+    )?;
+    let rule = serde_json::json!({
+        "deduce": { "with": { "value": field("twin/deduced", None, Some("many")) } },
+        "when": [
+            {
+                "assert": { "with": { "n": field("twin/source", Some("natural:"), Some("many")) } },
+                "where": { "this": var("this"), "n": var("n") }
+            },
+            {
+                "assert": "math/sum",
+                "where": { "of": var("n"), "with": 1, "is": var("value") }
+            }
+        ]
+    });
+    let wrong = case("a formula head", statements, vec![rule], &entities).await?;
+    assert!(
+        wrong.is_empty(),
+        "reads that differ from the stored twin: {wrong:#?}"
+    );
+    Ok(())
+}
+
+/// A field that picks among the claims of a deduced relation, which
+/// the engine answers with a selecting rule that folds them, reads
+/// through the field's type as over a stored relation. Each entity
+/// holds one value here: what a pick elects among several of them is
+/// [`known_divergence_a_stored_pick_elects_before_it_reads_through_the_type`].
+#[dialog_common::test]
+async fn a_typed_pick_reads_a_deduced_relation_as_a_stored_one() -> anyhow::Result<()> {
+    let (statements, entities) = twinned(
+        the!("twin/source"),
+        [
+            text("hello"),
+            Value::UnsignedInt(3),
+            Value::SignedInt(-3),
+            Value::Float(2.5),
+        ]
+        .into_iter()
+        .map(|value| (value.clone(), value))
+        .collect(),
+    )?;
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    commit(&branch, &operator, statements).await?;
+    let mut registry = RuleRegistry::new();
+    copy(
+        &mut registry,
+        field("twin/deduced", None, Some("many")),
+        "twin/source",
+    )?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    let mut wrong = differences(
+        &source,
+        &entities,
+        "a pick",
+        &[(None, Some("last"))],
+        &TYPES,
+    )
+    .await?;
+    let numbers = &TYPES[3..];
+    let ordered = [(None, Some("max")), (None, Some("min"))];
+    wrong.extend(differences(&source, &entities, "a pick", &ordered, numbers).await?);
+    assert!(
+        wrong.is_empty(),
+        "reads that differ from the stored twin: {wrong:#?}"
+    );
+    Ok(())
+}
+
+/// Commits `statements`, one transaction for all of them.
+async fn commit(
+    branch: &dialog_repository::Branch,
+    operator: &Operator,
+    statements: Vec<(crate::attribute::Relation, Entity, Value)>,
+) -> anyhow::Result<()> {
+    let mut transaction = branch.transaction();
+    for (the, of, is) in statements {
+        transaction = transaction.assert(AttributeStatement {
+            the,
+            of,
+            is,
+            cause: None,
+            cardinality: Some(crate::Cardinality::Many),
+        });
+    }
+    transaction.commit().publish().perform(operator).await?;
+    Ok(())
+}
+
+/// What a read of `the` under `declared` and `cardinality` answers with
+/// its value bound to `constant`.
+async fn bound(
+    source: &TestEnv<'_>,
+    the: &str,
+    declared: &str,
+    cardinality: Option<&str>,
+    constant: &Value,
+) -> anyhow::Result<Vec<String>> {
+    answers(
+        source,
+        concept(field(the, Some(declared), cardinality))?,
+        Term::var("who"),
+        Term::Constant(constant.clone()),
+    )
+    .await
+}
+
+/// A source holding the natural `3` under `twin/stored` and
+/// `twin/source` of one entity and the integer `-3` under both of
+/// another, with `twin/deduced` copied from `twin/source`. The two
+/// entities.
+async fn numbers(
+    branch: &dialog_repository::Branch,
+    operator: &Operator,
+) -> anyhow::Result<(Entity, Entity)> {
+    let (natural, negative) = (Entity::new()?, Entity::new()?);
+    let mut statements = Vec::new();
+    for (of, value) in [
+        (&natural, Value::UnsignedInt(3)),
+        (&negative, Value::SignedInt(-3)),
+    ] {
+        for the in [the!("twin/stored"), the!("twin/source")] {
+            statements.push((the, of.clone(), value.clone()));
+        }
+    }
+    commit(branch, operator, statements).await?;
+    Ok((natural, negative))
+}
+
+/// A row of [`answers`]: `of` holding `value`.
+fn row(of: &Entity, value: &Value) -> String {
+    format!("{:?} {value:?}", Value::Entity(of.clone()))
+}
+
+/// A known divergence, pinned as it is today. A read whose value is
+/// bound to a number of another number type than the value the
+/// relation holds (a `float:` field bound to the natural `3`, a
+/// `natural:` or `number:` field bound to the float `3.0`, over a
+/// natural `3`) finds the stored fact holding that number, as a stored
+/// scan matches a number across its types, and finds nothing in a
+/// deduced relation holding the same number, under every cardinality.
+/// A fix makes the deduced read find it, and flips this pin.
+#[dialog_common::test]
+async fn known_divergence_a_deduced_read_misses_a_number_constant_of_another_type()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let (natural, negative) = numbers(&branch, &operator).await?;
+    let mut registry = RuleRegistry::new();
+    copy(
+        &mut registry,
+        field("twin/deduced", None, Some("many")),
+        "twin/source",
+    )?;
+    let source = TestEnv::new(&branch, &operator, registry);
+
+    for (declared, constant, of) in [
+        ("float:", Value::UnsignedInt(3), &natural),
+        ("float:", Value::SignedInt(-3), &negative),
+        ("natural:", Value::Float(3.0), &natural),
+        ("integer:", Value::Float(3.0), &natural),
+        ("number:", Value::Float(3.0), &natural),
+    ] {
+        let found = vec![row(of, &constant)];
+        for cardinality in CARDINALITIES {
+            assert_eq!(
+                bound(&source, "twin/stored", declared, cardinality, &constant).await?,
+                found,
+                "the stored {declared} read under {cardinality:?} finds {constant:?}"
+            );
+            assert_eq!(
+                bound(&source, "twin/deduced", declared, cardinality, &constant).await?,
+                Vec::<String>::new(),
+                "the deduced {declared} read under {cardinality:?} misses {constant:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A known divergence, pinned as it is today, and a wrong answer on the
+/// stored side: a read whose value is bound to a constant its type does
+/// not read (a `text:` field bound to the integer `-3`) answers the
+/// stored fact holding that constant, though no fact of the field holds
+/// a value of another type. The same read of a deduced relation holding
+/// it answers nothing. A fix makes the stored read answer nothing, and
+/// flips this pin.
+#[dialog_common::test]
+async fn known_divergence_a_stored_read_answers_a_constant_its_type_does_not_read()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let (_, negative) = numbers(&branch, &operator).await?;
+    let mut registry = RuleRegistry::new();
+    copy(
+        &mut registry,
+        field("twin/deduced", None, Some("many")),
+        "twin/source",
+    )?;
+    let source = TestEnv::new(&branch, &operator, registry);
+
+    let constant = Value::SignedInt(-3);
+    assert_eq!(
+        bound(&source, "twin/stored", "text:", None, &constant).await?,
+        vec![row(&negative, &constant)],
+        "the stored text: read answers the integer it was bound to"
+    );
+    assert_eq!(
+        bound(&source, "twin/deduced", "text:", None, &constant).await?,
+        Vec::<String>::new(),
+        "the deduced text: read answers nothing"
+    );
+    Ok(())
+}
+
+/// A known divergence, pinned as it is today. One entity holds, written
+/// under cardinality many in this order, the text `hello`, the natural
+/// `3`, the integer `-3` and the float `2.5`, stored and deduced. A
+/// `natural:` field that picks `max` answers `2` of the stored relation:
+/// the read elects the cell's newest claim, `2.5`, then reads it
+/// through the type. Of the deduced relation it answers `3`: the read
+/// reads every claim through the type, then picks among them. A `float:`
+/// field that picks `max` answers `2.5` and `3.0` the same way. Which
+/// of the two the engine means is the maintainer's to decide; the
+/// decision flips one side of this pin.
+#[dialog_common::test]
+async fn known_divergence_a_stored_pick_elects_before_it_reads_through_the_type()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let of = Entity::new()?;
+    for value in [
+        text("hello"),
+        Value::UnsignedInt(3),
+        Value::SignedInt(-3),
+        Value::Float(2.5),
+    ] {
+        commit(
+            &branch,
+            &operator,
+            vec![
+                (the!("twin/stored"), of.clone(), value.clone()),
+                (the!("twin/source"), of.clone(), value),
+            ],
+        )
+        .await?;
+    }
+    let mut registry = RuleRegistry::new();
+    copy(
+        &mut registry,
+        field("twin/deduced", None, Some("many")),
+        "twin/source",
+    )?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    let picked = async |the: &str, declared: &str| {
+        let mut field = field(the, Some(declared), None);
+        field["pick"] = "max".into();
+        answers(
+            &source,
+            concept(field)?,
+            Term::var("who"),
+            Term::var("value"),
+        )
+        .await
+    };
+    for (declared, stored, deduced) in [
+        ("natural:", Value::UnsignedInt(2), Value::UnsignedInt(3)),
+        ("float:", Value::Float(2.5), Value::Float(3.0)),
+    ] {
+        assert_eq!(
+            picked("twin/stored", declared).await?,
+            vec![row(&of, &stored)],
+            "the stored {declared} max"
+        );
+        assert_eq!(
+            picked("twin/deduced", declared).await?,
+            vec![row(&of, &deduced)],
+            "the deduced {declared} max"
+        );
+    }
+    Ok(())
+}
+
+/// A rule that concludes some entities only, beside entities whose
+/// value is stored under the relation itself: the stored candidates and
+/// the deduced ones are each read through the type.
+#[dialog_common::test]
+async fn a_typed_read_reads_a_rule_concluding_some_entities_as_a_stored_one() -> anyhow::Result<()>
+{
+    let (mut statements, mut entities) = twinned(
+        the!("twin/source"),
+        vec![
+            (text("hello"), text("hello")),
+            (Value::UnsignedInt(3), Value::UnsignedInt(3)),
+            (Value::Float(2.5), Value::Float(2.5)),
+        ],
+    )?;
+    for value in [Value::SignedInt(-3), text("stored"), Value::UnsignedInt(9)] {
+        let of = Entity::new()?;
+        statements.push((the!("twin/stored"), of.clone(), value.clone()));
+        statements.push((the!("twin/deduced"), of.clone(), value));
+        entities.push(of);
+    }
+    let wrong = case(
+        "some entities",
+        statements,
+        vec![serde_json::json!({
+            "deduce": { "with": { "value": field("twin/deduced", None, Some("many")) } },
+            "when": [{
+                "assert": { "with": { "value": field("twin/source", None, Some("many")) } },
+                "where": { "this": var("this"), "value": var("value") }
+            }]
+        })],
+        &entities,
+    )
+    .await?;
+    assert!(
+        wrong.is_empty(),
+        "reads that differ from the stored twin: {wrong:#?}"
+    );
+    Ok(())
+}
+
+/// A rule registered after a read of the relation was planned and its
+/// bundle cached: the next read takes the rule, and reads its values
+/// through the type, whether the rule is the read's whole answer or
+/// stands beside a fixpoint.
+#[dialog_common::test]
+async fn a_typed_read_reads_a_rule_installed_after_a_cached_read_as_a_stored_one()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let (statements, entities) = twinned(
+        the!("twin/source"),
+        vec![
+            (text("hello"), text("hello")),
+            (Value::UnsignedInt(3), Value::UnsignedInt(3)),
+            (Value::SignedInt(-3), Value::SignedInt(-3)),
+        ],
+    )?;
+    let mut transaction = branch.transaction();
+    for (the, of, is) in statements {
+        transaction = transaction.assert(AttributeStatement {
+            the,
+            of,
+            is,
+            cause: None,
+            cardinality: None,
+        });
+    }
+    transaction.commit().publish().perform(&operator).await?;
+
+    let mut registry = RuleRegistry::new();
+    let source = TestEnv::new(&branch, &operator, registry.clone());
+    for declared in TYPES {
+        for cardinality in CARDINALITIES {
+            let read = concept(field("twin/deduced", Some(declared), cardinality))?;
+            assert!(
+                answers(&source, read, Term::var("who"), Term::var("value"))
+                    .await?
+                    .is_empty(),
+                "nothing derives the relation yet"
+            );
+        }
+    }
+    let deduced = field("twin/deduced", None, Some("many"));
+    copy(&mut registry, deduced.clone(), "twin/source")?;
+    let mut wrong = differences(&source, &entities, "installed after", &plain(), &TYPES).await?;
+    copy(&mut registry, deduced, "twin/deduced")?;
+    wrong.extend(
+        differences(
+            &source,
+            &entities,
+            "recursive, installed after",
+            &plain(),
+            &TYPES,
+        )
+        .await?,
+    );
     assert!(
         wrong.is_empty(),
         "reads that differ from the stored twin: {wrong:#?}"
