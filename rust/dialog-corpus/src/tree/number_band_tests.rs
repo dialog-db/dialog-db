@@ -15,8 +15,8 @@ use crate::key::fact_index_keys;
 use crate::key::varkey::parse_key_ref;
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Cardinality, Entity, Fact, Instruction, NUMBER_BAND, Relation, Selector, Value,
-    ValueDataType,
+    ArchiveDelta, Cardinality, Entity, Fact, FactView, Instruction, NUMBER_BAND, Relation,
+    Selector, Value, ValueDataType,
 };
 
 /// A tree written under `value_encoding`, holding `facts`.
@@ -246,6 +246,55 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
             .await?
             .len(),
         2
+    );
+    Ok(())
+}
+
+/// A tree an earlier release keyed in per-type bands holds `5` and `5.0`
+/// as two claims of one cell, and two claims one commit wrote stand
+/// equal. [`Value::tiebreak`] hashes the number, not the type, so the
+/// tie between them must still elect one of the two whatever order the
+/// election meets them in, as it does for any other two values.
+#[dialog_common::test]
+async fn it_elects_one_of_a_number_held_as_two_types_in_either_order() -> anyhow::Result<()> {
+    let item = Entity::new()?;
+    let facts = [Value::UnsignedInt(5), Value::Float(5.0)]
+        .into_iter()
+        .map(|is| Fact {
+            the: size(),
+            of: item.clone(),
+            is,
+            cause: None,
+        })
+        .collect::<Vec<_>>();
+    let (per_type, store) = tree(0, facts).await?;
+    let rows: Vec<Fact> = per_type
+        .clone()
+        .scan_owned(
+            store.clone(),
+            SpillCache::with_budget(0),
+            Selector::new().of(item),
+        )
+        .try_collect()
+        .await?;
+    let [natural, float] = rows.as_slice() else {
+        anyhow::bail!("expected two claims of the cell, found {}", rows.len());
+    };
+
+    let forward = FactView::from(natural.clone()).elect(FactView::from(float.clone()))?;
+    let backward = FactView::from(float.clone()).elect(FactView::from(natural.clone()))?;
+    assert_eq!(
+        forward.to_owned()?.is,
+        backward.to_owned()?.is,
+        "a stored cardinality-one read elects the same claim in either order"
+    );
+
+    let natural = (&natural.is, None);
+    let float = (&float.is, None);
+    assert_ne!(
+        Cardinality::newer(natural, float),
+        Cardinality::newer(float, natural),
+        "exactly one of the two is the newer, whichever is the candidate"
     );
     Ok(())
 }
