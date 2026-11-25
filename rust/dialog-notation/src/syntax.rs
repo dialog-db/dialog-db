@@ -395,7 +395,7 @@ pub fn named(name: &str) -> Named {
 /// 2026-11-24). Every place that decides whether a name is declared or
 /// stored asks this.
 pub fn declarable(name: &str) -> bool {
-    !name.contains('.') && matches!(Kind::of(name), Kind::Name | Kind::Attribute)
+    named(name) == Named::Declarable
 }
 
 /// The refusal of `form`, which declares `name` as `what` though it
@@ -833,8 +833,13 @@ impl Syntax {
 
     /// Whether this applies a relation: its operator is a domain.
     pub fn is_read(&self) -> bool {
-        self.applies()
-            .is_some_and(|name| Kind::of(name) == Kind::Domain || named(name) == Named::Derived)
+        self.applies().is_some_and(|name| match named(name) {
+            Named::Domain | Named::Derived => true,
+            // The notation's own relations, `dialog.n.query.row`, are
+            // read in the trees it gives.
+            Named::Reserved => !name.contains('/'),
+            _ => false,
+        })
     }
 
     /// Whether this applies a formula: its operator is a keyword or an

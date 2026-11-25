@@ -136,10 +136,10 @@ pub const THIS: &str = "this";
 /// Whether a document may not name `name`, a relation or an attribute
 /// of one: it is under the notation's own namespace.
 fn reserved_name(name: &str) -> bool {
-    let relation = name.split_once('/').map_or(name, |(relation, _)| relation);
-    relation
-        .strip_prefix(syntax::NAMESPACE)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    matches!(
+        syntax::named(name),
+        syntax::Named::Reserved | syntax::Named::Derived
+    )
 }
 
 /// The first part of `tree` as written that names what the notation
@@ -1948,9 +1948,8 @@ impl Expander {
                     _ => None,
                 }
             }
-            (Some("domain"), _) => {
-                (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
-            }
+            (Some("domain"), _) => (syntax::named(&name(subject?)?) == syntax::Named::Domain)
+                .then_some(bindings.clone()),
             (Some("name"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Name).then_some(bindings.clone())
             }
@@ -2281,7 +2280,7 @@ impl Expander {
             if !declared
                 && let Some(word) = word
                     .as_deref()
-                    .filter(|word| Kind::of(word) == Kind::Attribute && syntax::declarable(word))
+                    .filter(|word| syntax::declarable(word) && word.contains('/'))
             {
                 self.misread.push((self.tree, word.to_string()));
                 if let Some((concept, _)) = word.rsplit_once('/')
@@ -2295,8 +2294,7 @@ impl Expander {
             // name.
             if !declared
                 && let Some(word) = word.as_deref().filter(|word| {
-                    Kind::of(word) == Kind::Attribute
-                        && !syntax::declarable(word)
+                    syntax::named(word) == syntax::Named::Attribute
                         && word
                             .rsplit_once('/')
                             .is_some_and(|(concept, _)| self.concepts.contains(concept))
@@ -2315,7 +2313,7 @@ impl Expander {
             // for it is made where it is compiled.
             if !declared
                 && let Some((concept, name)) = word.as_deref().and_then(|word| {
-                    (Kind::of(word) == Kind::Attribute && syntax::declarable(word))
+                    (syntax::declarable(word) && word.contains('/'))
                         .then(|| word.rsplit_once('/'))
                         .flatten()
                 })

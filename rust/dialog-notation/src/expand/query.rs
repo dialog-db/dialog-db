@@ -258,11 +258,12 @@ impl Expander {
             return Err(asks(tree));
         };
         // A domain or a stored attribute is read, not defined.
-        if name.contains('.') {
-            return Err(crate::syntax::undeclarable(head, "query", name));
-        }
-        if !crate::syntax::declarable(name) || !operand.terms.contains_key("is") {
-            return Err(asks(tree));
+        match crate::syntax::named(name) {
+            crate::syntax::Named::Declarable if operand.terms.contains_key("is") => {}
+            crate::syntax::Named::Domain | crate::syntax::Named::Attribute => {
+                return Err(crate::syntax::undeclarable(head, "query", name));
+            }
+            _ => return Err(asks(tree)),
         }
         let name = name.to_string();
         // A concept another form of the document defines under this name
@@ -550,8 +551,9 @@ impl Expander {
             && matches!(&collect.place, Place::Term(label) if label == "is")
             && !self.concepts.contains(name)
             && !self.queries.contains_key(name)
+            && crate::syntax::declarable(name)
             && name
-                .split_once('/')
+                .rsplit_once('/')
                 .is_some_and(|(concept, _)| self.concepts.contains(concept))
     }
 
@@ -763,7 +765,7 @@ impl Expander {
     fn source(&mut self, collect: &Collecting) -> Result<Syntax, Error> {
         let name = collect.condition.applies().unwrap_or_default().to_string();
         let concept = name
-            .split_once('/')
+            .rsplit_once('/')
             .map(|(concept, _)| concept.to_string())
             .unwrap_or_default();
         let operand = collect.condition.operand().cloned().unwrap_or_default();
