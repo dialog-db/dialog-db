@@ -134,6 +134,8 @@
 //! word before `distinct`, is refused saying so.
 
 mod analyze;
+#[cfg(feature = "repository")]
+pub mod apply;
 mod check;
 mod compile;
 mod data;
@@ -153,6 +155,8 @@ pub mod view;
 mod written;
 
 pub use analyze::{Analysis, Analyzer};
+#[cfg(feature = "repository")]
+pub use apply::{Applied, ApplyError, apply};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
