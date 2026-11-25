@@ -8264,6 +8264,11 @@ async fn it_lands_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<
 }
 
 /// [`it_lands_durable_writes_racing_on_one_replica`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
 #[dialog_common::test]
 async fn it_lands_durable_writes_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
@@ -8283,6 +8288,11 @@ async fn it_lands_eight_durable_writes_racing_on_one_replica(s3: S3Address) -> R
 }
 
 /// [`it_lands_eight_durable_writes_racing_on_one_replica`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
 #[dialog_common::test]
 async fn it_lands_eight_durable_writes_racing_on_one_replica_in_memory(
     s3: S3Address,
@@ -8303,6 +8313,11 @@ async fn it_lands_a_durable_write_racing_a_sync(s3: S3Address) -> Result<()> {
 }
 
 /// [`it_lands_a_durable_write_racing_a_sync`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
 #[dialog_common::test]
 async fn it_lands_a_durable_write_racing_a_sync_in_memory(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
