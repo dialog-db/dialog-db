@@ -65,9 +65,9 @@ use dialog_effects::{
     Rejection,
     blob::{BlobWriter, Import as BlobImportEffect},
 };
-use dialog_peer::Peer;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_peer::helpers::test_owned;
+use dialog_peer::{Peer, PeerSpace};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -2367,14 +2367,14 @@ fn residents(batch: usize) -> Vec<Instruction> {
 /// A device that authored a subject and published it, and a second device
 /// that adopted its head and holds none of its tree: the two ends of the
 /// tests of what a replica holds once it adopts a head another moved.
-struct Followed {
+struct Followed<S: PeerSpace = VolatileSpace> {
     /// The authoring device's branch, and what it performs through.
     alice: Branch,
-    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    operator: Peer<S, dialog_peer::Session>,
     /// The following device's branch, and the counting env it performs
     /// through.
     bob: Branch,
-    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+    env: Counting<Peer<S, dialog_peer::Session>>,
 }
 
 /// [`Followed`] over `s3`: four batches of residents published, and
@@ -2433,13 +2433,13 @@ enum Follower<'a> {
 /// The author's `repository` published over `s3` with four batches of
 /// residents, and the `follower`'s replica of it, which adopted that head
 /// and read none of it.
-async fn following(
-    operator: Peer<VolatileSpace, dialog_peer::Session>,
-    profile: Peer<VolatileSpace>,
+async fn following<S: PeerSpace>(
+    operator: Peer<S, dialog_peer::Session>,
+    profile: Peer<S>,
     alice_repo: Repository<SignerCredential>,
     s3: &S3Address,
     follower: Follower<'_>,
-) -> Result<Followed> {
+) -> Result<Followed<S>> {
     let site = s3_site_address(s3);
     profile
         .secrets()
@@ -2490,7 +2490,7 @@ async fn following(
     })
 }
 
-impl Followed {
+impl<S: PeerSpace> Followed<S> {
     /// The names the follower reads of `entity`, and how many blocks it
     /// fetched from the remote to read them.
     async fn names_of(&self, entity: &str) -> Result<(Vec<Value>, u64)> {
@@ -2881,12 +2881,12 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
 /// A durable layer an author wrote many rows into and synced, and a
 /// follower that synced it, both on `storage` under keys `seed` derives
 /// (the follower's space included), with the follower's stack.
-struct Layered {
+struct Layered<S: PeerSpace = VolatileSpace> {
     notes: Entity,
     /// The name of the follower's space.
     space: String,
     follower: crate::Stack,
-    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+    env: Counting<Peer<S, dialog_peer::Session>>,
 }
 
 /// The `doc/note` of `doc` as `text`, written into `layer`.
@@ -2899,9 +2899,7 @@ fn noted(doc: &Entity, text: &str, layer: &Entity) -> impl dialog_corpus::Statem
 }
 
 /// The session a test performs through on `peer`.
-async fn session_of(
-    peer: &Peer<VolatileSpace>,
-) -> Result<Peer<VolatileSpace, dialog_peer::Session>> {
+async fn session_of<S: PeerSpace>(peer: &Peer<S>) -> Result<Peer<S, dialog_peer::Session>> {
     Ok(peer
         .session(b"test")
         .space(peer.state())
@@ -2910,12 +2908,12 @@ async fn session_of(
 }
 
 /// [`Layered`] over `s3`, its profile opened at `location` on `storage`.
-async fn layered(
+async fn layered<S: PeerSpace>(
     seed: &Seed,
     s3: &S3Address,
-    storage: &Storage<VolatileSpace>,
+    storage: &Storage<S>,
     location: &Location,
-) -> Result<Layered> {
+) -> Result<Layered<S>> {
     use crate::{LayerDeclaration, LayerType};
     use dialog_corpus::{Changes, Statement as _};
 
@@ -2998,7 +2996,7 @@ async fn layered(
     })
 }
 
-impl Layered {
+impl<S: PeerSpace> Layered<S> {
     /// The follower writes its note as `text`, and how many blocks it
     /// fetched from the remote to write it.
     async fn write(&self, text: &str) -> Result<u64> {
@@ -7340,10 +7338,12 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
 /// The push is still refused and upstream still keeps the other
 /// writer's revision — the head write is conditional, so safety does
 /// not rest on the check that was skipped. What changes is when the
-/// refusal arrives and what it is called: after the upload rather than
-/// before it, and as a version mismatch rather than a non-fast-forward.
-/// A caller that reports conflicts has to recognize both, which is the
-/// trade [`Push::assuming_upstream`] documents.
+/// refusal arrives: after the upload rather than before it, which is the
+/// trade [`Push::assuming_upstream`] documents. It is still a
+/// non-fast-forward naming the head that won: S3 says only that the
+/// condition failed, so the push reads the remote's head once to learn
+/// it, rather than answering with the bare version mismatch it did
+/// before.
 #[dialog_common::test]
 async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -7421,14 +7421,11 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
 
     assert!(
         matches!(
-            refused,
-            Err(crate::PushError::PublishRemoteBranch(
-                crate::PublishRemoteBranchError::Publish(
-                    crate::PublishError::VersionMismatch { .. }
-                )
-            ))
+            &refused,
+            Err(crate::PushError::NonFastForward { actual: Some(tree), .. }) if *tree == ahead
         ),
-        "an assumed push whose upstream moved is refused by the conditional write, got: {refused:?}"
+        "an assumed push whose upstream moved is refused by the conditional write, naming \
+         the head that won, got: {refused:?}"
     );
 
     let observer = contact("origin")
@@ -8203,3 +8200,537 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
     assert_eq!(rows.len(), 2);
     Ok(())
 }
+
+/// A head a refused push recorded reads as stale when the watch delivers
+/// it, while the branch does not hold it, and a sync on that stale head
+/// takes it.
+///
+/// A push to a remote that moved records where the remote stands, then
+/// fails with `PushError::NonFastForward`, and merges nothing. When the
+/// watch then delivers that same head, it is the head recorded, so the
+/// observation is `Observation::Stale`: recorded, not taken. An embedder
+/// that reads a watch must sync its branch on `Stale` as on `Advanced`,
+/// as `Replicate` does (`replicate.rs`), or the branch stays behind a
+/// head nothing pulls.
+///
+/// The local S3 server refuses to watch a cell, so the test delivers the
+/// head as the watch does for each head the remote answers
+/// (`WatchRemoteBranch`): it observes the edition the remote holds.
+#[dialog_common::test]
+async fn it_observes_a_head_a_refused_push_recorded_as_stale_until_a_sync_takes_it(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "stale-after-refusal").await?;
+    devices.name("user:0-0", "mine").await?;
+    devices
+        .alice
+        .commit(stream::iter(vec![named("user:0-1", "theirs")]))
+        .perform(&devices.operator)
+        .await?;
+    devices.alice.push().perform(&devices.operator).await?;
+    let theirs = devices
+        .alice
+        .revision()
+        .context("the author published a head")?;
+
+    let refused = devices.bob.push().perform(&devices.env).await;
+    assert!(
+        matches!(refused, Err(crate::PushError::NonFastForward { .. })),
+        "the remote moved, so the follower's push is refused: {refused:?}"
+    );
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        devices.bob.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the follower pulls from no remote");
+    };
+    let upstream = remote.branch(branch).open().perform(&devices.env).await?;
+    assert_eq!(
+        upstream.revision(),
+        Some(theirs.clone()),
+        "the refused push recorded the head the remote holds"
+    );
+    let (names, _) = devices.names_of("user:0-1").await?;
+    assert!(
+        !names.contains(&Value::String("theirs".into())),
+        "the follower's branch does not hold the author's head: {names:?}"
+    );
+
+    let delivered = upstream
+        .cache()
+        .content()
+        .context("the remote head is recorded")?;
+    let observed = upstream.observe(delivered).perform(&devices.env).await?;
+    assert_eq!(
+        observed,
+        crate::Observation::Stale,
+        "the watch's delivery of a head already recorded is stale"
+    );
+    let (names, _) = devices.names_of("user:0-1").await?;
+    assert!(
+        !names.contains(&Value::String("theirs".into())),
+        "a stale observation takes nothing into the branch: {names:?}"
+    );
+
+    devices
+        .bob
+        .pull(crate::Download::QueriedRanges)
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await?
+        .context("the sync on the stale head takes it")?;
+    for (entity, name) in [("user:0-0", "mine"), ("user:0-1", "theirs")] {
+        let (names, _) = devices.names_of(entity).await?;
+        assert!(
+            names.contains(&Value::String(name.into())),
+            "after the sync the follower holds {entity} {name:?}: {names:?}"
+        );
+    }
+    devices.bob.push().perform(&devices.env).await?;
+    Ok(())
+}
+
+/// `$race(&layered, $args...)` over a [`Layered`] keyed by `$seed`, on
+/// the platform's durable storage: the filesystem natively, in a
+/// directory of its own, and IndexedDB in the browser.
+macro_rules! on_durable_storage {
+    ($seed:expr, $s3:expr, $race:ident $(, $arg:expr)*) => {{
+        use dialog_effects::storage::Directory;
+        use dialog_peer::helpers::test_owned;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (_root, storage, directory) = {
+            use dialog_storage::provider::storage::NativeSpace;
+            let root = tempfile::tempdir()?;
+            let directory = Directory::At(root.path().to_string_lossy().into_owned());
+            (
+                root,
+                test_owned(Storage::<NativeSpace>::default()).await,
+                directory,
+            )
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (storage, directory) = {
+            use dialog_storage::provider::storage::WebSpace;
+            (
+                test_owned(Storage::<WebSpace>::default()).await,
+                Directory::Temp,
+            )
+        };
+        let location = Location::new(directory, unique_name("layered"));
+        $race(&layered($seed, $s3, &storage, &location).await? $(, $arg)*).await
+    }};
+}
+
+/// A [`Layered`] keyed by `seed`, in memory.
+async fn layered_in_memory(seed: &Seed, s3: &S3Address) -> Result<Layered> {
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("layered"));
+    layered(seed, s3, &storage, &location).await
+}
+
+/// Two writes into a durable layer through one replica, racing on one
+/// thread, both land, on the platform's durable storage: the filesystem
+/// natively, and IndexedDB in the browser.
+///
+/// A write through the stack commits a transaction on the primary and
+/// publishes its head with a compare-and-swap. The loser of a race
+/// between two of them loses that compare-and-swap with
+/// `VersionMismatch`, and the stack runs it again on the new head. Every
+/// note written is then in the layer.
+///
+/// On the filesystem the second write used to fail with "Concurrent
+/// write in progress": the head's cell is written under a lock file, and
+/// a second writer of the same process was refused it instead of waiting
+/// its turn, so it never reached the compare-and-swap and nothing ran it
+/// again. The volatile run is
+/// [`it_lands_durable_writes_racing_on_one_replica_in_memory`].
+#[dialog_common::test]
+async fn it_lands_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_durable_writes, 2)
+}
+
+/// [`it_lands_durable_writes_racing_on_one_replica`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
+#[dialog_common::test]
+async fn it_lands_durable_writes_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_durable_writes(&layered_in_memory(&seed, &s3).await?, 2).await
+}
+
+/// Eight writes into a durable layer through one replica, racing, all
+/// land, on the platform's durable storage. Each round one of the eight
+/// wins the head and the others run again on it, so a write loses at
+/// most seven times, inside the stack's `MAX_RERUNS` of eight.
+#[dialog_common::test]
+async fn it_lands_eight_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_durable_writes, 8)
+}
+
+/// [`it_lands_eight_durable_writes_racing_on_one_replica`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
+#[dialog_common::test]
+async fn it_lands_eight_durable_writes_racing_on_one_replica_in_memory(
+    s3: S3Address,
+) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_durable_writes(&layered_in_memory(&seed, &s3).await?, 8).await
+}
+
+/// A write into a durable layer racing a sync of the stack, on one
+/// replica, lands, and the sync returns, on the platform's durable
+/// storage.
+#[dialog_common::test]
+async fn it_lands_a_durable_write_racing_a_sync(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_a_write_and_a_sync)
+}
+
+/// [`it_lands_a_durable_write_racing_a_sync`] in memory.
+///
+/// In memory the writes do not overlap: a write to a volatile store
+/// never waits, so each runs to its end before the next begins, and none
+/// loses a compare-and-swap. This checks only that they all land; the
+/// race itself is the durable-storage run.
+#[dialog_common::test]
+async fn it_lands_a_durable_write_racing_a_sync_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_a_write_and_a_sync(&layered_in_memory(&seed, &s3).await?).await
+}
+
+/// Five rounds of `writers` writes into `layered`'s durable layer, racing,
+/// each to a note of its own; then every note written is in the layer.
+async fn race_durable_writes<S: PeerSpace>(layered: &Layered<S>, writers: usize) -> Result<()> {
+    use futures_util::future::join_all;
+
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let docs = (0..writers)
+            .map(|writer| format!("doc:w{writer}-{round}"))
+            .collect::<Vec<_>>();
+        let entities = docs
+            .iter()
+            .map(|doc| doc.parse::<Entity>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let written = join_all(entities.iter().map(|doc| {
+            layered
+                .follower
+                .assert(noted(doc, "w", &layered.notes))
+                .perform(&layered.env)
+        }))
+        .await;
+        for (writer, result) in written.into_iter().enumerate() {
+            result.with_context(|| format!("round {round}: writer {writer} lands"))?;
+        }
+        notes.extend(docs.into_iter().map(|doc| (doc, "w".to_string())));
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note the writers wrote"
+    );
+    Ok(())
+}
+
+/// Five rounds of a write into `layered`'s durable layer racing a sync of
+/// the stack; then every note written is in the layer.
+async fn race_a_write_and_a_sync<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let doc = format!("doc:s-{round}");
+        let (written, synced) = futures_util::join!(
+            layered
+                .follower
+                .assert(noted(&doc.parse()?, "s", &layered.notes))
+                .perform(&layered.env),
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+        );
+        written.with_context(|| format!("round {round}: the write lands"))?;
+        synced.with_context(|| format!("round {round}: the sync returns"))?;
+        notes.push((doc, "s".into()));
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note written beside the syncs"
+    );
+    Ok(())
+}
+
+/// The notes in `layered`'s durable layer but the fixture's bulk, as
+/// `(doc, note)`, sorted.
+async fn notes_in<S: PeerSpace>(layered: &Layered<S>) -> Result<Vec<(String, String)>> {
+    use dialog_corpus::Relation;
+    use dialog_query::attribute::Relation as QueryRelation;
+    use dialog_query::query::Output as _;
+    use dialog_query::{AttributeQuery, Term};
+
+    let query = AttributeQuery::from(
+        Term::<QueryRelation>::from(QueryRelation::from("doc/note".parse::<Relation>()?))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<String>::var("v")),
+    )
+    .with_layer(Term::Constant(Value::Entity(layered.notes.clone())));
+    let claims = layered
+        .follower
+        .query()
+        .select(query)
+        .perform(&layered.env)
+        .try_vec()
+        .await?;
+    let mut read = claims
+        .into_iter()
+        .filter(|claim| !claim.of.to_string().starts_with("doc:bulk-"))
+        .map(|claim| match claim.is {
+            Value::String(text) => Ok((claim.of.to_string(), text)),
+            other => Err(anyhow::anyhow!("a note that is no text: {other:?}")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    read.sort();
+    Ok(read)
+}
+
+/// Two syncs of a stack racing on one replica both return, on the
+/// platform's durable storage, and the replica's write reaches the
+/// remote.
+///
+/// Each sync pushes the replica's head. Both push the same head from the
+/// same base, so the second's publish to the remote loses the
+/// compare-and-swap the first won, to the very head it meant to publish.
+///
+/// The remote says only that the condition failed, not what it holds,
+/// so the second push reads the remote's head once, finds it is the head
+/// it meant to publish, and has landed. Before, it failed on every
+/// provider with "Failed to publish revision to upstream: Version
+/// mismatch: expected …, found an unknown state", taking the lost
+/// compare-and-swap it could not see past for its answer.
+#[dialog_common::test]
+async fn it_lands_two_syncs_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_two_syncs)
+}
+
+/// [`it_lands_two_syncs_racing_on_one_replica`] in memory, where it fails
+/// the same way: the race is at the remote, not in the replica's store.
+#[dialog_common::test]
+async fn it_lands_two_syncs_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_two_syncs(&layered_in_memory(&seed, &s3).await?).await
+}
+
+/// Five rounds of a write into `layered`'s durable layer, then two syncs
+/// of the stack racing; then every note written is in the layer, and the
+/// remote's head, as the replica recorded it, is the replica's own.
+async fn race_two_syncs<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let doc = format!("doc:t-{round}");
+        layered
+            .follower
+            .assert(noted(&doc.parse()?, "t", &layered.notes))
+            .perform(&layered.env)
+            .await?;
+        notes.push((doc, "t".into()));
+        let (first, second) = futures_util::join!(
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+        );
+        first.with_context(|| format!("round {round}: the first sync returns"))?;
+        second.with_context(|| format!("round {round}: the second sync returns"))?;
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note written between the syncs"
+    );
+    let primary = layered.follower.primary();
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        primary.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the primary pulls from no remote");
+    };
+    let upstream = remote.branch(branch).open().perform(&layered.env).await?;
+    assert_eq!(
+        upstream.revision().map(|head| head.tree),
+        primary.revision().map(|head| head.tree),
+        "the syncs published the replica's head, and recorded it"
+    );
+    let target = primary
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the primary pulls from a remote")?;
+    let tracked = primary.tracked();
+    assert_eq!(
+        tracked
+            .synced
+            .iter()
+            .filter(|synced| synced.target == target)
+            .count(),
+        1,
+        "one sync point is recorded for the remote"
+    );
+    assert_eq!(
+        tracked.tree(&target),
+        primary.revision().map(|head| head.tree),
+        "the sync point is the head the syncs published"
+    );
+    Ok(())
+}
+
+/// A push that loses the remote's compare-and-swap to a head another
+/// device published, on a remote that does not say what it holds, is
+/// refused as `PushError::NonFastForward` naming that head, and its sync
+/// point does not move.
+///
+/// Pushed assuming the upstream, the push writes its head without
+/// reading the remote first, conditioned on the head it last recorded.
+/// The author's push moved the remote since, so the write fails, and S3
+/// answers that with 412 and nothing else. The push reads the remote's
+/// head once to learn what it holds. Only a remote that does not say
+/// what it holds takes this path: one reached on S3, as here, or an
+/// access service of a release that answers a conflict with no body.
+#[dialog_common::test]
+async fn it_refuses_a_push_that_lost_to_another_head_at_a_remote_that_does_not_say_which(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "lost-unknown").await?;
+    devices.name("user:0-0", "mine").await?;
+    devices
+        .alice
+        .commit(stream::iter(vec![named("user:0-1", "theirs")]))
+        .perform(&devices.operator)
+        .await?;
+    devices.alice.push().perform(&devices.operator).await?;
+    let theirs = devices
+        .alice
+        .revision()
+        .context("the author published a head")?;
+
+    let target = devices
+        .bob
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the follower pulls from a remote")?;
+    let before = devices.bob.tracked().tree(&target);
+    let refused = devices
+        .bob
+        .push()
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(crate::PushError::NonFastForward { actual: Some(tree), .. }) if *tree == theirs.tree
+        ),
+        "the push is refused, naming the head the author published: {refused:?}"
+    );
+    assert_eq!(
+        devices.bob.tracked().tree(&target),
+        before,
+        "a refused push does not move the sync point"
+    );
+    Ok(())
+}
+
+/// A push that loses the remote's compare-and-swap at a remote that does
+/// not say what it holds, and then cannot read what it holds, fails with
+/// that read's error: it is not taken for landed, and its sync point does
+/// not move.
+///
+/// The remote's head cell is made to hold bytes that are no revision,
+/// written there as any writer of the cell could, so the push's one read
+/// of it fails to decode.
+#[dialog_common::test]
+async fn it_reports_a_failed_read_after_losing_at_a_remote_that_does_not_say_what_it_holds(
+    s3: S3Address,
+) -> Result<()> {
+    use dialog_effects::memory::prelude::{
+        CellExt as _, MemoryExt as _, PublishCellExt as _, SpaceExt as _,
+    };
+
+    let devices = followed(&s3, "lost-unreadable").await?;
+    devices.name("user:0-0", "mine").await?;
+
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        devices.alice.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the author pulls from no remote");
+    };
+    let recorded = remote
+        .branch(branch.clone())
+        .open()
+        .perform(&devices.operator)
+        .await?
+        .cache()
+        .content()
+        .context("the author recorded the remote's head")?;
+    remote
+        .did()
+        .writer()
+        .memory()
+        .space(format!("branch/{branch}"))
+        .cell("revision")
+        .publish(b"not a revision".to_vec(), Some(recorded.version))
+        .perform(&remote.connection(&devices.operator))
+        .await?;
+
+    let target = devices
+        .bob
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the follower pulls from a remote")?;
+    let before = devices.bob.tracked().tree(&target);
+    let failed = devices
+        .bob
+        .push()
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await;
+    assert!(
+        matches!(&failed, Err(crate::PushError::FetchRemoteBranch(_))),
+        "the push fails with the read's error, not as landed: {failed:?}"
+    );
+    assert_eq!(
+        devices.bob.tracked().tree(&target),
+        before,
+        "a failed push does not move the sync point"
+    );
+    Ok(())
+}
+
+mod races;

@@ -147,8 +147,23 @@ fn last(listed: &[Value], value: &Value) -> usize {
 }
 
 /// The order of two values, falling back on their encoding for values
-/// the comparable order does not relate, so the order stays total.
+/// the comparable order does not relate, so the order stays total. Two
+/// numbers of different types order by value ([`Value::cmp_number`]),
+/// numbers being one stratum: a float does not outrank every natural.
+/// Values of one type, and values of different types that are not both
+/// numbers, order as [`Value`]'s own order does: by type first, which
+/// only a field of no type holding several types meets.
 fn compare(a: &Value, b: &Value) -> Ordering {
+    if a.data_type() != b.data_type()
+        && let Some(order) = a.cmp_number(b)
+    {
+        // One number held as two types (the natural 3 and the float
+        // 3.0) orders by type, so which of the two a pick returns does
+        // not depend on the order it meets them in: their standing may
+        // be equal, and their hash ([`Value::tiebreak`]) is the band's
+        // identity, equal too.
+        return order.then_with(|| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    }
     a.partial_cmp(b)
         .unwrap_or_else(|| a.tiebreak().cmp(&b.tiebreak()))
 }
@@ -237,6 +252,38 @@ impl Hash for Ranking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One number held as two types, standing equal, is picked the same
+    /// way whichever comes first: `max` takes the float `3.0` and `min`
+    /// the natural `3`, by type, as their value, standing and hash are
+    /// all equal. Numbers of different values order by value.
+    #[dialog_common::test]
+    fn it_picks_one_number_of_two_types_the_same_in_either_order() {
+        let natural = Value::UnsignedInt(3);
+        let float = Value::Float(3.0);
+        assert_eq!(natural.tiebreak(), float.tiebreak(), "one number, one hash");
+        for (aggregate, expected) in [(Selective::Max, &float), (Selective::Min, &natural)] {
+            let picked = |first: &Value, second: &Value| {
+                if aggregate.prefers(&[], (second, None), (first, None)) {
+                    second.clone()
+                } else {
+                    first.clone()
+                }
+            };
+            assert_eq!(
+                &picked(&natural, &float),
+                expected,
+                "{aggregate:?}, natural first"
+            );
+            assert_eq!(
+                &picked(&float, &natural),
+                expected,
+                "{aggregate:?}, float first"
+            );
+        }
+        assert!(Selective::Max.prefers(&[], (&Value::UnsignedInt(4), None), (&float, None)));
+        assert!(Selective::Min.prefers(&[], (&Value::Float(2.5), None), (&natural, None)));
+    }
     use dialog_corpus::history::Edition;
     use dialog_corpus::{Cause, Standing};
 

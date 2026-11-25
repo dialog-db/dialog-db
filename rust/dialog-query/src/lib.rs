@@ -128,6 +128,10 @@ mod stored_constant_tests;
 #[cfg(test)]
 mod succession_tests;
 
+/// The order `max` and `min` pick numbers in, pinned as tests.
+#[cfg(test)]
+mod pick_order_tests;
+
 /// A read of a deduced relation whose value is bound to a number
 /// constant, pinned as tests.
 #[cfg(test)]
