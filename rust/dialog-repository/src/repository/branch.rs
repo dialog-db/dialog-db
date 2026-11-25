@@ -132,6 +132,8 @@ mod pattern_rule_tests;
     any(feature = "integration-tests", feature = "web-integration-tests")
 ))]
 mod read_amplification;
+#[cfg(test)]
+mod typed_read_tests;
 
 /// Type alias for the search tree index.
 pub type Index = dialog_corpus::Index;
