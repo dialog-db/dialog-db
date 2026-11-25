@@ -253,6 +253,7 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             .extend(std::iter::repeat_n(origin, steps.len()));
         checked.steps.extend(steps);
     }
+    analyzer.forget(&refused);
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
         spell(diagnostic, analyzer);

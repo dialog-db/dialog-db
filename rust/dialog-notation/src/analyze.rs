@@ -10,7 +10,7 @@
 //! replica, which is why this phase and not the others is the one that
 //! reads a database.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::expand::Expander;
@@ -102,6 +102,13 @@ impl Analyzer {
             origin: trial.origin().to_vec(),
             diagnostics,
         }
+    }
+
+    /// Forget what the forms `refused` of the document last analyzed
+    /// form by form were recorded as using: a form refused after
+    /// analysis, when it was compiled, installed nothing.
+    pub(crate) fn forget(&mut self, refused: &BTreeSet<usize>) {
+        self.expander.forget_uses(refused);
     }
 
     /// Analyze `trees` form by form. A form that is refused gives no

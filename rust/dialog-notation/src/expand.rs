@@ -1153,11 +1153,12 @@ pub struct Expander {
     /// was expanded was read as another relation than the one meant.
     misread: Vec<(usize, String)>,
     /// Each name read or concluded as a derived attribute, `todo/tag`,
-    /// with the document that first did, by its number, and the form
-    /// that did: a later document that declares the name a concept would
-    /// leave the rules installed reading another relation than its own
-    /// text does.
-    derived_uses: BTreeMap<String, (usize, String)>,
+    /// with each use: the document, by its number, the form in it, by
+    /// its place, and the form as written. A later document that declares
+    /// the name a concept would leave the rules installed reading another
+    /// relation than its own text does. A use is kept only while its form
+    /// is: one refused is forgotten, as it installed nothing.
+    derived_uses: BTreeMap<String, Vec<(usize, usize, String)>>,
     /// The documents checked so far, this one among them.
     documents: usize,
     /// The sites of the tree being expanded, each by its reference,
@@ -1409,9 +1410,21 @@ impl Expander {
                 }
             }
         }
+        let forgotten: BTreeSet<usize> = refused.keys().copied().collect();
+        self.forget_uses(&forgotten);
         let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
         (kernel, diagnostics)
+    }
+
+    /// Forget the derived uses the forms `refused` of the document being
+    /// checked made: they installed nothing.
+    pub(crate) fn forget_uses(&mut self, refused: &BTreeSet<usize>) {
+        let document = self.documents;
+        self.derived_uses.retain(|_, uses| {
+            uses.retain(|(at, tree, _)| *at != document || !refused.contains(tree));
+            !uses.is_empty()
+        });
     }
 
     /// Say the tree being expanded defines `key`: refused, naming both,
@@ -1621,9 +1634,10 @@ impl Expander {
             // A name rules of an earlier document read or concluded as
             // a derived attribute stays one: those rules are installed,
             // and would read another relation than the concept.
-            if let Some((document, form)) = self.derived_uses.get(&declared.name)
-                && *document != self.documents
-            {
+            if let Some((_, _, form)) = self.derived_uses.get(&declared.name).and_then(|uses| {
+                uses.iter()
+                    .find(|(document, ..)| *document != self.documents)
+            }) {
                 return Err(Error::Refused(format!(
                     "{pattern} declares `{}` a concept, and an earlier document read or \
                      concluded it as a derived attribute of `{}` in {form}: the rules installed \
@@ -2309,10 +2323,14 @@ impl Expander {
                     .get(self.tree)
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                let documents = self.documents;
-                self.derived_uses
+                let used = (self.documents, self.tree, form);
+                let uses = self
+                    .derived_uses
                     .entry(format!("{concept}/{name}"))
-                    .or_insert((documents, form));
+                    .or_default();
+                if !uses.contains(&used) {
+                    uses.push(used);
+                }
                 return self.about(&tree, |_| derived(&tree, concept, name, &domain));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
