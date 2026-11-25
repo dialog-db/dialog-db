@@ -113,6 +113,10 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// A typed read of a relation a rule deduces, pinned as tests.
+#[cfg(test)]
+mod deduced_typed_read_tests;
+
 /// Scans binding rows in place against binding them eagerly, pinned as
 /// tests.
 #[cfg(test)]
