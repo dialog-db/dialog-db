@@ -1497,9 +1497,9 @@ impl Expander {
         if let Some((part, name)) = malformed(tree) {
             let part = part.clone();
             let message = format!(
-                "{part} names `{name}`, which is no name: a name is a word, or words joined by \
-                 one `/`, `todo` or `notebook/blocks`, and an attribute a domain and a word, \
-                 `xyz.todo/text`"
+                "{part} names `{name}`, which is no name: a name is a word, or words with a \
+                 single `/` between each two, `todo`, `notebook/blocks`, `nb/blocks/count`, and \
+                 an attribute a domain, a `/` and a word, `xyz.todo/text`"
             );
             return self.about(&part, |_| Err(Error::Refused(message)));
         }

@@ -64,6 +64,12 @@ What this changes for you:
   shows the relation; it names the two sites, and from `Live` "a
   selection another document laid on this branch" for the one it has
   no form of.
+- A name that is no name is refused wherever it is applied or labels
+  a part: empty, with space in it, beginning or ending with a `/` or
+  with two together, `a/`, `/a`, `a//b`, `a/b/`, or an attribute whose
+  name holds a `/`, `a.b/c/d`, which was read as a stored attribute
+  `c/d`. Words with a single `/` between each two, `notebook/blocks`
+  and `nb/blocks/count`, are names as before.
 - No concept, query, command or derived attribute is named with a `.`
   anywhere: `xyz.memo/note`, `a.b/c`, `a/b.c` and `my/list.count` are
   refused as `xyz.memo` was. A name with a `.` is stored, read directly.
