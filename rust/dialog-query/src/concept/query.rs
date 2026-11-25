@@ -824,8 +824,9 @@ impl ConceptQuery {
                     rules.plan_exact(&app.seeds(app.election(&rules).is_some()), &first)
             {
                 let elect = app.election(&rules);
+                let declared = declared(&app.predicate);
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await merged in app.through(&plan, rows, env, elect, widen) {
+                for await merged in app.through(&plan, rows, env, elect, widen, declared) {
                     yield merged?;
                 }
                 return;
@@ -847,7 +848,7 @@ impl ConceptQuery {
             let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
-                for await merged in app.through(&plan, rows, env, elect, widen) {
+                for await merged in app.through(&plan, rows, env, elect, widen, None) {
                     yield merged?;
                 }
             } else if widen {
@@ -865,7 +866,7 @@ impl ConceptQuery {
                     }
                     let copy = input.clone();
                     let single = stream::once(async move { Ok(copy) });
-                    for await merged in app.through(&plan, single, env, elect.clone(), false) {
+                    for await merged in app.through(&plan, single, env, elect.clone(), false, None) {
                         matched = true;
                         yield merged?;
                     }
@@ -884,7 +885,7 @@ impl ConceptQuery {
                     stream::iter(rows)
                 })
                 .try_flatten();
-                let planned = app.through(&plan, planned, env, elect, widen);
+                let planned = app.through(&plan, planned, env, elect, widen, None);
                 for await merged in stream_select!(Box::pin(joined), planned) {
                     yield merged?;
                 }
@@ -894,7 +895,10 @@ impl ConceptQuery {
 
     /// Evaluate `plan` once for every row of `rows`: each row is renamed
     /// into this concept's parameters in a scope nested in it, and each
-    /// result is merged back into the row it came from.
+    /// result is merged back into the row it came from. A plan whose rows
+    /// a rule derives reads each value through `declared`, the type the
+    /// field declares ([`read_as`]); a plan of the stored scan alone
+    /// passes `None`, as the scan already reads through it.
     fn through<'a, Env, M: Selection + 'a>(
         &self,
         plan: &Disjunction,
@@ -902,12 +906,13 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
+        declared: Option<Kind>,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
         // Erased at the entry; see `evaluate`.
-        self.through_erased(plan, Box::pin(rows), env, elect, widen)
+        self.through_erased(plan, Box::pin(rows), env, elect, widen, declared)
     }
 
     fn through_erased<'a, Env>(
@@ -917,6 +922,7 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
+        declared: Option<Kind>,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
@@ -942,7 +948,6 @@ impl ConceptQuery {
             Ok(inner.within(caller))
         });
         let results = plan.clone().evaluate(scoped, env);
-        let declared = declared(&self.predicate);
         if elect.is_none() && !widen {
             return Box::pin(results.filter_map(move |result| {
                 let merged = result.and_then(|mut result| {
