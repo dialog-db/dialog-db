@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A typed read of a relation a rule deduces reads it as it reads a stored one
+
+A field that declares a type reads a stored attribute through that
+type: a value of another type is no fact of the field, and a number is
+read as the field's number type. A rule concludes its relation whatever
+type its head declares, and the values it concluded reached a typed read
+unread: a field declared `integer:` over a relation a rule fills with
+text answered the text. Every value a rule concludes is now read through
+the field's declared type, as the stored scan reads a stored one, when
+one rule answers the read, when stored and deduced values meet, and
+through the fixpoint of a recursive relation.
+
+What this changes for you:
+
+- A read of a deduced relation through a field of a type answers
+  nothing for a deduced value of another type. It answered the value.
+- A deduced number read through a field of another number type comes
+  back as that type, as a stored one does: a natural read as `float:` is
+  a float, a fraction read as `natural:` is floored, and a negative is
+  not a natural. It came back as the rule concluded it.
+- A read through a field that declares no type, and a read of a concept
+  of several fields, answer as before.
+
+Why: a field's type is part of which attribute it reads, so a read must
+not answer differently because a rule rather than a write put the value
+there.
+
 ### A replica reads the revision records it wrote from the buffers above the leaves
 
 [#864](https://github.com/dialog-db/dialog-db/pull/864)
