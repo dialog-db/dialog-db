@@ -14,6 +14,110 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule whose head declares a type its body binds none of is refused
+
+[#869](https://github.com/dialog-db/dialog-db/pull/869)
+
+A head field's declared type is what the rule concludes. A rule whose
+body bound the head's variable to a type the field reads none of (a
+head declared `integer:` over a body field declared `text:`, or a head
+declared `text:` set from a formula's sum) compiled and concluded those
+values under the head anyway. It is now refused when it compiles, with
+`TypeError::HeadField` naming the field, the attribute, its declared
+type and the type the body binds, and so cannot be installed. Where the
+body leaves the variable open (a field that declares no type, or an
+equality with a constant), the head's type now narrows it, as it already
+did for a number head, and the rule concludes only the values the field
+reads.
+
+What this changes for you:
+
+- `DeductiveRuleDescriptor::compile` and `DeductiveRule::new` return
+  `TypeError::HeadField` for such a rule. It compiled.
+- A rule with a non-number head over a body field of no type concludes
+  only the values of the head's type: a `text:` head over a field
+  holding `"hello"` and `7` concludes `"hello"`. It concluded both.
+- A rule whose head variable is set equal to a constant of a type the
+  head does not read concludes nothing. It concluded the constant.
+- A number of another number type is judged through the band as before
+  (an integer into a `natural:` head is refused as possibly negative):
+  numbers are one stratum. A text, a symbol and an entity are each a
+  stratum of their own, so a symbol or an entity into a `text:` head is
+  refused like any other type.
+
+Why: a field's type is part of which attribute a rule concludes, so a
+rule must not put a value of another type under it; where that is
+certain from the rule alone, saying so when it is written is better
+than concluding values no typed read can see.
+
+### A typed read bound to a constant its type does not read answers nothing
+
+[#868](https://github.com/dialog-db/dialog-db/pull/868)
+
+A field that declares a type reads only the values of that type, so a
+value of another type is no fact of the field. A cardinality-one read
+whose entity was unbound and whose value was bound to a constant found
+the facts holding that constant by the constant alone, and answered one
+whatever its type: a field declared `text:` bound to the integer `-3`
+answered the stored `-3`, and a field that picks `max` over `natural:`
+bound to `"hello"` answered the stored `"hello"`. Each fact such a read
+finds is now read through the field's type, as the read with its value
+unbound reads it.
+
+What this changes for you:
+
+- A read through a typed field whose value is bound to a constant the
+  type does not read answers nothing, under every cardinality and
+  through a pick, with the entity bound or unbound. Under cardinality
+  one with the entity unbound it answered the facts holding the
+  constant.
+- A constant of another number type than the stored number still finds
+  it: a `float:` field bound to the natural `3` finds a stored `3`.
+- A read whose value is unbound, and a read through a field that
+  declares no type, answer as before.
+
+Why: a field's type is part of which attribute it reads, so binding the
+value must not widen what the read answers.
+
+### A typed read of a relation a rule deduces reads it as it reads a stored one
+
+[#866](https://github.com/dialog-db/dialog-db/pull/866)
+
+A field that declares a type reads a stored attribute through that
+type: a value of another type is no fact of the field, and a number is
+read as the field's number type. A rule concludes its relation whatever
+type its head declares, and the values it concluded reached a typed read
+unread: a field declared `integer:` over a relation a rule fills with
+text answered the text. Every value a rule concludes is now read through
+the field's declared type, as the stored scan reads a stored one, when
+one rule answers the read, when stored and deduced values meet, and
+through the fixpoint of a recursive relation. The type is applied before
+the cardinality-one election on deduced reads, as the caller-variable
+lens does; the stored scan elects first.
+
+What this changes for you:
+
+- A read of a deduced relation through a field of a type answers
+  nothing for a deduced value of another type. It answered the value.
+- A deduced number read through a field of another number type comes
+  back as that type, as a stored one does: a natural read as `float:` is
+  a float, a fraction read as `natural:` is floored, and a negative is
+  not a natural. It came back as the rule concluded it.
+- A read of a deduced relation whose value is bound to a number finds a
+  value of another number type that is the same number, as a stored read
+  does: a `float:` field bound to the natural `3` finds a deduced `3`,
+  and a `natural:` field bound to `3.0` finds it too. It missed it. A
+  number constant still finds no value that is not a number.
+- A cardinality-one read of a deduced relation whose newest value is of
+  a type the field does not read answers the newest value it does read.
+  The same read of a stored relation answers nothing, as before.
+- A read through a field that declares no type, and a read of a concept
+  of several fields, answer as before.
+
+Why: a field's type is part of which attribute it reads, so a read must
+not answer differently because a rule rather than a write put the value
+there.
+
 ### A replica reads the revision records it wrote from the buffers above the leaves
 
 [#864](https://github.com/dialog-db/dialog-db/pull/864)
@@ -1120,6 +1224,17 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule whose head declares a type its body binds none of: an older
+  replica may hold one, installed by a release that compiled it.
+  Nothing is rewritten. On upgrade it fails to hydrate, so it is inert:
+  it derives nothing, fires at no commit, and no read, commit or pull
+  fails over it, and `dialog.rule/invalid` lists it as `undecodable:`
+  with the head's attribute and both types. An older release still runs
+  it, so until every replica upgrades a mixed fleet differs in what the
+  rule derives. The author re-authors the rule (reads the body field as
+  the head's type, or declares the head as the body's), which gives it
+  a new identity. `Branch::upgrade_rules` leaves it as it is and lists
+  it in `RulesUpgraded::undecodable`.
 - A claim one round of induction both retracts and asserts: nothing
   stored changes shape, no identity moves and nothing is rewritten on
   upgrade. What induction writes differs: such a claim keeps its row,
