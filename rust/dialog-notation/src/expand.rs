@@ -4697,4 +4697,28 @@ mod tests {
             checked.diagnostics
         );
     }
+
+    /// A document's macro under one of the notation's own words is
+    /// refused at its declaration whatever its template, a read or not,
+    /// and the word keeps its meaning after.
+    #[test]
+    fn it_refuses_a_macro_named_by_a_word_of_the_notation_whatever_its_template() {
+        for word in syntax::FORMS {
+            let text = format!("(rule (syntax (+ ?x 1)) (expand ({word} ?x)))");
+            let refused = expanded("", &text).unwrap_err().to_string();
+            assert!(
+                refused.contains(&format!("declares a macro named `{word}`"))
+                    && refused.contains("one of the notation's own words"),
+                "{text}: {refused}"
+            );
+        }
+        let mut expander = Expander::new().unwrap();
+        assert!(
+            expander
+                .submit("(rule (syntax (+ ?x 1)) (expand (select ?x)))")
+                .is_err()
+        );
+        let (kernel, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
+        assert!(kernel[0].to_string().starts_with("(rule (report (xyz.t ?x"));
+    }
 }
