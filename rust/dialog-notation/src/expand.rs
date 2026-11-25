@@ -796,6 +796,25 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
     })
 }
 
+/// Whether a value in `tree` is wrapped twice in one kind of wrapper,
+/// which the kernel refuses.
+fn twice(tree: &Syntax) -> bool {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        if let Syntax::Application(_, operand) = part {
+            for term in operand.terms.values().chain(operand.items.iter()) {
+                if matches!(term, Syntax::Application(operator, _) if operator.keyword().is_some())
+                    && crate::kernel::wrapped(term).is_err()
+                {
+                    return true;
+                }
+                open.push(term);
+            }
+        }
+    }
+    false
+}
+
 /// Whether `part` is written as a line of a concept or a command, not a
 /// read: by a word only a line says, `as:`, `in:`, `cardinality:` or
 /// `by:`, or by the cardinality its value is wrapped in, `is: (:one ?v)`,
@@ -2325,6 +2344,29 @@ impl Expander {
                     .ok_or_else(|| ambiguous(&found))
             }
         }?;
+        // A field of a concept read is the concept's: a wrapper the read
+        // puts on it that the concept puts there too is the author's to
+        // take off, said of the field.
+        if let (answer, Some(signature)) = &found[chosen]
+            && let Some(operand) = said.operand()
+            && let Some((label, word)) = operand.terms.iter().find_map(|(label, term)| {
+                let Syntax::Application(operator, _) = term else {
+                    return None;
+                };
+                let word = operator.keyword()?;
+                (crate::kernel::TYPES.contains(&word)
+                    || crate::kernel::CARDINALITIES.contains(&word))
+                .then_some((label, word))
+            })
+            && twice(answer)
+        {
+            return Err(Error::Refused(format!(
+                "{said} wraps `{label}:` in `(:{word} …)`, and the concept `{}` says that of the \
+                 field itself: a read of a concept takes its fields' cardinality and type from \
+                 it, so write `{label}:` bare",
+                signature.name
+            )));
+        }
         self.answered = patterns.swap_remove(chosen);
         Ok(found.swap_remove(chosen).0)
     }
