@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule's write under cardinality one succeeds a claim the same commit wrote
+
+[#872](https://github.com/dialog-db/dialog-db/pull/872)
+
+A round of induction settles a head written under cardinality one
+against what the round reads: the write succeeds the newest claim of the
+cell. A value the commit itself had written, directly or in an earlier
+round, was read and was not taken for a claim a write can succeed, so
+the head landed beside it. A cell of cardinality one a rule wrote after
+an earlier write in the same commit kept both claims. A rule that feeds
+itself (`v + 1` while `v` is below a bound) kept every value it counted
+through, and since claims of one commit stand equal, a read elected
+among them by the hash of the value: the count stalled where that
+election happened to repeat a value, at 4 for any bound above it, with
+no error. Now the commit's own writes bound for the primary are claims
+a later write succeeds, as a transaction's later write already succeeds
+its earlier one. A layer's share and a transient (`control:`) are still
+not.
+
+What this changes for you:
+
+- A cardinality-one cell a rule writes after the same commit wrote it
+  holds one claim, the rule's. Before, it held both, and a read elected
+  one by the hash of its value.
+- A rule counting `v` up to a bound in one commit leaves `v` at the
+  bound. Before, it kept every value and stalled at 4.
+- A commit whose rules count past the round bound (16 rounds) fails
+  with `CommitError::InductionDivergence` and writes nothing. Before,
+  such a rule stalled and the commit landed.
+- Cardinality many is unchanged: a self-feeding rule keeps every value
+  it writes, and fails past the round bound as before.
+- The expectation of the test `it_seeds_an_integer_premise_from_a_natural_fact`
+  changed from `[40, 41]` to `[41]`: the direct write of 40 and the
+  rule's head of 41 are two writes of one cardinality-one cell in one
+  commit, and the later succeeds the earlier. The test had stated the
+  old behaviour ("the staged 40 is not yet a claim the head can
+  succeed"); reverting this change restores it.
+
+Why: a cell of cardinality one holds one claim, the newest, and a
+commit's later write of it already succeeds its earlier one when a
+transaction makes both; a rule's write in a later round is a later
+write of the same commit.
+
 ### A rule can be laid over one query of a transaction
 
 [#873](https://github.com/dialog-db/dialog-db/pull/873)
@@ -1248,6 +1291,15 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule's write under cardinality one after the same commit's write
+  of the cell: nothing stored changes shape, no identity moves and
+  nothing is rewritten on upgrade. What a commit writes differs: one
+  claim where an older release wrote several. A cell an older release
+  stored with several claims of one commit keeps them, and a read keeps
+  electing among them by the hash of the value. An older release reads
+  what this one writes. An older replica committing under the same
+  rules still writes the extra claims until it upgrades. An embedder
+  runs nothing.
 - A rule whose head declares a type its body binds none of: an older
   replica may hold one, installed by a release that compiled it.
   Nothing is rewritten. On upgrade it fails to hydrate, so it is inert:
