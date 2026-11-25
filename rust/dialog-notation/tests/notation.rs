@@ -1945,6 +1945,42 @@ async fn it_keeps_no_derived_use_of_a_form_that_was_refused() -> Result<()> {
     Ok(())
 }
 
+/// A derived attribute is named under the concept before its last `/`:
+/// with concepts `nb` and `nb/blocks`, `nb/blocks/count` is the field
+/// `count` of `nb/blocks`, and no field `blocks/count` of `nb`. With no
+/// concept `nb/blocks` it is no derived attribute, and is refused.
+#[dialog_common::test]
+async fn it_names_a_derived_attribute_under_the_concept_before_its_last_slash() -> Result<()> {
+    let nb = "(concept (nb ?l name: ?n)
+          (xyz.nb/name of: ?l is: ?n as: :text cardinality: :one))";
+    let blocks = "(concept (nb/blocks ?l name: ?n)
+          (xyz.nb.blocks/name of: ?l is: ?n as: :text cardinality: :one))";
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!(
+            r#"{nb} {blocks}
+               (rule (nb/blocks/count ?l ?n) (nb/blocks ?l name: ?n))
+               (rule (nb/other ?l ?n) (nb ?l name: ?n))
+               (assert (nb/blocks b:1 name: "blocks"))
+               (assert (nb b:1 name: "nb"))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (nb/blocks/count ?l ?n))").await?,
+        vec![r#"(nb/blocks/count b:1 is: "blocks")"#]
+    );
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        &format!("{nb} (rule (nb/blocks/count ?l ?n) (nb ?l name: ?n))"),
+    );
+    assert!(
+        checked.refusals().next().is_some(),
+        "{:?}",
+        checked.diagnostics
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a

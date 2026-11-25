@@ -627,3 +627,45 @@ async fn it_refuses_a_row_of_a_layer_the_plan_has_not() -> Result<()> {
     );
     Ok(())
 }
+
+/// What Dialog-DB says when it fails to evaluate is its own text, which
+/// may name a derived attribute by its hash; a standing selection and a
+/// watched view say it in the author's terms, from the names of what
+/// they hold.
+#[dialog_common::test]
+async fn it_tells_an_evaluation_error_in_the_authors_terms() -> Result<()> {
+    let notebook = Notebook::open().await?;
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        "(concept (list ?l name: ?n)
+           (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+         (rule (list/label ?l ?n) (list ?l name: ?n))
+         (select (list/label ?l ?n))",
+    );
+    let selection = checked
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Select(selection) => Some((**selection).clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
+    let hash = format!("{:?}", checked.steps)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+        .find(|part| part.starts_with("dialog.n.c."))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no derived relation"))?;
+    let live = Live::new(notebook.branch.clone());
+    let standing = live.standing(selection)?;
+    let error = dialog_notation::live::LiveError::Evaluation(
+        dialog_query::EvaluationError::UnboundVariable {
+            variable_name: format!("{hash}/is"),
+        },
+    );
+    // Display is Dialog-DB's text, the hash in it.
+    assert!(error.to_string().contains(&hash), "{error}");
+    let told = standing.told(&error);
+    assert!(told.contains("list/label"), "{told}");
+    assert!(!told.contains("dialog.n.c."), "{told}");
+    Ok(())
+}

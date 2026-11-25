@@ -86,3 +86,124 @@ fn it_compiles_no_tree_that_writes_what_a_document_cannot() -> Result<()> {
     }
     Ok(())
 }
+
+/// The rule `(rule HEAD (xyz.list ?l name: ?n))` with HEAD built by hand
+/// as `(WORD (RELATION ?l LABEL: ?n))`, or bare when WORD is none.
+fn ruled(word: Option<&str>, relation: &str, label: &str) -> dialog_notation::Syntax {
+    use dialog_notation::{Parameters, Syntax};
+    let read = Syntax::Application(
+        Box::new(Syntax::Reference(relation.into())),
+        Parameters {
+            items: vec![Syntax::Variable("l".into())],
+            terms: [(label.to_string(), Syntax::Variable("n".into()))].into(),
+        },
+    );
+    let head = match word {
+        Some(word) => Syntax::Application(
+            Box::new(Syntax::Reference(word.into())),
+            Parameters {
+                items: vec![read],
+                terms: Default::default(),
+            },
+        ),
+        None => read,
+    };
+    let premise = parse("(xyz.list ?l name: ?n)").unwrap().remove(0);
+    Syntax::Application(
+        Box::new(Syntax::Reference("rule".into())),
+        Parameters {
+            items: vec![head, premise],
+            terms: Default::default(),
+        },
+    )
+}
+
+/// A tree built by hand may name a derived attribute as the analyzer
+/// does, `dialog.n.c/list/label`, as a head that derives it or as a
+/// read, and nothing else: an assert, a retract, a command or a field
+/// into it is refused, and so is a malformed name of one and any hash
+/// of the notation's, `dialog.n.c.…`, wherever it stands.
+#[test]
+fn it_compiles_a_derived_attribute_built_by_hand_only_where_one_is_derived() -> Result<()> {
+    use dialog_notation::Error;
+    let derives = compile(&ruled(None, "dialog.n.c/list/label", "is"))?;
+    assert!(
+        matches!(derives.as_slice(), [Step::Deduce(_)]),
+        "{derives:?}"
+    );
+    let reads = parse("(rule (xyz.out ?l v: ?n) (xyz.list ?l name: ?n))")?.remove(0);
+    let reads = relabelled_relation(reads, "xyz.list", "dialog.n.c/list/label", "name", "is");
+    assert!(compile(&reads).is_ok(), "{reads}");
+    let mut refused = vec![
+        ruled(Some("assert"), "dialog.n.c/list/label", "is"),
+        ruled(Some("retract"), "dialog.n.c/list/label", "is"),
+        ruled(Some("assert"), "xyz.a", "dialog.n.c/list/label/is"),
+        ruled(None, "xyz.a", "dialog.n.c/list/label/is"),
+    ];
+    for malformed in [
+        "dialog.n.c/x",
+        "dialog.n.c//f",
+        "dialog.n.c/a/",
+        "dialog.n.c/a.b/f",
+        "dialog.n.c/a/f.g",
+        "dialog.n.c/a/f:",
+        "dialog.n.c.hudthsqxprxaqks3o67ts47m5i",
+        "dialog.n.c.anything",
+    ] {
+        refused.push(ruled(None, malformed, "is"));
+        refused.push(ruled(None, "xyz.a", &format!("{malformed}/is")));
+    }
+    for tree in refused {
+        let compiled = compile(&tree);
+        assert!(
+            matches!(&compiled, Err(Error::Reserved(_) | Error::Refused(_))),
+            "{tree}: {:?}",
+            compiled.map(|steps| steps.len())
+        );
+    }
+    Ok(())
+}
+
+/// `tree` with the relation `from` written `to` and the label `old:`
+/// written `new:` where it applies it.
+fn relabelled_relation(
+    tree: dialog_notation::Syntax,
+    from: &str,
+    to: &str,
+    old: &str,
+    new: &str,
+) -> dialog_notation::Syntax {
+    use dialog_notation::{Parameters, Syntax};
+    match tree {
+        Syntax::Application(operator, operand) => {
+            let applies = matches!(&*operator, Syntax::Reference(name) if name == from);
+            let operator = match applies {
+                true => Box::new(Syntax::Reference(to.into())),
+                false => Box::new(relabelled_relation(*operator, from, to, old, new)),
+            };
+            Syntax::Application(
+                operator,
+                Parameters {
+                    items: operand
+                        .items
+                        .into_iter()
+                        .map(|item| relabelled_relation(item, from, to, old, new))
+                        .collect(),
+                    terms: operand
+                        .terms
+                        .into_iter()
+                        .map(|(label, term)| {
+                            let label = if applies && label == old {
+                                new.to_string()
+                            } else {
+                                label
+                            };
+                            (label, relabelled_relation(term, from, to, old, new))
+                        })
+                        .collect(),
+                },
+            )
+        }
+        other => other,
+    }
+}
