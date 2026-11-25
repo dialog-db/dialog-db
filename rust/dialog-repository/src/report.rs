@@ -20,6 +20,7 @@
 
 use std::mem::take;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
@@ -51,19 +52,29 @@ pub enum Entry {
 /// readable at any point while the query runs and after.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
-    inner: Arc<Mutex<Inner>>,
+    shared: Arc<Shared>,
+}
+
+/// What a report's handles share. The query's end is a flag, and the
+/// lock is taken at the end only when a reader is waiting, so a query
+/// whose report nobody streams pays for neither.
+#[derive(Debug, Default)]
+struct Shared {
+    inner: Mutex<Inner>,
+    finished: AtomicBool,
+    waited: AtomicBool,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     entries: Vec<Entry>,
-    finished: bool,
     waiting: Vec<Waker>,
 }
 
 impl Report {
     fn inner(&self) -> MutexGuard<'_, Inner> {
-        self.inner
+        self.shared
+            .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
@@ -105,11 +116,11 @@ impl Report {
     /// Mark the query done: a report stream ends after the entries
     /// reported so far.
     fn finish(&self) {
-        let waiting = {
-            let mut inner = self.inner();
-            inner.finished = true;
-            take(&mut inner.waiting)
-        };
+        self.shared.finished.store(true, Ordering::Release);
+        if !self.shared.waited.load(Ordering::Acquire) {
+            return;
+        }
+        let waiting = take(&mut self.inner().waiting);
         waiting.into_iter().for_each(Waker::wake);
     }
 }
@@ -132,10 +143,17 @@ impl Stream for ReportStream {
             self.next += 1;
             return Poll::Ready(Some(entry));
         }
-        if inner.finished {
+        if self.report.shared.finished.load(Ordering::Acquire) {
             return Poll::Ready(None);
         }
+        self.report.shared.waited.store(true, Ordering::Release);
         inner.waiting.push(context.waker().clone());
+        drop(inner);
+        // The query may have ended between the check and the wait, after
+        // reporting an entry: poll again, and read what is there.
+        if self.report.shared.finished.load(Ordering::Acquire) {
+            context.waker().wake_by_ref();
+        }
         Poll::Pending
     }
 }
