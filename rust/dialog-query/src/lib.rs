@@ -127,15 +127,13 @@ mod stored_constant_tests;
 #[cfg(test)]
 mod pick_order_tests;
 
-<<<<<<< HEAD
 /// Equality and joins over numbers of several types, pinned as tests.
 #[cfg(test)]
 mod equality_number_tests;
-=======
+
 /// The range predicates over numbers of several types, pinned as tests.
 #[cfg(test)]
 mod range_order_tests;
->>>>>>> origin/main
 
 /// A read of a deduced relation whose value is bound to a number
 /// constant, pinned as tests.
