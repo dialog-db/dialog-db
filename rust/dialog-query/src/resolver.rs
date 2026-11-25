@@ -658,7 +658,10 @@ fn rows(base: &Match, projected: Vec<Vec<Slot<'_>>>) -> Result<Vec<Match>, Evalu
         for (term, value) in slots {
             let bound = match (term, value) {
                 (Term::Constant(expected), Some(value)) => {
-                    if *expected != value {
+                    if *expected != value
+                        && (expected.data_type() == value.data_type()
+                            || !expected.same_number(&value))
+                    {
                         continue 'row;
                     }
                     Ok(())
@@ -726,6 +729,19 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A row whose constant slot is a number keeps the row when the value
+    /// is that number in another type, and drops it when it is another
+    /// number.
+    #[dialog_common::test]
+    fn it_keeps_a_row_whose_value_is_its_constant_by_number_value() -> anyhow::Result<()> {
+        let three = Term::<Any>::Constant(Value::UnsignedInt(3));
+        let kept = rows(&Match::new(), vec![vec![(&three, Some(Value::Float(3.0)))]])?;
+        assert_eq!(kept.len(), 1, "3.0 is 3");
+        let dropped = rows(&Match::new(), vec![vec![(&three, Some(Value::Float(3.5)))]])?;
+        assert_eq!(dropped.len(), 0, "3.5 is not 3");
+        Ok(())
+    }
 
     /// A spilled value's block is checked against the hash its handle
     /// names: a store answering with another block fails the premise
