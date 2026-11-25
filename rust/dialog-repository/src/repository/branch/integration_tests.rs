@@ -7338,10 +7338,12 @@ async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) ->
 /// The push is still refused and upstream still keeps the other
 /// writer's revision — the head write is conditional, so safety does
 /// not rest on the check that was skipped. What changes is when the
-/// refusal arrives and what it is called: after the upload rather than
-/// before it, and as a version mismatch rather than a non-fast-forward.
-/// A caller that reports conflicts has to recognize both, which is the
-/// trade [`Push::assuming_upstream`] documents.
+/// refusal arrives: after the upload rather than before it, which is the
+/// trade [`Push::assuming_upstream`] documents. It is still a
+/// non-fast-forward naming the head that won: S3 says only that the
+/// condition failed, so the push reads the remote's head once to learn
+/// it, rather than answering with the bare version mismatch it did
+/// before.
 #[dialog_common::test]
 async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -7419,14 +7421,11 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
 
     assert!(
         matches!(
-            refused,
-            Err(crate::PushError::PublishRemoteBranch(
-                crate::PublishRemoteBranchError::Publish(
-                    crate::PublishError::VersionMismatch { .. }
-                )
-            ))
+            &refused,
+            Err(crate::PushError::NonFastForward { actual: Some(tree), .. }) if *tree == ahead
         ),
-        "an assumed push whose upstream moved is refused by the conditional write, got: {refused:?}"
+        "an assumed push whose upstream moved is refused by the conditional write, naming \
+         the head that won, got: {refused:?}"
     );
 
     let observer = contact("origin")
