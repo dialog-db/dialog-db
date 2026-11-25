@@ -657,6 +657,78 @@ mod safety {
         template(&crate::parse(text)?.remove(0))
     }
 
+    /// An attribute's name is one a page can set: a letter or `_`, then
+    /// letters, digits, `-`, `_` and `.`, and at most one `/` between two
+    /// such parts, its namespace. One that is not is refused, naming it.
+    #[test]
+    fn it_refuses_an_attribute_name_a_page_cannot_set() {
+        for name in ["a//b", "a/", "a/b/c", "-a", "a@b", "a:b"] {
+            let text = format!("[:span {{:{name} \"x\"}}]");
+            let refused = read(&text);
+            assert!(
+                matches!(&refused, Err(Error::Refused(said)) if said.contains(&format!(":{name}"))
+                    && said.contains("no attribute name")),
+                "{text}: {refused:?}"
+            );
+        }
+        for name in [
+            "title",
+            "data-x",
+            "aria-label",
+            "xlink/href",
+            "x.y",
+            "xyz.t/name",
+            "_a",
+        ] {
+            let text = format!("[:span {{:{name} \"x\"}}]");
+            assert!(read(&text).is_ok(), "{text}: {:?}", read(&text));
+        }
+    }
+
+    /// A path into the event has a step between each two `.`: one with an
+    /// empty step inside it or before another is refused, naming the path
+    /// as written. A bare `.` is the empty path today, which is the
+    /// maintainer's to decide (gaps row 49).
+    #[test]
+    fn it_refuses_an_event_path_with_an_empty_step() {
+        for path in ["..x", ".a..b", ".a."] {
+            let text = format!("[:button {{:on/click (todo/go todo: {path})}}]");
+            let refused = read(&text);
+            assert!(
+                matches!(&refused, Err(Error::Refused(said)) if said.contains(&format!("`{path}`"))
+                    && said.contains("empty step")),
+                "{text}: {refused:?}"
+            );
+        }
+        let Ok(Node::Element(element)) = read("[:button {:on/click (todo/go todo: .)}]") else {
+            panic!("a bare `.` is read");
+        };
+        assert_eq!(
+            element.events[0].fields,
+            vec![("todo".to_string(), Input::Path(Vec::new()))]
+        );
+        assert!(read("[:button {:on/click (todo/go todo: .target.value)}]").is_ok());
+    }
+
+    /// An event's kind is free-form, as a custom DOM event's is, but
+    /// says something: an empty one, `:on/`, and one under the notation's
+    /// namespace are refused.
+    #[test]
+    fn it_refuses_an_empty_or_reserved_event_kind() {
+        for kind in ["", "dialog.n", "dialog.n.x"] {
+            let text = format!("[:button {{:on/{kind} (todo/go todo: ?t)}}]");
+            assert!(
+                matches!(read(&text), Err(Error::Refused(_) | Error::Reserved(_))),
+                "{text}: {:?}",
+                read(&text)
+            );
+        }
+        for kind in ["click", "my-Event.thing", "x:y"] {
+            let text = format!("[:button {{:on/{kind} (todo/go todo: ?t)}}]");
+            assert!(read(&text).is_ok(), "{text}: {:?}", read(&text));
+        }
+    }
+
     /// A template whose values could reach script is refused, naming the
     /// part: an element that runs what it holds, an attribute named
     /// `on…` that is no `on/` event, `srcdoc`, a `style` a value writes,
