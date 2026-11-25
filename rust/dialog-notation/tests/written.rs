@@ -30,3 +30,59 @@ fn it_compiles_a_derived_attribute_made_long_ago() -> Result<()> {
     }
     Ok(())
 }
+
+/// `tree` with the label `from:` written `to:` wherever it stands, as
+/// a caller that builds trees may write it and no reader would.
+fn relabelled(tree: dialog_notation::Syntax, from: &str, to: &str) -> dialog_notation::Syntax {
+    use dialog_notation::{Parameters, Syntax};
+    match tree {
+        Syntax::Application(operator, operand) => Syntax::Application(
+            Box::new(relabelled(*operator, from, to)),
+            Parameters {
+                items: operand
+                    .items
+                    .into_iter()
+                    .map(|item| relabelled(item, from, to))
+                    .collect(),
+                terms: operand
+                    .terms
+                    .into_iter()
+                    .map(|(label, term)| {
+                        let label = if label == from { to.to_string() } else { label };
+                        (label, relabelled(term, from, to))
+                    })
+                    .collect(),
+            },
+        ),
+        other => other,
+    }
+}
+
+/// A tree built through the public API and given to `compile` writes
+/// nothing a document cannot: no field under the notation's namespace,
+/// whatever its head's domain, and no field of a name that is no
+/// attribute of a domain, `b/c:`. Each is refused as the reader refuses
+/// it.
+#[test]
+fn it_compiles_no_tree_that_writes_what_a_document_cannot() -> Result<()> {
+    use dialog_notation::Error;
+    for (head, label) in [
+        (
+            "(assert (xyz.a ?l x: ?n))",
+            "dialog.n.c.hudthsqxprxaqks3o67ts47m5i/is",
+        ),
+        ("(assert (xyz.a ?l x: ?n))", "b/c"),
+        ("(xyz.a ?l x: ?n)", "dialog.n/x"),
+        ("(xyz.a ?l x: ?n)", "b/c"),
+    ] {
+        let text = format!("(rule {head} (xyz.list ?l name: ?n))");
+        let tree = relabelled(parse(&text)?.remove(0), "x", label);
+        let compiled = compile(&tree);
+        assert!(
+            matches!(&compiled, Err(Error::Reserved(_) | Error::Refused(_))),
+            "{tree}: {:?}",
+            compiled.map(|steps| steps.len())
+        );
+    }
+    Ok(())
+}
