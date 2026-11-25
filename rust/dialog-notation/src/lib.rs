@@ -38,7 +38,7 @@
 //!
 //! let trees = parse(
 //!     "(concept (task ?t title: ?x)
-//!        (xyz.todo ?t text: (:last (:text ?x))))
+//!        (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))
 //!      (select (task ?t title: ?x))",
 //! )?;
 //! let mut analyzer = Analyzer::new()?;

@@ -529,11 +529,13 @@ pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
     }
 }
 
-/// The read a line is. A line is one attribute, by its full name:
+/// The read a line is. A line is one attribute, by its full name, and
+/// is what a document writes; the read below it is the kernel's, which
+/// the walker writes for it and no document needs to:
 ///
 /// ```clj
 /// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
-/// (xyz.todo ?i title: (:last (:text ?t)))
+/// (xyz.todo ?i title: (:one (:text ?t)))
 /// ```
 ///
 /// `of:` is the entity and `is:` the value; unlabeled, the two are the
