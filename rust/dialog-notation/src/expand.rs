@@ -1244,6 +1244,45 @@ pub struct Expander {
 }
 
 impl Expander {
+    /// Why nothing says what `tree` is. Where it applies, in a derived
+    /// attribute's shape, `(list/open ?l ?n)` or `(list/open ?l is: ?n)`,
+    /// a concept declared under a name whose part before its last `/` is
+    /// a concept too, it is written as that concept's derived attribute,
+    /// and a name is a concept or a derived attribute of one, never both:
+    /// the refusal names the use and the declaration.
+    fn unfitting(&self, tree: &Syntax) -> Error {
+        // A derived attribute's own shapes: its entity and its value,
+        // unlabeled or the value under `is:`.
+        let derived = tree.operand().is_some_and(|operand| {
+            match (operand.items.len(), operand.terms.len()) {
+                (2, 0) => true,
+                (1, 1) => operand.terms.contains_key("is"),
+                _ => false,
+            }
+        });
+        let shared = tree.applies().filter(|_| derived).and_then(|name| {
+            let (concept, _) = name.rsplit_once('/')?;
+            (self.concepts.contains(name) && self.concepts.contains(concept))
+                .then_some((name, concept))
+        });
+        let Some((name, concept)) = shared else {
+            return Error::Unknown(tree.to_string());
+        };
+        let declared = self
+            .defining
+            .get(&format!("concept {name}"))
+            .and_then(|at| self.document.get(*at))
+            .map_or_else(
+                || format!("an earlier document declares `{name}` a concept"),
+                |form| format!("{form} declares `{name}` a concept"),
+            );
+        Error::Refused(format!(
+            "{tree} is written as a derived attribute of the concept `{concept}`, and {declared}: \
+             a name is a concept or a derived attribute of one, never both, so name the derived \
+             attribute another way, or read the concept by its fields"
+        ))
+    }
+
     /// The concepts declared under `name` that a use written with
     /// `labels` fits: each has every label written, and, unless the use
     /// ends with `...`, no other. Two concepts of one
@@ -2182,7 +2221,7 @@ impl Expander {
             )
         };
         let chosen = match found.len() {
-            0 => Err(Error::Unknown(tree.to_string())),
+            0 => Err(self.unfitting(tree)),
             1 => Ok(0),
             _ if self.negating => Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {

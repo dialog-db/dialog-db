@@ -82,6 +82,12 @@ What this changes for you:
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A name is a concept or a derived attribute of one, never both: with
+  `list` and `list/open` both declared concepts, `(list/open ?l ?n)` or
+  `(list/open ?l is: ?n)` is refused naming the declaration of
+  `list/open`, where it was `nothing says what (list/open ?l ?n) is`.
+  `check_forms` quotes the author's form in what the compiler refuses,
+  as `check` does, where it quoted the rule it expanded to.
 - A name of words joined by `/` with no `.` is never read as a stored
   attribute: `(foo/x ?x ?n)` under no concept `foo/x` or `foo` is refused,
   saying neither is declared above what reads it, in a rule's head, its

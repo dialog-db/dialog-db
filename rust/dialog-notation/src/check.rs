@@ -9,7 +9,7 @@ use crate::analyze::Analyzer;
 use crate::{Error, Syntax};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::compile::{Step, compile};
+use crate::compile::Step;
 use crate::declare::{self, Declaration};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::parse_document;
@@ -149,24 +149,9 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
                 forms.extend(std::iter::repeat_n(*origin, compiled.len()));
                 steps.extend(compiled);
             }
-            // What the compiler refuses is said of the tree the rule
-            // came of: nothing yet says which part of it. Where it
-            // quotes the rule it compiled, the author's form is quoted.
-            Err(error) => {
-                let written = trees.get(*origin).cloned();
-                let error = match &written {
-                    Some(written) => {
-                        let written = written.to_string();
-                        error.said(&|text| text.replace(&shown, &written))
-                    }
-                    None => error,
-                };
-                checked.diagnostics.push(Diagnostic::refused(
-                    written,
-                    vec![Segment::Item(*origin)],
-                    error,
-                ))
-            }
+            Err(error) => checked
+                .diagnostics
+                .push(compile_refusal(error, &shown, &trees, *origin)),
         }
     }
     for (origin, error) in clashes(steps.iter().zip(forms.iter().copied()), &trees) {
@@ -187,6 +172,22 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         *analyzer = trial;
     }
     checked
+}
+
+/// What the compiler refuses of the rule `shown`, which came of the tree
+/// at `origin`, said of that tree: nothing yet says which part of it.
+/// Where the refusal quotes the rule it compiled, the author's form is
+/// quoted. [`check`] and [`check_forms`] both say it so.
+fn compile_refusal(error: Error, shown: &str, trees: &[Syntax], origin: usize) -> Diagnostic {
+    let written = trees.get(origin).cloned();
+    let error = match &written {
+        Some(written) => {
+            let written = written.to_string();
+            error.said(&|text| text.replace(shown, &written))
+        }
+        None => error,
+    };
+    Diagnostic::refused(written, vec![Segment::Item(origin)], error)
 }
 
 /// Parse, analyze and compile `text` form by form, with the definitions
@@ -219,15 +220,16 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             continue;
         }
         let tree = described(tree, &checked.written, *origin);
-        match compile(&tree) {
+        // The analyzer refused what no rule may write, so the tree is
+        // compiled as `check` compiles it, and a refusal is said alike.
+        match crate::compile::compiled(&tree) {
             Ok(steps) => compiled.push((*origin, tree, steps)),
             Err(error) => {
                 refused.insert(*origin);
-                checked.diagnostics.push(Diagnostic::refused(
-                    trees.get(*origin).cloned(),
-                    vec![Segment::Item(*origin)],
-                    error,
-                ));
+                let shown = tree.to_string();
+                checked
+                    .diagnostics
+                    .push(compile_refusal(error, &shown, &trees, *origin));
             }
         }
     }
