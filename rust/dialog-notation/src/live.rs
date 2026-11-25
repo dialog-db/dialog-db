@@ -611,6 +611,13 @@ impl Standing {
     /// Dialog-DB's hash is named as it was written, by the names of what
     /// this holds, and the notation's variables are untagged. For an
     /// [`LiveError::Evaluation`], whose own text is Dialog-DB's.
+    ///
+    /// No document reaches an [`LiveError::Evaluation`] today: the
+    /// notation refuses an unbound variable when it compiles
+    /// (`rule_refused` in `compile.rs`), and Dialog-DB passes over a
+    /// formula's conflict, absence or type mismatch rather than fail
+    /// (`dialog-query`'s `formula.rs` and `formula/query.rs`). This is for
+    /// the day either path fails instead; its tests make the error.
     pub fn told(&self, error: &LiveError) -> String {
         let names: std::collections::BTreeMap<String, String> = self.selection.names().clone();
         crate::syntax::told_with(&error.to_string(), &names)
@@ -751,6 +758,13 @@ impl Watched {
     /// Dialog-DB's hash is named as it was written, by the names of what
     /// this holds, and the notation's variables are untagged. For an
     /// [`LiveError::Evaluation`], whose own text is Dialog-DB's.
+    ///
+    /// No document reaches an [`LiveError::Evaluation`] today: the
+    /// notation refuses an unbound variable when it compiles
+    /// (`rule_refused` in `compile.rs`), and Dialog-DB passes over a
+    /// formula's conflict, absence or type mismatch rather than fail
+    /// (`dialog-query`'s `formula.rs` and `formula/query.rs`). This is for
+    /// the day either path fails instead; its tests make the error.
     pub fn told(&self, error: &LiveError) -> String {
         let names: std::collections::BTreeMap<String, String> = self
             .plan

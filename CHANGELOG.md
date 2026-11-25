@@ -82,6 +82,14 @@ What this changes for you:
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A view's attribute name is one a page can set, a letter or `_`, then
+  letters, digits, `-`, `_`, `.`, with at most one `/` between two such
+  parts: `{:a//b …}`, `{:a/ …}` and `{:-a …}` are refused naming the
+  attribute, where they were given to the back end. An event's path has
+  a step between each two `.`: `..x`, `.a..b` and `.a.` are refused,
+  where empty steps were dropped; a bare `.` is read as before. An event
+  names its kind: `:on/` is refused, and so is a kind under `dialog.n`.
+  A kind is otherwise free-form, as a custom DOM event's is.
 - A derived attribute is concluded and read on the default layer only:
   `(rule (list/label ?l (:control ?n)) …)`, which compiled and issued a
   command into it every round, and a read of one on a layer, `(select

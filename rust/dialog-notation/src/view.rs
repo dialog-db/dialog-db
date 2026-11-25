@@ -271,6 +271,7 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                 match name.strip_prefix("on/") {
                     Some(kind) => element.events.push(event(kind, value)?),
                     None => {
+                        settable(&element.tag, name)?;
                         let attribute = attribute(name, value)?;
                         safe(&element.tag, name, &attribute)?;
                         element.attributes.push((name.clone(), attribute));
@@ -608,8 +609,40 @@ fn pieces(name: &str, items: &[Syntax]) -> Result<Vec<Piece>, Error> {
         .collect()
 }
 
+/// Refuse an attribute name a page cannot set: a letter or `_`, then
+/// letters, digits, `-`, `_` and `.`, with at most one `/` between two
+/// such parts, its namespace, `:xlink/href`.
+fn settable(tag: &str, name: &str) -> Result<(), Error> {
+    let part = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    let parts: Vec<&str> = name.split('/').collect();
+    match parts.len() <= 2 && parts.iter().all(|each| part(each)) {
+        true => Ok(()),
+        false => Err(refused(format!(
+            "[:{tag} {{:{name} …}}]: `:{name}` is no attribute name: a letter or `_`, then \
+             letters, digits, `-`, `_` and `.`, and at most one `/` between two such parts, \
+             its namespace, `:xlink/href`"
+        ))),
+    }
+}
+
 /// `:on/<kind> (command field: term …)`.
 fn event(kind: &str, value: &Syntax) -> Result<Event, Error> {
+    // A kind is free-form, as a custom DOM event's is, but says one.
+    if kind.is_empty() {
+        return Err(refused(format!(
+            ":on/ {value}: an event names its kind, `:on/click`"
+        )));
+    }
+    if crate::syntax::named(kind) == crate::syntax::Named::Reserved {
+        return Err(Error::Reserved(format!("on/{kind}")));
+    }
     let (Some(command), Some(operand)) = (value.applies(), value.operand()) else {
         return Err(refused(format!(
             ":on/{kind} {value}: an event binds the command it posts, `(todo/toggle todo: ?t)`"
@@ -626,12 +659,19 @@ fn event(kind: &str, value: &Syntax) -> Result<Event, Error> {
         .map(|(label, term)| {
             let input = match term {
                 Syntax::Variable(name) => Input::Variable(name.clone()),
-                Syntax::Reference(path) if path.starts_with('.') => Input::Path(
-                    path.split('.')
-                        .filter(|step| !step.is_empty())
-                        .map(str::to_string)
-                        .collect(),
-                ),
+                // A bare `.` is the empty path (gaps row 49); any other
+                // has a step between each two `.`.
+                Syntax::Reference(path) if path == "." => Input::Path(Vec::new()),
+                Syntax::Reference(path) if path.starts_with('.') => {
+                    let steps: Vec<String> = path[1..].split('.').map(str::to_string).collect();
+                    if steps.iter().any(String::is_empty) {
+                        return Err(refused(format!(
+                            ":on/{kind}: {label}: `{path}` has an empty step: a path into the \
+                             event is its steps, each after a `.`, `.target.value`"
+                        )));
+                    }
+                    Input::Path(steps)
+                }
                 Syntax::Constant(_) => Input::Value(term.clone()),
                 other => {
                     return Err(refused(format!(
@@ -660,9 +700,10 @@ mod safety {
     /// An attribute's name is one a page can set: a letter or `_`, then
     /// letters, digits, `-`, `_` and `.`, and at most one `/` between two
     /// such parts, its namespace. One that is not is refused, naming it.
+    /// (One with a `:` is an entity to the reader, and no keyword at all.)
     #[test]
     fn it_refuses_an_attribute_name_a_page_cannot_set() {
-        for name in ["a//b", "a/", "a/b/c", "-a", "a@b", "a:b"] {
+        for name in ["a//b", "a/", "a/b/c", "-a", "a@b"] {
             let text = format!("[:span {{:{name} \"x\"}}]");
             let refused = read(&text);
             assert!(
@@ -723,7 +764,7 @@ mod safety {
                 read(&text)
             );
         }
-        for kind in ["click", "my-Event.thing", "x:y"] {
+        for kind in ["click", "my-Event.thing", "x_y"] {
             let text = format!("[:button {{:on/{kind} (todo/go todo: ?t)}}]");
             assert!(read(&text).is_ok(), "{text}: {:?}", read(&text));
         }
