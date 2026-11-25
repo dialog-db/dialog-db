@@ -3948,14 +3948,15 @@ async fn it_retracts_every_claim_of_a_field_by_its_entity() -> Result<()> {
     Ok(())
 }
 
-/// The engine's succession, pinned (gaps row 50): an assert under
-/// `cardinality: :one` succeeds the newest claim of the field and keeps
-/// the others, as Dialog-DB merges two replicas' writes, and a retract
-/// that names a value retracts that claim. So with claims "a" and "b",
-/// an assert of "c" through the concept leaves "a" and "c", and a
-/// retract of "c" leaves "a", which a read through the concept answers.
+/// A write through a concept's `cardinality: :one` field succeeds the
+/// newest claim, as Dialog-DB's does, and does not clear the cell (gaps
+/// row 50, decided): the other claims stay, as Dialog-DB keeps two
+/// replicas' writes, and a retract that names a value retracts that
+/// claim. So with claims "a" and "b", an assert of "c" through the
+/// concept leaves "a" and "c", and a retract of "c" leaves "a", which a
+/// read through the concept answers.
 #[dialog_common::test]
-async fn it_writes_a_cardinality_one_field_by_the_engines_succession() -> Result<()> {
+async fn it_succeeds_the_newest_claim_through_a_cardinality_one_field() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
