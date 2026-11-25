@@ -57,7 +57,7 @@
 //!          (when (todo ?t title: "Call mom" ...)))
 //!        (select (todo ?t title: ?x done: false))"#,
 //! );
-//! assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
+//! assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics());
 //! let applied = apply(&branch, &checked, &operator).await?;
 //! let Ok(Answer::Rows(rows)) = &applied.answers.forms[0].answered else {
 //!     panic!("{:?}", applied.answers.forms[0].answered);
@@ -178,7 +178,7 @@
 //!   (select (item/size is: ?s))
 //!   (select (item/count is: ?s))"#;
 //! # let checked = check(&mut Analyzer::new()?, document);
-//! # assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
+//! # assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics());
 //! let applied = apply(&branch, &checked, &operator).await?;
 //! let mut answers = Vec::new();
 //! for form in applied.answers.forms {

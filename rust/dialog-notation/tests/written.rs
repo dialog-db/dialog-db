@@ -374,7 +374,7 @@ fn it_refuses_in_check_forms_every_forgery_compile_refuses() -> Result<()> {
             kind(&expected),
             "{text}: {said:?} against {refused:?}"
         );
-        assert!(checked.steps.is_empty(), "{text}: {:?}", checked.steps);
+        assert!(checked.steps().is_empty(), "{text}: {:?}", checked.steps());
         assert!(
             checked
                 .refusals()
@@ -436,7 +436,7 @@ fn it_pins_a_tree_built_by_hand_that_writes_another_domains_attribute() -> Resul
             .message
             .contains("names an attribute of another domain")),
         "{:?}",
-        document.diagnostics
+        document.diagnostics()
     );
     Ok(())
 }

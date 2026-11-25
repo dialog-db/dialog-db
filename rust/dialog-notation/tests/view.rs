@@ -1553,7 +1553,7 @@ fn it_measures_how_far_the_notebook_and_the_table_get() -> Result<()> {
         }
         let forms = parse(&text)?.len();
         let compiled: std::collections::BTreeSet<usize> =
-            checked.step_forms.iter().copied().collect();
+            checked.step_forms().iter().copied().collect();
         Ok((forms, checked.refusals().count(), compiled.len()))
     };
     let core = include_str!("fixtures/core.clj");

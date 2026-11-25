@@ -25,22 +25,13 @@ pub struct Checked {
     /// is compiled for Dialog-DB, so a derived attribute in them is its
     /// relation, the hash: [`Analyzer::spelled`] writes one as a person
     /// reads it.
-    ///
-    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
-    /// and [`answer`](crate::answer), and should prefer them over this.
-    pub analyzed: Vec<Syntax>,
+    pub(crate) analyzed: Vec<Syntax>,
     /// What the analyzed trees compile to, in the order written.
     /// Nothing when any part of the document is refused.
-    ///
-    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
-    /// and [`answer`](crate::answer), and should prefer them over this.
-    pub steps: Vec<Step>,
+    pub(crate) steps: Vec<Step>,
     /// For each of `steps`, the top-level form it came of, counted from
     /// 0 among the forms read.
-    ///
-    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
-    /// and [`answer`](crate::answer), and should prefer them over this.
-    pub step_forms: Vec<usize>,
+    pub(crate) step_forms: Vec<usize>,
     /// Each form that came to a rule an earlier form came to as well, a
     /// rule, a concept or a query written again, with that earlier form:
     /// its steps are the earlier form's, given once. A write written
@@ -54,17 +45,68 @@ pub struct Checked {
     /// and commands, and its queries. Given whenever analysis refused
     /// nothing, whatever Dialog-DB's compiler refuses, so a back end
     /// that renders a view still reads it.
-    pub declarations: Vec<Declaration>,
+    pub(crate) declarations: Vec<Declaration>,
     /// For each of `declarations`, the top-level form it came of.
-    pub declaration_forms: Vec<usize>,
+    pub(crate) declaration_forms: Vec<usize>,
     /// What the trees of the document leave out of its text.
     pub(crate) written: Written,
     /// Everything there is to say about the document, each with where
     /// in the text it is.
-    pub diagnostics: Vec<Diagnostic>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 impl Checked {
+    /// The analyzed trees the document came to, each with what the
+    /// comments about the form it came of say as its `description:`.
+    /// Nothing when any part of the document is refused.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
+    pub fn analyzed(&self) -> &[Syntax] {
+        &self.analyzed
+    }
+
+    /// What the analyzed trees compile to, in the order written.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// For each of [`steps`](Self::steps), the top-level form it came of,
+    /// counted from 0 among the forms read.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
+    pub fn step_forms(&self) -> &[usize] {
+        &self.step_forms
+    }
+
+    /// What the document declares, in the order written: its concepts
+    /// and commands, and its queries.
+    pub fn declarations(&self) -> &[Declaration] {
+        &self.declarations
+    }
+
+    /// For each of [`declarations`](Self::declarations), the top-level
+    /// form it came of.
+    pub fn declaration_forms(&self) -> &[usize] {
+        &self.declaration_forms
+    }
+
+    /// Everything there is to say about the document, each with where in
+    /// the text it is.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// The steps, to change: for the tests that make a step fail.
+    #[cfg(feature = "inspect")]
+    pub fn steps_mut(&mut self) -> &mut Vec<Step> {
+        &mut self.steps
+    }
+
     /// The refusals: the diagnostics that are errors.
     pub fn refusals(&self) -> impl Iterator<Item = &Diagnostic> {
         self.diagnostics

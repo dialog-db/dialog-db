@@ -47,8 +47,11 @@ What this changes for you:
 - `Did::Installed` says what was installed, an `Installation`:
   `Deduction`, `Induction` or `Transient`. A rule, concept or query
   written again is `Did::Repeats(earlier)`.
-- Narrowed, as no embedder reads them: `Checked`'s `written` and what
-  it holds of repeats and of refusing whole; `Analyzer::analyze_forms`
+- `Checked` is read through methods: `analyzed()`, `steps()`,
+  `step_forms()`, `declarations()`, `declaration_forms()`,
+  `diagnostics()` and `refusals()`, where its fields were public. What a
+  form repeats is in the report, `Did::Repeats`.
+- Narrowed, as no embedder reads them: `Checked.written`; `Analyzer::analyze_forms`
   (`check_forms` stays); the fields of `Selection` and `Folded`, and of
   `Plan` but `given`; the plan's parts (`Layer`, `Condition`, `Count`,
   `FoldedCount`, `Place`, `Placed`, `Source`, `Why`); a template's tree

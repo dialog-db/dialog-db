@@ -24,9 +24,9 @@ fn steps(analyzer: &mut Analyzer, text: &str) -> Vec<Step> {
     assert!(
         checked.refusals().next().is_none(),
         "{text}: {:?}",
-        checked.diagnostics
+        checked.diagnostics()
     );
-    checked.steps
+    checked.steps().to_vec()
 }
 
 /// A transaction of `steps` on `branch`.

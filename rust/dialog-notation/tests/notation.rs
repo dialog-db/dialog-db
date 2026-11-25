@@ -685,7 +685,7 @@ async fn it_compiles_a_view_to_its_plan() -> Result<()> {
     assert_eq!(rows, vec![r#"[:li "Buy milk"]"#]);
     let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, document);
     let plans: Vec<&dialog_notation::Plan> = checked
-        .steps
+        .steps()
         .iter()
         .filter_map(|step| match step {
             dialog_notation::Step::View(plan) => Some(&**plan),
@@ -693,7 +693,7 @@ async fn it_compiles_a_view_to_its_plan() -> Result<()> {
         })
         .collect();
     let [plan] = plans.as_slice() else {
-        panic!("one view: {:?}", checked.steps);
+        panic!("one view: {:?}", checked.steps());
     };
     assert_eq!(
         (plan.name.as_str(), plan.entity.as_str()),
@@ -722,7 +722,7 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
     let checked = dialog_notation::check(&mut analyzer, include_str!("fixtures/todo.clj"));
     assert_eq!(checked.refusals().count(), 0);
     let concepts: Vec<&dialog_notation::Concept> = checked
-        .declarations
+        .declarations()
         .iter()
         .filter_map(|declared| match declared {
             dialog_notation::Declaration::Concept(concept) => Some(concept),
@@ -807,9 +807,9 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
             name,
             markup,
         },
-    ] = checked.declarations.as_slice()
+    ] = checked.declarations()
     else {
-        panic!("a concept and a view: {:?}", checked.declarations);
+        panic!("a concept and a view: {:?}", checked.declarations());
     };
     assert_eq!(note.lines[0].description.as_deref(), Some("What it says."));
     // No cardinality written: the line reads every claim.
@@ -1503,13 +1503,13 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
         ),
     );
     let selection = checked
-        .steps
+        .steps()
         .iter()
         .find_map(|step| match step {
             dialog_notation::Step::Select(selection) => Some((**selection).clone()),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics()))?;
     let live = dialog_notation::live::Live::new(notebook.branch.clone());
     let mut standing = live.standing(selection)?;
     let kept = standing.poll(&notebook.operator).await?.unwrap_or_default();
@@ -1527,7 +1527,7 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
         );
         said.extend(
             checked
-                .diagnostics
+                .diagnostics()
                 .iter()
                 .map(|diagnostic| diagnostic.message.clone()),
         );
@@ -1542,7 +1542,7 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
         let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, &text);
         said.extend(
             checked
-                .diagnostics
+                .diagnostics()
                 .iter()
                 .map(|diagnostic| diagnostic.message.clone()),
         );
@@ -1944,7 +1944,7 @@ async fn it_keeps_no_derived_use_of_a_form_that_was_refused() -> Result<()> {
            (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one))
          (rule (xyz.seen ?t v: ?g) (todo/tag ?t ?g) (frobnicate ?t))",
     );
-    assert_eq!(checked.refusals().count(), 1, "{:?}", checked.diagnostics);
+    assert_eq!(checked.refusals().count(), 1, "{:?}", checked.diagnostics());
     let declared = dialog_notation::check(
         &mut analyzer,
         "(concept (todo/tag ?t is: ?g)
@@ -1953,7 +1953,7 @@ async fn it_keeps_no_derived_use_of_a_form_that_was_refused() -> Result<()> {
     assert!(
         declared.refusals().next().is_none(),
         "{:?}",
-        declared.diagnostics
+        declared.diagnostics()
     );
     Ok(())
 }
@@ -1989,7 +1989,7 @@ async fn it_names_a_derived_attribute_under_the_concept_before_its_last_slash() 
     assert!(
         checked.refusals().next().is_some(),
         "{:?}",
-        checked.diagnostics
+        checked.diagnostics()
     );
     Ok(())
 }
@@ -2022,7 +2022,7 @@ async fn it_refuses_a_name_the_notation_writes_at_every_way_in() -> Result<()> {
                     && matches!(&refused.refusal, Some(Error::Reserved(said)) if said == name)),
                 "{text}: {refused:?}"
             );
-            assert!(checked.steps.is_empty(), "{text}");
+            assert!(checked.steps().is_empty(), "{text}");
         }
     }
     Ok(())
@@ -3849,12 +3849,12 @@ fn it_pins_what_dialog_db_refuses_of_an_attribute_today() -> Result<()> {
         let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, text);
         let written = read(text)?;
         assert_eq!(
-            checked.diagnostics.len(),
+            checked.diagnostics().len(),
             1,
             "{text}: {:?}",
-            checked.diagnostics
+            checked.diagnostics()
         );
-        let refused = &checked.diagnostics[0];
+        let refused = &checked.diagnostics()[0];
         assert_eq!(refused.message, said, "{text}");
         assert_eq!(
             refused.form.as_ref().map(ToString::to_string),
@@ -4196,14 +4196,14 @@ fn it_refuses_a_rule_that_writes_into_dialog_and_reads_from_it() -> Result<()> {
             checked.refusals().count(),
             1,
             "{text}: {:?}",
-            checked.diagnostics
+            checked.diagnostics()
         );
     }
     let read = dialog_notation::check(
         &mut dialog_notation::Analyzer::new()?,
         "(select (dialog.rule ?r invalid: ?why))",
     );
-    assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics);
+    assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics());
     Ok(())
 }
 
@@ -4451,7 +4451,7 @@ async fn it_refuses_a_pick_on_a_concept_read() -> Result<()> {
     assert!(
         checked.refusals().next().is_none(),
         "{:?}",
-        checked.diagnostics
+        checked.diagnostics()
     );
     Ok(())
 }

@@ -261,7 +261,7 @@ async fn it_runs_a_write_written_again_in_its_place() -> Result<()> {
     );
     let rule = r#"(rule (assert (m ?t tag: "seen")) (n ?t v: 3))"#;
     let checked = check(&mut document.analyzer, &format!("{rule} {rule}"));
-    assert_eq!(checked.steps.len(), 1, "{:?}", checked.steps);
+    assert_eq!(checked.steps().len(), 1, "{:?}", checked.steps());
     Ok(())
 }
 
@@ -425,11 +425,11 @@ async fn it_answers_each_form_apart_so_one_failing_hides_no_other() -> Result<()
            (select (k x:1 lvl: ?l))"#,
     );
     let Some(dialog_notation::Step::Query(query)) = checked
-        .steps
+        .steps_mut()
         .iter_mut()
         .find(|step| matches!(step, dialog_notation::Step::Query(_)))
     else {
-        panic!("no query: {:?}", checked.step_forms);
+        panic!("no query: {:?}", checked.step_forms());
     };
     query.select.terms = dialog_query::Parameters::new();
     let applied = apply(&document.branch, &checked, &document.operator).await?;

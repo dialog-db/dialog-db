@@ -644,14 +644,14 @@ async fn it_tells_an_evaluation_error_in_the_authors_terms() -> Result<()> {
          (select (list/card ?l is: ?card))",
     );
     let selection = checked
-        .steps
+        .steps()
         .iter()
         .find_map(|step| match step {
             Step::Select(selection) => Some((**selection).clone()),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
-    let hash = format!("{:?}", checked.steps)
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics()))?;
+    let hash = format!("{:?}", checked.steps())
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
         .find(|part| part.starts_with("dialog.n.c."))
         .map(str::to_string)
@@ -722,11 +722,11 @@ fn derived_hash(concept: &str, field: &str) -> Result<String> {
              (rule ({concept}/{field} ?l ?n) ({concept} ?l name: ?n))"
         ),
     );
-    format!("{:?}", checked.steps)
+    format!("{:?}", checked.steps())
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
         .find(|part| part.starts_with("dialog.n.c."))
         .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("no derived relation: {:?}", checked.diagnostics))
+        .ok_or_else(|| anyhow::anyhow!("no derived relation: {:?}", checked.diagnostics()))
 }
 
 /// A selection kept standing follows writes through a concept: two
@@ -743,13 +743,13 @@ async fn it_keeps_a_selection_standing_through_a_retract_of_every_claim() -> Res
          (select (p/name ?t is: ?n))",
     );
     let selection = checked
-        .steps
+        .steps()
         .iter()
         .find_map(|step| match step {
             Step::Select(selection) => Some((**selection).clone()),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics()))?;
     notebook
         .submit(
             "(concept (p ?t n: ?n) (xyz.p/n of: ?t is: ?n as: :text cardinality: :one))
