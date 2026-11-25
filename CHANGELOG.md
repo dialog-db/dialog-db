@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A typed read of a relation a rule deduces reads it as it reads a stored one
 
+[#866](https://github.com/dialog-db/dialog-db/pull/866)
+
 A field that declares a type reads a stored attribute through that
 type: a value of another type is no fact of the field, and a number is
 read as the field's number type. A rule concludes its relation whatever
