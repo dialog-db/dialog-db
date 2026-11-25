@@ -529,11 +529,13 @@ pub const FORMS: [&str; 31] = [
     "avg",
 ];
 
-/// Why `name` is spelled as no stored name's part may be: each part
-/// between `/` starts with a lowercase letter, holds lowercase letters,
-/// digits and `-` only, and does not end with `-`, as Dialog-DB's rule
-/// for an attribute's name (`The::validate` in dialog-query). `None` for
-/// a name spelled so.
+/// Why `name` is spelled as a declared name may not be: each part
+/// between `/` is strict kebab-case, `[a-z][a-z0-9]*(-[a-z0-9]+)*`,
+/// lowercase words of letters and digits joined by one `-`, starting
+/// with a letter (the maintainer, 2026-11-25, as tonk's library names
+/// are). That is narrower than Dialog-DB's rule for an attribute's name
+/// (`The::validate` in dialog-query), which takes `--`. `None` for a
+/// name spelled so.
 pub fn unspelled(name: &str) -> Option<String> {
     name.split('/').find_map(|part| {
         let first = part.chars().next()?;
@@ -546,13 +548,14 @@ pub fn unspelled(name: &str) -> Option<String> {
             format!("`{part}` holds `{other}`")
         } else if part.ends_with('-') {
             format!("`{part}` ends with `-`")
+        } else if part.contains("--") {
+            format!("`{part}` holds `--`")
         } else {
             return None;
         };
         Some(format!(
-            "{why}: each part of a name starts with a lowercase letter and holds only \
-             lowercase letters, digits and `-`, not ending with one, as a stored name's does, \
-             `count-open`, `notebook/blocks`"
+            "{why}: each part of a name is lowercase words of letters and digits joined by one \
+             `-`, starting with a lowercase letter, `count-open`, `notebook/blocks`"
         ))
     })
 }

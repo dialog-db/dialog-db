@@ -100,11 +100,12 @@ What this changes for you:
   gather a record that holds each, then count it. A fold not there yet
   names the one that is, `(count ?x)`. The crate's documentation says
   what a collection holds and what is counted, against Datomic.
-- A declared name is spelled as a stored name's part is: each part
-  between `/` starts with a lowercase letter, holds lowercase letters,
-  digits and `-` only, and does not end with `-`. A concept, query,
+- A declared name is strict kebab-case in each part between `/`:
+  lowercase words of letters and digits joined by one `-`, starting with
+  a lowercase letter, `[a-z][a-z0-9]*(-[a-z0-9]+)*`. A concept, query,
   command, document macro or derived attribute named otherwise, `café`,
-  `Todo`, `to_do`, `a#b`, a name with a zero-width space, is refused naming
+  `Todo`, `to_do`, `to--do`, `a#b`, a name with a zero-width space, is
+  refused naming
   the part and the character, where it was declared and read under
   exactly what was written. So is a field a declaration declares: a
   concept's, a command's or a query's head label, and a derived
