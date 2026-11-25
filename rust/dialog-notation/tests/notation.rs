@@ -1318,12 +1318,14 @@ async fn it_refuses_a_concept_query_or_command_whose_name_has_a_dot() -> Result<
 }
 
 /// A name a macro's expansion declares as a concept is declared when
-/// that form is expanded. A rule or a select of the same document that
-/// read the name before, as an attribute's, would read another relation:
-/// it is refused, saying to declare the concept above it, and nothing of
-/// the document is written. Declared above, it reads the concept.
+/// that form is expanded. A rule of the same document that reads it
+/// above the use is expanded again once the use has declared it, as a
+/// read above a `(concept …)` is, so the two orders answer the same: a
+/// name of words joined by `/` with no `.` is never a stored attribute,
+/// so the first try reads nothing else. A name no form ever declares is
+/// refused once, saying what is missing, and the retries end.
 #[dialog_common::test]
-async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<()> {
+async fn it_reads_a_name_the_document_declares_after_it_once_declared() -> Result<()> {
     let kind = "(rule (syntax (concept (?name ?t is: ?x)
                   (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one)))
                 (expand (memo-kind ?name)))";
@@ -1336,71 +1338,95 @@ async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<
             .await?;
         anyhow::Ok(notebook)
     };
+    for order in [[kind, rule, declare], [kind, declare, rule]] {
+        let mut notebook = open().await?;
+        notebook.submit(&order.join("\n")).await?;
+        assert_eq!(
+            report(&mut notebook, "(select (xyz.out ?t v: ?x))").await?,
+            vec![r#"(xyz.out x:1 v: "the concept's")"#],
+            "{order:?}"
+        );
+    }
+    // Never declared: one refusal, in the author's terms, and nothing
+    // written.
     let mut notebook = open().await?;
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        &[kind, rule].join("\n"),
+    );
+    let refusals: Vec<_> = checked.refusals().collect();
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert!(
+        refusals[0].message.contains(
+            "`memo/note` names no attribute of a domain, which holds a `.`, `xyz.memo/note`, and \
+             no concept `memo/note`, nor a concept `memo` it would be derived under, is declared \
+             above what reads it"
+        ),
+        "{refusals:?}"
+    );
     let refused = notebook
-        .submit(&[kind, rule, declare].join("\n"))
+        .submit(&[kind, rule].join("\n"))
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&refused, Err(Ok(Error::Refused(why)))
-            if why.contains("memo/note") && why.contains("declare")),
+        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("no concept `memo/note`")),
         "{refused:?}"
     );
     assert!(
         report(&mut notebook, "(select (xyz.out ?t v: ?x))")
             .await?
             .is_empty()
-    );
-    let mut notebook = open().await?;
-    notebook.submit(&[kind, declare, rule].join("\n")).await?;
-    assert_eq!(
-        report(&mut notebook, "(select (xyz.out ?t v: ?x))").await?,
-        vec![r#"(xyz.out x:1 v: "the concept's")"#]
     );
     Ok(())
 }
 
 /// The same holds of an attribute named under a concept a macro's
-/// expansion declares: read before the declaration it is the stored
-/// attribute, after it the concept's derived one. Read first, it is
-/// refused, saying to declare the concept above it.
+/// expansion declares: read above the use or below it, it is the
+/// concept's derived attribute, which no rule here concludes. What is
+/// still refused is a read that did read another relation than the one
+/// a later form makes the name: a derived attribute `list/count` of the
+/// concept `list`, read before a macro's use declares a concept
+/// `list/count`, saying to declare the concept above. (A `(concept …)`
+/// is declared before what reads it wherever it is written.)
 #[dialog_common::test]
-async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> Result<()> {
+async fn it_reads_under_a_concept_the_document_declares_after_it_as_declared_above() -> Result<()> {
     let kind = "(rule (syntax (concept (?name ?t name: ?x)
                   (xyz.list/name of: ?t is: ?x as: :text cardinality: :one)))
                 (expand (list-kind ?name)))";
     let rule = "(rule (xyz.out ?t v: ?x) (list/count ?t ?x))";
     let declare = "(list-kind list)";
-    let open = || async {
-        let notebook = Notebook::open().await?;
-        anyhow::Ok(notebook)
-    };
-    // Read first, it is read as an attribute's, before `list` is a
-    // concept: refused by the mechanism this is about, saying to declare
-    // the concept above.
-    let mut notebook = open().await?;
+    for order in [[kind, rule, declare], [kind, declare, rule]] {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(&format!(
+                r#"{} (assert (xyz.list/name of: list:1 is: "a"))"#,
+                order.join("\n")
+            ))
+            .await?;
+        assert!(
+            report(&mut notebook, "(select (xyz.out ?t v: ?x))")
+                .await?
+                .is_empty(),
+            "{order:?}"
+        );
+    }
+    // A macro's use declares `list/count` a concept after the rule read
+    // it as the derived attribute of `list`: the rule read another
+    // relation, and is refused, saying to declare the concept above.
+    let counted = "(rule (syntax (concept (?name ?t is: ?x)
+                     (xyz.list/count of: ?t is: ?x as: :text cardinality: :one)))
+                   (expand (count-kind ?name)))";
+    let mut notebook = Notebook::open().await?;
     let refused = notebook
-        .submit(&[kind, rule, declare].join("\n"))
+        .submit(&format!(
+            "{kind} {declare} {counted} {rule} (count-kind list/count)"
+        ))
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
         matches!(&refused, Err(Ok(Error::Refused(why)))
-            if why.contains("`list`") && why.contains("declare the concept above")),
+            if why.contains("`list/count`") && why.contains("declare the concept above")),
         "{refused:?}"
-    );
-    assert!(
-        report(&mut notebook, "(select (xyz.out ?t v: ?x))")
-            .await?
-            .is_empty()
-    );
-    // Declared above, it is the concept's derived attribute, which no
-    // rule concludes: the stored value is not read.
-    let mut notebook = open().await?;
-    notebook.submit(&[kind, declare, rule].join("\n")).await?;
-    assert!(
-        report(&mut notebook, "(select (xyz.out ?t v: ?x))")
-            .await?
-            .is_empty()
     );
     Ok(())
 }
@@ -1733,42 +1759,29 @@ async fn it_refuses_a_line_with_no_cardinality_whatever_the_body_holds() -> Resu
 }
 
 /// A concept a macro's use declares is read by a query below it, as by
-/// a select: a query below the use is expanded after it, so it reads
-/// the concept and is not told to declare it above, as it is above. A
-/// query above the use is, since there the declaration does come after.
+/// a select, and by one above it, which is expanded again once the use
+/// has declared it: the two answer the same.
 #[dialog_common::test]
 async fn it_reads_a_concept_a_macro_declares_above_a_query() -> Result<()> {
     let kind = "(rule (syntax (concept (?name ?t is: ?x)
            (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one)))
          (expand (memo-kind ?name)))";
-    let mut notebook = Notebook::open().await?;
-    notebook
-        .submit(&format!(
-            r#"{kind}
-               (memo-kind memo/note)
-               (query (memo/card ?t is: ?c) (memo/note ?t is: ?x) (is ?c {{:text ?x}}))
-               (assert (xyz.memo/text of: memo:1 is: "hello"))"#
-        ))
-        .await?;
-    assert_eq!(
-        report(&mut notebook, "(select (memo/card ?t is: ?c))").await?,
-        vec![r#"(memo/card memo:1 is: {:text "hello"})"#]
-    );
-    // Above the use, it reads before the concept is declared: refused,
-    // saying to declare it above, which is so.
-    let mut above = Notebook::open().await?;
-    let refused = above
-        .submit(&format!(
-            "{kind}
-             (query (memo/card ?t is: ?c) (memo/note ?t is: ?x) (is ?c {{:text ?x}}))
-             (memo-kind memo/note)"
-        ))
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("declare the concept above")),
-        "{refused:?}"
-    );
+    let query = "(query (memo/card ?t is: ?c) (memo/note ?t is: ?x) (is ?c {:text ?x}))";
+    let declare = "(memo-kind memo/note)";
+    for order in [[kind, declare, query], [kind, query, declare]] {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(&format!(
+                r#"{} (assert (xyz.memo/text of: memo:1 is: "hello"))"#,
+                order.join("\n")
+            ))
+            .await?;
+        assert_eq!(
+            report(&mut notebook, "(select (memo/card ?t is: ?c))").await?,
+            vec![r#"(memo/card memo:1 is: {:text "hello"})"#],
+            "{order:?}"
+        );
+    }
     // A select in the same place, as before.
     let mut selected = Notebook::open().await?;
     selected
@@ -2225,7 +2238,8 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&misspelled, Err(Ok(Error::Refused(why))) if why.contains("no concept is declared")),
+        matches!(&misspelled, Err(Ok(Error::Refused(why)))
+            if why.contains("no concept `counter/incremnt`, nor a concept `counter`")),
         "{misspelled:?}"
     );
     assert_eq!(

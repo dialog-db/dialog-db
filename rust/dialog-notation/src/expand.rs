@@ -429,7 +429,7 @@ fn elect(template: &mut Syntax, chosen: &BTreeMap<String, String>) {
                 elect(member, chosen);
             }
         }
-        Syntax::Reference(name) if Kind::of(name) == Kind::Attribute => {
+        Syntax::Reference(name) if syntax::named(name) == syntax::Named::Attribute => {
             let value = match operand.terms.get_mut("is") {
                 Some(value) => Some(value),
                 None => operand.items.get_mut(1),
@@ -520,7 +520,12 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
         return Ok(None);
     };
     let Some((domain, field)) = (match &**operator {
-        Syntax::Reference(name) if Kind::of(name) == Kind::Attribute => name.split_once('/'),
+        // Only a stored attribute, its domain dotted: a name of words
+        // joined by `/` with no `.` is a concept's or a derived
+        // attribute's, never a relation named by its first word.
+        Syntax::Reference(name) if syntax::named(name) == syntax::Named::Attribute => {
+            name.split_once('/')
+        }
         _ => None,
     }) else {
         return Ok(None);
@@ -2422,6 +2427,25 @@ impl Expander {
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
                 return Ok(read);
+            }
+            // A name of words joined by `/`, no `.`, that nothing defines
+            // and whose first part is no concept is a concept or a
+            // derived attribute not declared above what reads it.
+            if !declared
+                && let Some(word) = word.as_deref().filter(|word| {
+                    syntax::declarable(word)
+                        && !self.names.contains(*word)
+                        && !self.queries.contains_key(*word)
+                })
+                && let Some((concept, _)) = word.rsplit_once('/')
+                && !self.concepts.contains(concept)
+            {
+                let message = format!(
+                    "`{word}` names no attribute of a domain, which holds a `.`, \
+                     `xyz.{word}`, and no concept `{word}`, nor a concept `{concept}` it would \
+                     be derived under, is declared above what reads it"
+                );
+                return self.about(&tree, |_| Err(Error::Refused(message)));
             }
             if let (Position::Head, Some(word)) = (
                 position,
@@ -4477,7 +4501,7 @@ mod tests {
     #[test]
     fn it_refuses_a_slashed_name_no_concept_declares_wherever_it_stands() {
         let concept = "(concept (t ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))";
-        for word in ["foo", "select", "rule", "unless", "is", "count"] {
+        for word in std::iter::once("foo").chain(syntax::FORMS) {
             for text in [
                 format!("{concept} (rule ({word}/x ?x ?n) (t ?x name: ?n))"),
                 format!("{concept} (select ({word}/x ?x ?n))"),

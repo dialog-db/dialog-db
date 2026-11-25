@@ -82,6 +82,16 @@ What this changes for you:
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A name of words joined by `/` with no `.` is never read as a stored
+  attribute: `(foo/x ?x ?n)` under no concept `foo/x` or `foo` is refused,
+  saying neither is declared above what reads it, in a rule's head, its
+  premises, `unless` and a select, where it was read as a relation `foo`
+  and refused as `?x applies no relation` or `(foo ?x x: ?n) is not a
+  kernel premise`. `(xyz.t/name ?x ?n)` reads the stored attribute as
+  before.
+- A read above the use of a macro that declares the concept it reads
+  is read once the use has declared it, as a read above a `(concept …)`
+  is, where it was refused, saying to declare the concept above.
 - A name Dialog-DB cannot keep is refused naming it, its length and the
   limit, where it was refused as `not a symbol: Invalid attribute:
   Relation "/<name>" …` or `invalid relation ".a/name"`: a name of no

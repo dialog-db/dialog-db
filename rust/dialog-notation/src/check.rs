@@ -744,19 +744,19 @@ mod tests {
             ],
         ];
         // Each order means what the order as listed means, which declares
-        // a name above what reads it; or, where a form reads a name a
-        // macro's expansion declares below it, it is refused saying so.
-        // No order answers otherwise.
+        // a name above what reads it, a name a macro's expansion declares
+        // below what reads it among them: the read is expanded again once
+        // the name is declared. No order is told to declare a concept
+        // above what reads it, and none means otherwise.
         for forms in documents {
             let first = meaning(&forms.join("\n"))?;
             for order in orders(&forms) {
                 let text = order.join("\n");
-                let declared_after = check(&mut Analyzer::new()?, &text).refusals().any(|refused| {
+                let above = check(&mut Analyzer::new()?, &text).refusals().any(|refused| {
                     matches!(&refused.refusal, Some(Error::Refused(why)) if why.contains("declare the concept above"))
                 });
-                if !declared_after {
-                    assert_eq!(meaning(&text)?, first, "{order:#?} against {forms:#?}");
-                }
+                assert!(!above, "{order:#?}");
+                assert_eq!(meaning(&text)?, first, "{order:#?} against {forms:#?}");
             }
         }
         // A concept over another concept, under a name with a `/` and
