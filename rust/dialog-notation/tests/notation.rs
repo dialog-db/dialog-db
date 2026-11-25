@@ -4248,10 +4248,14 @@ async fn it_pins_a_rule_written_by_hand() -> Result<()> {
 }
 
 /// A typed read of a derived attribute reads it as a typed read of a
-/// stored attribute does (#866): with `list/label` derived from a text,
-/// a read of it as an integer or an entity answers nothing, as text it
+/// stored attribute does (#866), written as a line is, `as:` the type of
+/// the value under `is:`: with `list/label` derived from a text, a read
+/// of it as an integer or an entity answers nothing, as text it
 /// answers, and a join through a typed read of it answers as the same
-/// join through the stored attribute.
+/// join through the stored attribute's line. The kernel's spelling, the
+/// value wrapped in its type, `(:text ?n)`, reads the same. A derived
+/// attribute takes no `cardinality:`, which is what its rules conclude,
+/// and `as:` with no `is:` to type is refused.
 #[dialog_common::test]
 async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -4263,28 +4267,48 @@ async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result
                (assert (list list:home name: "Home"))"#,
         )
         .await?;
+    let home = vec![r#"(list/label list:home is: "Home")"#];
     for (read, answers) in [
-        ("(select (list/label ?l (:integer ?n)))", vec![]),
-        ("(select (list/label ?l (:entity ?n)))", vec![]),
+        ("(select (list/label of: ?l is: ?n as: :integer))", vec![]),
+        ("(select (list/label of: ?l is: ?n as: :entity))", vec![]),
         (
-            "(select (list/label ?l (:text ?n)))",
-            vec![r#"(list/label list:home is: "Home")"#],
+            "(select (list/label of: ?l is: ?n as: :text))",
+            home.clone(),
         ),
+        ("(select (list/label ?l is: ?n as: :text))", home.clone()),
+        ("(select (list/label ?l (:text ?n)))", home.clone()),
+        ("(select (list/label ?l (:integer ?n)))", vec![]),
     ] {
         assert_eq!(report(&mut notebook, read).await?, answers, "{read}");
     }
     for kind in [":integer", ":entity", ":text"] {
         let derived = report(
             &mut notebook,
-            &format!("(select (xyz.out ?l v: ?n) (list/label ?l ({kind} ?n)))"),
+            &format!("(select (xyz.out ?l v: ?n) (list/label of: ?l is: ?n as: {kind}))"),
         )
         .await?;
         let stored = report(
             &mut notebook,
-            &format!("(select (xyz.out ?l v: ?n) (xyz.list ?l name: ({kind} ?n)))"),
+            &format!("(select (xyz.out ?l v: ?n) (xyz.list/name of: ?l is: ?n as: {kind}))"),
         )
         .await?;
         assert_eq!(derived, stored, "{kind}");
+    }
+    for (read, says) in [
+        (
+            "(select (list/label of: ?l is: ?n as: :text cardinality: :one))",
+            "cardinality:",
+        ),
+        ("(select (list/label of: ?l other: ?n as: :text))", "as:"),
+    ] {
+        let refused = notebook
+            .submit(read)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains(says)),
+            "{read}: {refused:?}"
+        );
     }
     Ok(())
 }
