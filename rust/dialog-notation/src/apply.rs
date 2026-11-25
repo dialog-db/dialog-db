@@ -184,7 +184,7 @@ pub struct FormReport {
     /// Which form, counted from 0 among the forms read.
     pub form: usize,
     /// Its refusal, when it was refused: it staged nothing. A form with
-    /// none was kept. In a document checked whole ([`Checked::whole`]),
+    /// none was kept. In a document checked whole (`Checked::whole`),
     /// a form refused with the document holds the document's first
     /// refusal.
     pub refused: Option<Diagnostic>,
@@ -201,10 +201,9 @@ pub enum Did {
     Retracted(ConceptStatement),
     /// A command issued.
     Issued(ConceptStatement),
-    /// A rule installed, or a concept marked as a command's, by the
-    /// entity it is stored under: `None` for a rule Dialog-DB gives no
-    /// identity, which the commit refuses.
-    Installed(Option<Entity>),
+    /// What was installed, and the entity it is stored under: `None`
+    /// for a rule Dialog-DB gives no identity, which the commit refuses.
+    Installed(Installation, Option<Entity>),
     /// A write's `when` read. Each match follows as the
     /// [`Asserted`](Did::Asserted) or [`Retracted`](Did::Retracted) it
     /// made, so nothing follows when nothing matched.
@@ -214,7 +213,18 @@ pub enum Did {
     Asked,
     /// A rule, a concept or a query written again: it is the same as the
     /// one the form named here came to, installed once, at that form.
-    Same(usize),
+    Repeats(usize),
+}
+
+/// What a form installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Installation {
+    /// A rule that derives: a concept's, a query's, a derived attribute's.
+    Deduction,
+    /// A rule that writes when its premises come to hold.
+    Induction,
+    /// A concept marked as a command's: its facts hold for one round.
+    Transient,
 }
 
 /// Stage `checked`, what [`check`](crate::check) or
@@ -263,7 +273,7 @@ pub async fn stage<T: Stage, E: Reader>(
     }
     for (at, earlier) in &checked.repeats {
         if let Some(report) = forms.get_mut(*at) {
-            report.did.push(Did::Same(*earlier));
+            report.did.push(Did::Repeats(*earlier));
         }
     }
     for (step, at) in checked.steps.iter().zip(&checked.step_forms) {
@@ -306,15 +316,18 @@ pub async fn stage<T: Stage, E: Reader>(
             }
             // A rule is kept on the branch, one that holds a struct too.
             Step::Deduce(rule) => {
-                did.push(Did::Installed(rule.try_this()));
+                did.push(Did::Installed(Installation::Deduction, rule.try_this()));
                 transaction.assert((**rule).clone())
             }
             Step::Induce(rule) => {
-                did.push(Did::Installed(rule.try_this()));
+                did.push(Did::Installed(Installation::Induction, rule.try_this()));
                 transaction.assert((**rule).clone())
             }
             Step::Transient(concept) => {
-                did.push(Did::Installed(Some(concept.clone())));
+                did.push(Did::Installed(
+                    Installation::Transient,
+                    Some(concept.clone()),
+                ));
                 transaction.assert(Transient(concept.clone()))
             }
             Step::Query(_) | Step::Select(_) | Step::View(_) => {
@@ -397,7 +410,7 @@ pub async fn answer<E: Reader>(branch: &Branch, checked: &Checked, env: &E) -> A
             Step::Query(query) => rows(branch, query, env).await.map(Answer::Rows),
             Step::Select(selection) => live.select(selection, env).await.map(Answer::Rows),
             Step::View(plan) => live
-                .render(plan, plan.given.as_ref(), env)
+                .rendered(plan, plan.given.as_ref(), env)
                 .await
                 .map(|rendered| Answer::Rendered(vec![rendered])),
             _ => continue,

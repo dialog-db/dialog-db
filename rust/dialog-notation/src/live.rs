@@ -382,6 +382,9 @@ impl Live {
     /// The answers of `selection` as the branch stands, asked once: each
     /// query with its rule laid over the branch for it alone, so nothing
     /// is left on the overlay.
+    ///
+    /// Plumbing for answering once: an embedder answers a document's selects
+    /// with [`answer`](crate::answer), and should prefer it over this.
     pub async fn select<E: Reader>(
         &self,
         selection: &Selection,
@@ -441,8 +444,21 @@ impl Live {
     }
 
     /// The view `plan` rendered once for `entity`, every layer asked as
-    /// the branch stands.
+    /// the branch stands: for the tests. An embedder answers a view with
+    /// [`answer`](crate::answer), or keeps it with [`watch`](Self::watch).
+    #[cfg(feature = "inspect")]
     pub async fn render<E: Reader>(
+        &self,
+        plan: &Plan,
+        entity: Option<&Value>,
+        env: &E,
+    ) -> Result<Rendered, LiveError> {
+        self.rendered(plan, entity, env).await
+    }
+
+    /// The view `plan` rendered once for `entity`, every layer asked as
+    /// the branch stands.
+    pub(crate) async fn rendered<E: Reader>(
         &self,
         plan: &Plan,
         entity: Option<&Value>,
@@ -468,7 +484,7 @@ impl Live {
 
     /// `selection` kept current: its rules laid, a subscription of each
     /// query whose rows [`Selection::answer`] reads, and a standing fold
-    /// of each of [`Selection::folds`].
+    /// of each of `Selection::folds`.
     pub fn standing(&self, selection: Selection) -> Result<Standing, LiveError> {
         let read = selection.read();
         let mut lease = self.lease();

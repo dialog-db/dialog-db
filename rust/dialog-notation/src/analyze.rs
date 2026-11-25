@@ -17,6 +17,9 @@ use crate::expand::Expander;
 use crate::{Error, Syntax};
 
 /// What analysis made of a document.
+///
+/// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+/// and [`answer`](crate::answer), and should prefer them over this.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Analysis {
     /// The analyzed trees: every one a rule of the kernel, in the order
@@ -78,6 +81,9 @@ impl Analyzer {
     /// A document with a refusal in it is refused whole: none of its
     /// trees comes back analyzed and none of its definitions is kept,
     /// so the same document can be analyzed again once it is mended.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
     pub fn analyze(&mut self, trees: &[Syntax]) -> Analysis {
         let mut trial = self.expander.clone();
         let (analyzed, diagnostics) = trial.check(trees.to_vec());
@@ -128,7 +134,7 @@ impl Analyzer {
     /// Two forms that define one name are both refused, whichever comes
     /// first, and what neither defines is analyzed without them: which
     /// of them would stand would depend on their order.
-    pub fn analyze_forms(&mut self, trees: &[Syntax]) -> Analysis {
+    pub(crate) fn analyze_forms(&mut self, trees: &[Syntax]) -> Analysis {
         let before = self.expander.clone();
         let mut skipping: BTreeMap<usize, Error> = BTreeMap::new();
         loop {

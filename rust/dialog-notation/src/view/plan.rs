@@ -141,21 +141,42 @@ pub struct Source {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     /// The query, by its name.
+    #[cfg(feature = "inspect")]
     pub name: String,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) name: String,
     /// The variable of the entity it answers of; empty for a query of no
     /// entity, which stands once.
+    #[cfg(feature = "inspect")]
     pub entity: String,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) entity: String,
     /// The template, every query collected into it put in its place.
+    #[cfg(feature = "inspect")]
     pub template: Node,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) template: Node,
     /// The places, the root first, each after its parent; counted
     /// places last.
+    #[cfg(feature = "inspect")]
     pub elements: Vec<Place>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) elements: Vec<Place>,
     /// The layers. The root's is first.
+    #[cfg(feature = "inspect")]
     pub layers: Vec<Layer>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) layers: Vec<Layer>,
     /// The counts shown.
+    #[cfg(feature = "inspect")]
     pub counts: Vec<Count>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) counts: Vec<Count>,
     /// The queries not found, shown as their source.
+    #[cfg(feature = "inspect")]
     pub sources: Vec<Source>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) sources: Vec<Source>,
     /// The entity the question names, where it names one by its value:
     /// `(select (todo/row todo:1 is: ?row))`.
     pub given: Option<Value>,
@@ -163,7 +184,10 @@ pub struct Plan {
     /// own markup, as a selection is compiled from them: what
     /// [`Plan::folds`] lowers to the folds Dialog-DB keeps the counts by.
     /// `None` where it counts nothing so.
+    #[cfg(feature = "inspect")]
     pub folding: Option<Syntax>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) folding: Option<Syntax>,
 }
 
 /// A count a view shows that Dialog-DB keeps, by a fold: each folded row
@@ -926,7 +950,7 @@ impl Plan {
         Ok(plan)
     }
 
-    /// The counts of [`Plan::counts`] Dialog-DB keeps, each by the fold
+    /// The counts of `Plan::counts` Dialog-DB keeps, each by the fold
     /// the lowering of a selection gives the read it counts: a read the
     /// query asked counts in its own markup, one query, grouped by the
     /// entity the query answers of. A count of a query collected into the
@@ -1103,7 +1127,7 @@ impl Plan {
     }
 
     /// The query of a layer: its conditions, the entity rendered put in
-    /// where it is given, and a row of [`Layer::row`]. Read a row with
+    /// where it is given, and a row of `Layer::row`. Read a row with
     /// [`Plan::row`]. A row is reported under an entity made of all its
     /// values, so a row's values stay together.
     pub fn query(&self, layer: usize, entity: Option<&Value>) -> Result<Query, Error> {
@@ -1206,7 +1230,7 @@ impl Plan {
     }
 
     /// A match of layer `layer`'s query as a row: each variable of
-    /// [`Layer::row`] and what it was bound to, the entity rendered too
+    /// `Layer::row` and what it was bound to, the entity rendered too
     /// where it was given. Every column is bound by the layer's query, so
     /// one the match leaves out, a row record that is no record, and a
     /// layer the plan has not are errors.

@@ -1483,6 +1483,7 @@ impl Signature {
     }
 
     /// The signature as a value: a map.
+    #[cfg(any(test, feature = "inspect"))]
     pub fn value(&self) -> Result<Value, Error> {
         data::record([
             ("name", data::text(&self.name)),
@@ -1497,6 +1498,7 @@ impl Signature {
     /// The entity a definition is kept under: `name:` and the reference
     /// of the signature. A later definition under the same signature
     /// is kept under the same entity, and so replaces the earlier.
+    #[cfg(any(test, feature = "inspect"))]
     pub fn entity(&self) -> Result<Entity, Error> {
         Entity::from_str(&format!(
             "name:{}",

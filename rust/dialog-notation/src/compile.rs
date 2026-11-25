@@ -83,6 +83,9 @@ pub enum Step {
 /// matches through the transaction the document's earlier steps are
 /// staged in, with [`Query::rule`] laid over that read alone, and stages
 /// each match's [`statement`](Self::statement) in it.
+///
+/// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+/// and [`answer`](crate::answer), and should prefer them over this.
 #[derive(Debug, Clone)]
 pub struct Write {
     /// What the `when` matches, as a query whose row is every variable
@@ -313,6 +316,9 @@ fn within(conclusion: &ConceptConclusion, record: &str, key: &str) -> Result<Val
 }
 
 /// A query: what to select, and how a match reads as a row.
+///
+/// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+/// and [`answer`](crate::answer), and should prefer them over this.
 #[derive(Debug, Clone)]
 pub struct Query {
     /// The rule deriving the report, when the premises are more than
@@ -591,6 +597,9 @@ pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
+///
+/// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+/// and [`answer`](crate::answer), and should prefer them over this.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     // What is said of the tree is said by the names it was written with.
     let names = crate::syntax::derived_names(form);

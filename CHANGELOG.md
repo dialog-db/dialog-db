@@ -44,9 +44,20 @@ What this changes for you:
   `Notation` and `Evaluation` (a write's `when` failed as it ran), and
   `Commit`. Once the document has committed, a form not answered is its
   own entry's error.
-- New on `Checked`: `repeats`, each form that came to a rule an earlier
-  form came to, with that form, and `whole`, whether a refusal of one
-  form refuses every form (`check`) or its own alone (`check_forms`).
+- `Did::Installed` says what was installed, an `Installation`:
+  `Deduction`, `Induction` or `Transient`. A rule, concept or query
+  written again is `Did::Repeats(earlier)`.
+- Narrowed, as no embedder reads them: `Checked`'s `written` and what
+  it holds of repeats and of refusing whole; `Analyzer::analyze_forms`
+  (`check_forms` stays); the fields of `Selection` and `Folded`, and of
+  `Plan` but `given`; the plan's parts (`Layer`, `Condition`, `Count`,
+  `FoldedCount`, `Place`, `Placed`, `Source`, `Why`); a template's tree
+  and the reading of one (`Node`, `Element`, `Attribute`, `Piece`,
+  `Event`, `Input`, `CALLED`, `view::template`, `view::variables`,
+  `view::events`); `Signature`; and the one-shot `Live::render`
+  (`answer` renders a view). The `inspect` feature, for the tests, still
+  shows them. What stays public that `stage` and `answer` cover is
+  marked as plumbing in its docs.
 - A write's `when` reads the forms before it in its document: an assert
   and then a retract by the entity alone retracts what the assert wrote,
   and a `when` matches a claim an earlier form asserted. It read the

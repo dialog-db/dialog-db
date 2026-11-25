@@ -270,7 +270,7 @@ async fn it_runs_a_write_written_again_in_its_place() -> Result<()> {
 /// `when` is `Read`, then each match's `Asserted` in order, a match
 /// staged by an earlier form among them, and `Read` alone when nothing
 /// matched; a rule is `Installed` under its entity;
-/// a select is `Asked`. A rule written again is the `Same` as the form
+/// a select is `Asked`. A rule written again `Repeats` the form
 /// it repeats, installed once.
 #[dialog_common::test]
 async fn it_reports_what_each_form_staged() -> Result<()> {
@@ -299,10 +299,12 @@ async fn it_reports_what_each_form_staged() -> Result<()> {
                     Did::Asserted(statement) => format!("asserted {:?}", statement.this),
                     Did::Retracted(statement) => format!("retracted {:?}", statement.this),
                     Did::Issued(_) => "issued".into(),
-                    Did::Installed(entity) => format!("installed {}", entity.is_some()),
+                    Did::Installed(kind, entity) => {
+                        format!("installed {kind:?} {}", entity.is_some())
+                    }
                     Did::Read => "read".into(),
                     Did::Asked => "asked".into(),
-                    Did::Same(earlier) => format!("same as {earlier}"),
+                    Did::Repeats(earlier) => format!("same as {earlier}"),
                 })
                 .collect();
             format!(
@@ -321,7 +323,7 @@ async fn it_reports_what_each_form_staged() -> Result<()> {
             "2 false: read, asserted x:1",
             "3 false: read",
             "4 false: asked",
-            "5 false: installed true",
+            "5 false: installed Induction true",
             "6 false: same as 5",
         ],
     );

@@ -25,22 +25,31 @@ pub struct Checked {
     /// is compiled for Dialog-DB, so a derived attribute in them is its
     /// relation, the hash: [`Analyzer::spelled`] writes one as a person
     /// reads it.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
     pub analyzed: Vec<Syntax>,
     /// What the analyzed trees compile to, in the order written.
     /// Nothing when any part of the document is refused.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
     pub steps: Vec<Step>,
     /// For each of `steps`, the top-level form it came of, counted from
     /// 0 among the forms read.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
     pub step_forms: Vec<usize>,
     /// Each form that came to a rule an earlier form came to as well, a
     /// rule, a concept or a query written again, with that earlier form:
     /// its steps are the earlier form's, given once. A write written
     /// again gives its steps again, in its place.
-    pub repeats: Vec<(usize, usize)>,
+    pub(crate) repeats: Vec<(usize, usize)>,
     /// Whether the document was checked whole, by [`check`]: a refusal
     /// of any form refuses every form. False for [`check_forms`], where
     /// a refusal refuses its own form alone.
-    pub whole: bool,
+    pub(crate) whole: bool,
     /// What the document declares, in the order written: its concepts
     /// and commands, and its queries. Given whenever analysis refused
     /// nothing, whatever Dialog-DB's compiler refuses, so a back end
@@ -49,7 +58,7 @@ pub struct Checked {
     /// For each of `declarations`, the top-level form it came of.
     pub declaration_forms: Vec<usize>,
     /// What the trees of the document leave out of its text.
-    pub written: Written,
+    pub(crate) written: Written,
     /// Everything there is to say about the document, each with where
     /// in the text it is.
     pub diagnostics: Vec<Diagnostic>,

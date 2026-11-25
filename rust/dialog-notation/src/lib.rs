@@ -244,11 +244,19 @@ pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
 pub use select::{Folded, Selection};
-pub use syntax::{Parameters, Signature, Syntax};
-pub use view::plan::{Condition, Count, FoldedCount, Layer, Place, Placed, Plan, Source, Why};
+/// What names a definition: for the tests.
+#[cfg(feature = "inspect")]
+pub use syntax::Signature;
+pub use syntax::{Parameters, Syntax};
+pub use view::plan::Plan;
+/// A view's plan, its parts: for the tests.
+#[cfg(feature = "inspect")]
+pub use view::plan::{Condition, Count, FoldedCount, Layer, Place, Placed, Source, Why};
 pub use view::tree::{Address, Content, Given, Patch, Posted, Rendered, Shown};
 #[cfg(feature = "inspect")]
 pub use view::tree::{Change, Counts, Maintainer, Row, render};
+/// A template's tree: for the tests.
+#[cfg(feature = "inspect")]
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 

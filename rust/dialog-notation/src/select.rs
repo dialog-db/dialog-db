@@ -218,9 +218,15 @@ fn counted(target: &str) -> String {
 pub struct Folded {
     /// The rules the two queries read, laid over the branch for the
     /// fold alone.
+    #[cfg(feature = "inspect")]
     pub rules: Vec<DeductiveRule>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) rules: Vec<DeductiveRule>,
     /// The fold.
+    #[cfg(feature = "inspect")]
     pub fold: Fold<ConceptQuery, ConceptQuery>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) fold: Fold<ConceptQuery, ConceptQuery>,
 }
 
 impl Folded {
@@ -265,13 +271,22 @@ struct Defined {
 #[derive(Clone, Debug)]
 pub struct Selection {
     /// What is asked: a query's head applied.
+    #[cfg(feature = "inspect")]
     pub call: Syntax,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) call: Syntax,
     /// Every Dialog-DB query the answer needs. Each is run once, and its
     /// rows read with [`Query::values`].
+    #[cfg(feature = "inspect")]
     pub queries: Vec<Query>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) queries: Vec<Query>,
     /// Every read that collects that Dialog-DB folds. Each is run once,
     /// and its rows read with [`Folded::values`].
+    #[cfg(feature = "inspect")]
     pub folds: Vec<Folded>,
+    #[cfg(not(feature = "inspect"))]
+    pub(crate) folds: Vec<Folded>,
     defined: BTreeMap<String, Defined>,
     /// The derived attributes the tree it was compiled of names, by
     /// Dialog-DB's name for each: what is said of it is said by these.
@@ -516,7 +531,7 @@ impl Selection {
             .then_some(*first)
     }
 
-    /// Which of [`Selection::queries`] [`Selection::answer`] reads the
+    /// Which of `Selection::queries` [`Selection::answer`] reads the
     /// rows of: those of the conditions every answer needs, and those of
     /// a collecting read Dialog-DB does not fold. The rows of a query
     /// only a fold reads may be given as none.
@@ -562,8 +577,8 @@ impl Selection {
         Ok(Rows { columns, runs })
     }
 
-    /// The answers, given the rows of each of [`Selection::queries`] and
-    /// of each of [`Selection::folds`] in its order: the call, filled
+    /// The answers, given the rows of each of `Selection::queries` and
+    /// of each of `Selection::folds` in its order: the call, filled
     /// once an answer.
     pub fn answer(
         &self,
