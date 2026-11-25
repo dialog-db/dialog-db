@@ -174,3 +174,108 @@ async fn it_elects_a_derived_attributes_value_as_a_line_does() -> Result<()> {
     );
     Ok(())
 }
+
+/// A document writes no wrapper: a value wrapped in a type, a pick, a
+/// cardinality or a layer is the kernel's, which the walker writes for a
+/// line. Wherever a document writes one, in a write, a `when`, a rule's
+/// head or premise, a select's head or premise, `unless` or a concept's
+/// body, it is refused as `Error::Refused`, naming the line to write in
+/// its place, and the document writes nothing.
+#[dialog_common::test]
+fn it_refuses_a_wrapper_a_document_writes_naming_the_line() -> Result<()> {
+    const LIST: &str = "(concept (list ?l name: ?n)
+       (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))";
+    for (text, says) in [
+        (
+            "(assert (xyz.n x:1 v: (:one (:integer 3))))",
+            "(xyz.n/v of: x:1 is: 3 as: :integer cardinality: :one)",
+        ),
+        (
+            "(assert (xyz.n ?x v: 5) (when (xyz.n ?x v: (:one (:integer 4)))))",
+            "(xyz.n/v of: ?x is: 4 as: :integer cardinality: :one)",
+        ),
+        (
+            "(rule (assert (xyz.n ?x w: (:one (:integer ?v)))) (xyz.n/v of: ?x is: ?v))",
+            "(xyz.n/w of: ?x is: ?v as: :integer cardinality: :one)",
+        ),
+        (
+            "(select (xyz.out ?t v: (:integer ?v)) (xyz.n/v of: ?t is: ?v))",
+            "(xyz.out/v of: ?t is: ?v as: :integer)",
+        ),
+        (
+            "(rule (xyz.out ?t v: (:integer ?v)) (xyz.n/v of: ?t is: ?v))",
+            "(xyz.out/v of: ?t is: ?v as: :integer)",
+        ),
+        (
+            "(select (xyz.n ?x v: (:last (:integer ?v))))",
+            "(xyz.n/v of: ?x is: ?v as: :integer cardinality: :one)",
+        ),
+        (
+            "(select (xyz.n ?x v: (:all ?v)))",
+            "(xyz.n/v of: ?x is: ?v cardinality: :many)",
+        ),
+        (
+            "(select (xyz.n ?x v: (:max ?v)))",
+            "(xyz.n/v of: ?x is: (max ?v))",
+        ),
+        (
+            "(select (xyz.go ?c n: (:control (:many ?n))))",
+            "(xyz.go/n of: ?c is: ?n cardinality: :many in: :control)",
+        ),
+        (
+            "(select (xyz.n/v of: ?x is: (:integer ?v)))",
+            "(xyz.n/v of: ?x is: ?v as: :integer)",
+        ),
+        (
+            "(select (xyz.n ?x v: ?v) (unless (xyz.n ?x w: (:integer 3))))",
+            "(xyz.n/w of: ?x is: 3 as: :integer)",
+        ),
+        (
+            "(concept (todo ?t text: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
+            "(xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)",
+        ),
+        (
+            "(rule (list/tally ?l status: (:text ?n)) (list ?l name: ?n))",
+            "as: {:status :text}",
+        ),
+        (
+            "(select (list/tally ?l status: (:text ?s)))",
+            "as: {:status :text}",
+        ),
+        ("(select (list/size ?l (:max ?n)))", "is: (max ?n)"),
+        (
+            "(select (list/size ?l is: (:integer ?n)))",
+            "is: ?n as: :integer",
+        ),
+        (
+            "(select (list/size ?l (:one ?n)))",
+            "a derived attribute's cardinality is what its rules conclude",
+        ),
+    ] {
+        let mut analyzer = dialog_notation::Analyzer::new()?;
+        let document = format!("{LIST}\n{text}");
+        let checked = dialog_notation::check(&mut analyzer, &document);
+        let refusals: Vec<_> = checked.refusals().collect();
+        assert_eq!(refusals.len(), 1, "{text}: {:?}", checked.diagnostics());
+        assert!(
+            matches!(
+                refusals[0].refusal,
+                Some(dialog_notation::Error::Refused(_))
+            ),
+            "{text}: {:?}",
+            refusals[0]
+        );
+        assert!(
+            refusals[0].message.contains(says),
+            "{text}: says {:?}, not {says:?}",
+            refusals[0].message
+        );
+        assert!(
+            refusals[0].message.contains("a document writes no wrapper"),
+            "{text}: {:?}",
+            refusals[0].message
+        );
+        assert!(checked.steps().is_empty(), "{text} writes nothing");
+    }
+    Ok(())
+}
