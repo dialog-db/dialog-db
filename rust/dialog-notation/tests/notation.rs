@@ -3982,6 +3982,97 @@ async fn it_retracts_every_claim_of_a_field_by_its_entity() -> Result<()> {
     Ok(())
 }
 
+/// The claims `entity` holds of each of `fields`, read from each
+/// attribute's relation, a `(domain, field)` each.
+async fn claims_in(
+    notebook: &mut Notebook,
+    entity: &str,
+    fields: &[(&str, &str)],
+) -> Result<Vec<String>> {
+    let mut all = Vec::new();
+    for (domain, field) in fields {
+        let read =
+            format!("(select ({domain} {entity} {field}: ?v) ({domain} {entity} {field}: ?v))");
+        all.extend(report(notebook, &read).await?);
+    }
+    Ok(all)
+}
+
+/// A retract through a concept by its entity alone retracts every claim
+/// of each field the entity holds, whichever of the concept's fields it
+/// holds: each field's claims are retracted apart from the others', so
+/// a field the entity holds nothing of leaves the rest to go. Every
+/// subset of the fields, none included, with one claim and with two of
+/// each field held, for a concept in one domain (a field under `:one`
+/// and two under `:many`) and one over two domains, at the top level and
+/// in a rule a command fires; read after each from the relations
+/// themselves: the entity holds nothing of the concept, and another
+/// entity holding every field keeps every claim.
+#[dialog_common::test]
+async fn it_retracts_by_its_entity_whichever_fields_it_holds() -> Result<()> {
+    let concepts: [(&str, &[(&str, &str)]); 2] = [
+        (
+            r#"(concept (p ?t a: ?a b: ?b c: ?c)
+                 (xyz.p/a of: ?t is: ?a as: :text cardinality: :one)
+                 (xyz.p/b of: ?t is: ?b as: :text cardinality: :many)
+                 (xyz.p/c of: ?t is: ?c as: :text cardinality: :many))"#,
+            &[("xyz.p", "a"), ("xyz.p", "b"), ("xyz.p", "c")],
+        ),
+        (
+            r#"(concept (p ?t a: ?a b: ?b)
+                 (xyz.p/a of: ?t is: ?a as: :text cardinality: :one)
+                 (abc.q/b of: ?t is: ?b as: :text cardinality: :many))"#,
+            &[("xyz.p", "a"), ("abc.q", "b")],
+        ),
+    ];
+    let command = r#"(concept (p/drop subject: ?t)
+          (xyz.p.drop/subject of: ?c is: ?t as: :entity in: :control cardinality: :many))
+        (rule (retract (p ?t)) (p/drop subject: ?t))"#;
+    for (concept, fields) in concepts {
+        for held in 0..(1u32 << fields.len()) {
+            for claims in [1, 2] {
+                for retract in ["(retract (p x:1))", "(assert (p/drop subject: x:1))"] {
+                    let case = format!("{concept} holding {held:b}, {claims} each, {retract}");
+                    let mut notebook = Notebook::open().await?;
+                    notebook.submit(concept).await?;
+                    notebook.submit(command).await?;
+                    for (at, (domain, field)) in fields.iter().enumerate() {
+                        for claim in 0..claims {
+                            if held & (1 << at) != 0 {
+                                notebook
+                                    .submit(&format!(
+                                        r#"(assert ({domain} x:1 {field}: "{claim}"))"#
+                                    ))
+                                    .await?;
+                            }
+                        }
+                        notebook
+                            .submit(&format!(r#"(assert ({domain} x:2 {field}: "kept"))"#))
+                            .await?;
+                    }
+                    assert_eq!(
+                        claims_in(&mut notebook, "x:1", fields).await?.len(),
+                        held.count_ones() as usize * claims,
+                        "{case}"
+                    );
+                    notebook.submit(retract).await?;
+                    assert_eq!(
+                        claims_in(&mut notebook, "x:1", fields).await?,
+                        Vec::<String>::new(),
+                        "{case}"
+                    );
+                    assert_eq!(
+                        claims_in(&mut notebook, "x:2", fields).await?.len(),
+                        fields.len(),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A write through a concept's `cardinality: :one` field succeeds the
 /// newest claim, as Dialog-DB's does, and does not clear the cell (gaps
 /// row 50, decided): the other claims stay, as Dialog-DB keeps two
