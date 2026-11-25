@@ -23,7 +23,27 @@ branch before starting one.
 | `<topic>/spike.md` | the first round of measurements in full, if there was one | once |
 | `<topic>/design.md` | the current decision and the measurements behind it | when a decision moves |
 | `<topic>/evaluation.md` | the axes a decision is measured on, and where each stands | as runs come in |
-| `<topic>/results/` | a report per sitting of runs, with its tables and charts | each sitting |
+| `<topic>/results/` | a report per sitting of runs: its tables and Mermaid charts, in markdown | each sitting |
+
+### What goes in a pull request, and what does not
+
+A pull request that carries research carries the record, not the
+workshop: the topic's file, the journal, and the markdown reports above.
+Everything else a topic produces stays out of it:
+
+- harness scripts and the code that drives a run;
+- experiment patches, switches and throwaway builds;
+- per-run rows, logs, summaries and raw outputs;
+- rendered charts (SVG, PNG) and datasets (which are never committed
+  anywhere, section 3).
+
+Those go on a branch of their own, `research/<topic>-artifacts`, pushed
+alongside the work and never merged. The reports and the journal link to
+them by commit (`https://github.com/<owner>/<repo>/tree/<sha>/...`), so a
+link keeps working however the branch moves, and "How to reproduce" names
+that commit. Do not ask whether to include them; leave them out. A harness
+that becomes part of the product (a test, a bench scenario) is not an
+artifact: it lands with the change that makes it one.
 
 A new topic starts as its file alone, **Proposed**. Picking it up adds the
 folder and the journal. Finishing it, landed or shelved, writes the report
@@ -154,9 +174,10 @@ picture.
   ```
 
 - **Several series on one chart** (a growth curve per store): an SVG the
-  harness writes, with a legend, committed with its run under
-  `research/<topic>/results/`. Keep it to polylines, axes and labels, with
-  no plotting dependency.
+  harness writes, with a legend, committed with its run on the topic's
+  artifacts branch (see "What goes in a pull request") and linked from the
+  report by commit. Keep it to polylines, axes and labels, with no plotting
+  dependency.
 - Name the dataset (and its hash) and the build in the chart's title or
   caption.
 - **Show results as pictures in the conversation, not only as tables.**
