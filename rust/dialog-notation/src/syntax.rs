@@ -99,6 +99,9 @@ pub const DERIVED_LENGTH: usize = DERIVED.len() + 1 + (DERIVED_BYTES * 8).div_ce
 /// 37 bytes, so a label has 26 of the 64 the engine allows a relation.
 pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
     let hash = hashed(concept, name)?;
+    MADE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(hash.clone());
     WRITTEN
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -138,6 +141,20 @@ impl Made {
             }
         }
     }
+}
+
+/// Every derived attribute's domain this process made, whenever: what
+/// [`crate::compile`] lets a tree derive into. Unlike the names kept for
+/// showing, none is let go, since whether a tree compiles must not hang
+/// on how many names came after it. It grows by one domain, 37 bytes, for
+/// each derived attribute named, not for each document or answer.
+static MADE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Whether this process made `domain` as a derived attribute's.
+pub fn made_derived(domain: &str) -> bool {
+    MADE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(domain)
 }
 
 /// The name a derived attribute's domain was made of, `list/count-open`,

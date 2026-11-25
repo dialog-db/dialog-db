@@ -541,7 +541,7 @@ fn writes_reserved(form: &Syntax) -> Option<String> {
             Some(read.domain.clone())
         }
         Head::Derive(read)
-            if reserved(&read.domain) && crate::syntax::written_derived(&read.domain).is_none() =>
+            if reserved(&read.domain) && !crate::syntax::made_derived(&read.domain) =>
         {
             Some(read.domain.clone())
         }
