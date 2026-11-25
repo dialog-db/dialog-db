@@ -1687,4 +1687,46 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A refusal that offers the stored attribute to write instead,
+    /// `xyz.…`, offers one that is accepted: each example taken out of
+    /// the refusal is read as the stored attribute it names, two-term.
+    #[test]
+    fn it_offers_a_stored_attribute_that_is_one() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one)) \
+                 (concept (nb/blocks ?t n: ?n) (xyz.nb/n of: ?t is: ?n as: :text cardinality: :one)) \
+                 (rule (a/x ?t ?n) (a ?t n: ?n)) \
+                 (rule (nb/blocks/count ?t ?n) (nb/blocks ?t n: ?n))";
+        let offered = |message: &str| -> Option<String> {
+            message
+                .split('`')
+                .find(|part| part.starts_with("xyz.") && !part.contains('…'))
+                .map(str::to_string)
+        };
+        for form in [
+            "(select (foo/x ?t ?v))",
+            "(select (foo/bar/baz ?t ?v))",
+            "(concept (k ?t v: ?v) (a/x ?t is: ?v cardinality: :one))",
+            "(concept (k ?t v: ?v) (nb/blocks/count ?t is: ?v cardinality: :one))",
+        ] {
+            let checked = check(&mut Analyzer::new()?, &format!("{a} {form}"));
+            let examples: Vec<String> = checked
+                .refusals()
+                .filter_map(|said| offered(&said.message))
+                .collect();
+            assert!(!examples.is_empty(), "{form}: {:?}", checked.diagnostics);
+            for example in examples {
+                let read = check(
+                    &mut Analyzer::new()?,
+                    &format!("(select ({example} ?t ?v))"),
+                );
+                assert!(
+                    read.refusals().next().is_none(),
+                    "{form} offers `{example}`: {:?}",
+                    read.diagnostics
+                );
+            }
+        }
+        Ok(())
+    }
 }
