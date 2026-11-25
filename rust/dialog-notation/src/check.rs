@@ -1508,4 +1508,92 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A derived attribute is what rules conclude, on the default layer:
+    /// one concluded or read on a layer, `(:control ?n)`, the only layer
+    /// there is (`kernel::LAYERS`), is refused naming the attribute, in a
+    /// head unlabeled or under `is:`, and in a select, a premise and
+    /// `unless`.
+    #[test]
+    fn it_refuses_a_derived_attribute_on_a_layer() -> Result<(), Error> {
+        let list = "(concept (list ?l name: ?n) \
+                    (xyz.list/name of: ?l is: ?n as: :text cardinality: :one)) \
+                    (rule (list/label ?l ?n) (list ?l name: ?n))";
+        for layer in crate::kernel::LAYERS {
+            for form in [
+                format!("(rule (list/label ?l (:{layer} ?n)) (list ?l name: ?n))"),
+                format!("(rule (list/label ?l is: (:{layer} ?n)) (list ?l name: ?n))"),
+                format!("(select (list/label ?l (:{layer} ?n)))"),
+                format!("(rule (xyz.out ?l v: ?n) (list/label ?l (:{layer} ?n)))"),
+                format!(
+                    "(select (list ?l name: ?n) (list ?l name: ?n) \
+                     (unless (list/label ?l (:{layer} ?q))))"
+                ),
+            ] {
+                let text = format!("{list} {form}");
+                let checked = check(&mut Analyzer::new()?, &text);
+                let refused: Vec<_> = checked
+                    .refusals()
+                    .map(|said| said.message.clone())
+                    .collect();
+                assert!(
+                    refused
+                        .iter()
+                        .any(|message| message.contains("`list/label`")
+                            && message.contains(&format!("the {layer} layer"))
+                            && message.contains("default layer")),
+                    "{form}: {refused:?}"
+                );
+                assert!(checked.steps.is_empty(), "{form}");
+            }
+        }
+        Ok(())
+    }
+
+    /// A line of a concept or a command is a stored attribute, its domain
+    /// dotted: one that names a derived attribute, which rules conclude,
+    /// is refused at the declaration, naming the line, written two-term
+    /// or labelled, in a concept or a command, whether the concept it is
+    /// derived under is declared in the same document or an earlier one.
+    #[test]
+    fn it_refuses_a_line_that_names_a_derived_attribute() -> Result<(), Error> {
+        let list = "(concept (list ?l name: ?n) \
+                    (xyz.list/name of: ?l is: ?n as: :text cardinality: :one)) \
+                    (rule (list/label ?l ?n) (list ?l name: ?n))";
+        let declarations = [
+            "(concept (memo ?m label: ?x) (list/label ?m ?x cardinality: :one))",
+            "(concept (memo ?m label: ?x) (list/label of: ?m is: ?x cardinality: :one))",
+            "(concept (list/go label: ?x) (list/label ?c ?x in: :control cardinality: :many))",
+            "(concept (list/go label: ?x) \
+             (list/label of: ?c is: ?x in: :control cardinality: :many))",
+        ];
+        for declaration in declarations {
+            let together = check(&mut Analyzer::new()?, &format!("{list} {declaration}"));
+            let mut analyzer = Analyzer::new()?;
+            let earlier = check(&mut analyzer, list);
+            assert!(
+                earlier.refusals().next().is_none(),
+                "{:?}",
+                earlier.diagnostics
+            );
+            let later = check(&mut analyzer, declaration);
+            for checked in [together, later] {
+                let refused: Vec<_> = checked
+                    .refusals()
+                    .map(|said| said.message.clone())
+                    .collect();
+                assert!(
+                    refused
+                        .iter()
+                        .any(|message| message.contains("(list/label ")
+                            && message.contains("derived attribute of the concept `list`")
+                            && message.contains(
+                                "a line of a concept or a command is a stored attribute"
+                            )),
+                    "{declaration}: {refused:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 }

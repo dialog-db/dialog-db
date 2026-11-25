@@ -329,6 +329,16 @@ fn it_refuses_in_check_forms_every_forgery_compile_refuses() -> Result<()> {
         forged.push(ruled(None, malformed, "is"));
         forged.push(ruled(None, "xyz.a", &format!("{malformed}/is")));
     }
+    // A derived attribute concluded on the control layer.
+    let derived =
+        parse("(rule (xyz.list ?l name: (:control ?n)) (xyz.list ?l name: ?n))")?.remove(0);
+    forged.push(relabelled_relation(
+        derived,
+        "xyz.list",
+        "dialog.n.c/list/label",
+        "name",
+        "is",
+    ));
     // A command into a derived attribute: its value on the control layer.
     let issued = parse("(rule (assert (xyz.list ?l name: (:control ?n))) (xyz.list ?l name: ?n))")?
         .remove(0);
