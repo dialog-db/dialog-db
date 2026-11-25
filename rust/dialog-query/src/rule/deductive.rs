@@ -1412,7 +1412,7 @@ mod tests {
                     the!("result/key"),
                     "",
                     Cardinality::One,
-                    Some(Type::String),
+                    Some(Type::Symbol),
                 ),
             ),
             (
