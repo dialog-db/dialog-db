@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A claim this replica cannot read yet is treated as if it did not exist
 
+[#884](https://github.com/dialog-db/dialog-db/pull/884)
+
 A replica takes claims from writers it does not control, such as another
 implementation it syncs with, and a pull checks no claim's value. Such a
 writer can store a claim this replica cannot read yet: text that is not
