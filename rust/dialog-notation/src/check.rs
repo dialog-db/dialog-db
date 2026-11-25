@@ -1729,4 +1729,32 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A field of a concept read is the concept's: a cardinality or a
+    /// type the read wraps it in, which the concept says itself, is
+    /// refused naming the field and the concept, not as a value "written
+    /// under two cardinalities" the author never wrote twice.
+    #[test]
+    fn it_refuses_a_wrapped_field_of_a_concept_read_naming_it() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one))";
+        for form in [
+            "(concept (k ?t v: ?v) (a ?t n: (:one (:text ?v))))",
+            "(select (a ?t n: (:one ?v)))",
+            "(select (a ?t n: (:text ?v)))",
+        ] {
+            let checked = check(&mut Analyzer::new()?, &format!("{a} {form}"));
+            let refused: Vec<_> = checked
+                .refusals()
+                .map(|said| said.message.clone())
+                .collect();
+            assert!(
+                refused.len() == 1
+                    && refused[0].contains("wraps `n:`")
+                    && refused[0].contains("the concept `a`")
+                    && !refused[0].contains("written under two"),
+                "{form}: {refused:?}"
+            );
+        }
+        Ok(())
+    }
 }
