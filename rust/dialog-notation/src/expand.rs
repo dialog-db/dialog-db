@@ -4136,33 +4136,7 @@ mod tests {
     /// word, and nothing is installed under it.
     #[test]
     fn it_refuses_declaring_a_word_of_the_notation() {
-        for word in [
-            "concept",
-            "select",
-            "query",
-            "rule",
-            "assert",
-            "retract",
-            "report",
-            "unless",
-            "once",
-            "is",
-            "this",
-            "all",
-            "when",
-            "view",
-            "rows",
-            "expand",
-            "syntax",
-            "warning",
-            "dialog/position",
-            "count",
-            "count-distinct",
-            "sum",
-            "min",
-            "max",
-            "avg",
-        ] {
+        for word in syntax::FORMS {
             for (text, what) in [
                 (
                     format!(
@@ -4187,9 +4161,14 @@ mod tests {
                 ),
             ] {
                 let refused = expanded("", &text).unwrap_err().to_string();
+                // `collect` in a concept is refused before its name is
+                // asked about, saying where it stands.
+                let collected =
+                    word == "collect" && refused.contains("collect stands only in a query");
                 assert!(
-                    refused.contains(&format!("declares a {what} named `{word}`"))
-                        && refused.contains("one of the notation's own words"),
+                    collected
+                        || refused.contains(&format!("declares a {what} named `{word}`"))
+                            && refused.contains("one of the notation's own words"),
                     "{text}: {refused}"
                 );
             }

@@ -78,7 +78,8 @@ What this changes for you:
   under one of the notation's own words, `concept`, `select`, `query`,
   `rule`, `assert`, `retract`, `report`, `unless`, `once`, `is`, `this`,
   `all`, `when`, `view`, `rows`, `expand`, `syntax`, `warning`,
-  `dialog/position` and the folds `count`, `count-distinct`, `sum`,
+  `quote`, `collect`, the words of a query's plan `call`, `required` and
+  `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
 - A name Dialog-DB cannot keep is refused naming it, its length and the

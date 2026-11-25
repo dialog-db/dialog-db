@@ -477,10 +477,13 @@ pub fn declarable(name: &str) -> bool {
     named(name) == Named::Declarable
 }
 
-/// The notation's own words: its forms, the formula of a position, and
-/// the folds. A concept, a command or a query declared under one would
+/// The notation's own words: its forms, the words of the plans it makes
+/// of a query, `call`, `required`, `missing`, the formula of a position,
+/// and the folds. `it_lists_every_word_the_notation_defines_in_forms`
+/// fails when the notation defines a word this lacks, or this holds one
+/// it does not define. A concept, a command or a query declared under one would
 /// shadow what the notation means by it, so none may be.
-pub const FORMS: [&str; 25] = [
+pub const FORMS: [&str; 30] = [
     "concept",
     "select",
     "query",
@@ -499,6 +502,11 @@ pub const FORMS: [&str; 25] = [
     "expand",
     "syntax",
     "warning",
+    "quote",
+    "collect",
+    "call",
+    "required",
+    "missing",
     "dialog/position",
     "count",
     "count-distinct",
