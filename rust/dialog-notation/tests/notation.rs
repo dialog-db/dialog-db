@@ -3734,3 +3734,30 @@ async fn it_runs_the_notebooks_commands() -> Result<()> {
     );
     Ok(())
 }
+
+/// A pin, not a decision (gaps row 48): whether a derived attribute is
+/// one value under `is:` or may conclude other labels is the
+/// maintainer's. Today a head may write `is:` beside another label, and a
+/// read of both answers both; a read of a label no rule concludes is
+/// accepted and answers nothing.
+#[dialog_common::test]
+async fn it_pins_what_a_derived_attribute_with_labels_answers_today() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (list ?l name: ?n)
+                 (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+               (rule (list/label ?l is: ?n other: ?n) (list ?l name: ?n))
+               (assert (list list:home name: "Home"))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (list/label ?l is: ?n other: ?o))").await?,
+        vec![r#"(list/label list:home is: "Home" other: "Home")"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(select (list/label ?l wat: ?q))").await?,
+        Vec::<String>::new()
+    );
+    Ok(())
+}
