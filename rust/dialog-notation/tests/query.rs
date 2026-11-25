@@ -1418,3 +1418,42 @@ async fn it_pins_that_a_collection_is_a_set() -> Result<()> {
     );
     Ok(())
 }
+
+/// What a count is told when it is asked of what was not collected, and
+/// what a fold that is not there yet is told: count counts what was
+/// collected, a set merges equal values, and entities are counted by
+/// collecting something that holds each; the folds there are today are
+/// named.
+#[dialog_common::test]
+async fn it_tells_a_count_what_it_counts() -> Result<()> {
+    let base = r#"(concept (item ?t title: ?x)
+          (xyz.item/title of: ?t is: ?x as: :text cardinality: :one))
+        (assert (item item:1 title: "same"))"#;
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(base).await?;
+    notebook
+        .submit("(query (q/ents ?t is: ?s) (item ?t title: ?x) (is ?s {:n (count ?t)}))")
+        .await?;
+    let counted = notebook
+        .submit("(select (q/ents ?t is: ?s))")
+        .await
+        .map_err(|error| format!("{error:#}"));
+    assert!(
+        matches!(&counted, Err(said) if said.contains("count counts what was collected")
+            && said.contains("a set")
+            && said.contains("(collect ?cards)")),
+        "{counted:?}"
+    );
+    let summed = refused(
+        &mut notebook,
+        "(query (q/sum is: ?s) (item _ title: (collect ?all)) (is ?s {:n (sum ?all)}))",
+    )
+    .await;
+    assert!(
+        matches!(&summed, Error::Unsupported(said) if said.contains("`(count ?x)`")
+            && said.contains("`count-distinct`")
+            && said.contains("`avg`")),
+        "{summed:?}"
+    );
+    Ok(())
+}
