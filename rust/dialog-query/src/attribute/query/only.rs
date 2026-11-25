@@ -783,6 +783,127 @@ mod tests {
     use crate::{Value, the};
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
+    /// A row of `the` on `of` holding `value` as a tree in the number
+    /// band keys it, with `cause`.
+    fn stored(the: &CorpusRelation, of: &Entity, value: &Value, cause: u8) -> FactView {
+        FactView::scanned(
+            the,
+            of,
+            value.data_type().band(dialog_corpus::NUMBER_BAND),
+            dialog_corpus::encode_key_value_owned(value, dialog_corpus::NUMBER_BAND),
+            Some(Cause([cause; 32])),
+        )
+    }
+
+    /// A row of `the` on `of` a tree may hold but no reader can decode:
+    /// a text whose bytes are not UTF-8, with `cause`. A number's key
+    /// cannot hold one: whatever bytes delimit as a number decode as one.
+    fn undecodable(the: &CorpusRelation, of: &Entity, cause: u8) -> FactView {
+        let row = FactView::scanned(
+            the,
+            of,
+            ValueDataType::String,
+            dialog_corpus::encode_key_value_owned(
+                &Value::Bytes(vec![0xff, 0xfe]),
+                dialog_corpus::NUMBER_BAND,
+            ),
+            Some(Cause([cause; 32])),
+        );
+        assert!(row.value().is_err(), "the row's value does not decode");
+        row
+    }
+
+    /// What a cardinality-one read answers of one cell holding `rows`,
+    /// in scan order, through a value term of `kind`, picking by
+    /// `aggregate` when there is one: the rows slide through the window
+    /// the scan folds them through, and the cell's winner is admitted
+    /// as the scan admits it.
+    fn answers(
+        rows: Vec<FactView>,
+        kind: ValueDataType,
+        aggregate: Option<Selective>,
+    ) -> Result<Option<Value>, EvaluationError> {
+        let is = Term::<Any>::var("is").with_kind(Kind::from(kind));
+        let selector = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            is.clone(),
+            Term::var("cause"),
+        );
+        let ranking = aggregate.map(|aggregate| Ranking::new(aggregate, vec![]));
+        let mut window: Option<FactView> = None;
+        for row in rows {
+            slide(&mut window, row, ranking.as_ref(), selector.is())?;
+        }
+        let Some(winner) = window else {
+            return Ok(None);
+        };
+        let Some(extension) = admitted(&selector, &mut None, &Match::new(), winner, None, None)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(extension.lookup(&is)?.content()?))
+    }
+
+    /// A known divergence, pinned as main has it: a cell whose newest
+    /// claim does not decode fails the read, whatever the read's type,
+    /// with or without a pick, in either scan order. The claim contends
+    /// as any claim does and wins the cell, as it does on main, but it is
+    /// not passed over as a corrupt row is (`CorruptEntry`): reading the
+    /// answer fails with the decode error. The older readable claim is
+    /// not answered: the newest superseded it.
+    #[dialog_common::test]
+    fn known_divergence_a_cell_whose_newest_claim_does_not_decode_fails_the_read()
+    -> anyhow::Result<()> {
+        let the: CorpusRelation = "item/size".parse()?;
+        let of = Entity::new()?;
+        let cases = [
+            (ValueDataType::UnsignedInt, Value::UnsignedInt(3)),
+            (ValueDataType::String, Value::String("hello".into())),
+        ];
+        for (kind, value) in cases {
+            for aggregate in [None, Some(Selective::Max)] {
+                let readable = || stored(&the, &of, &value, 1);
+                let corrupt = || undecodable(&the, &of, 2);
+                for rows in [vec![readable(), corrupt()], vec![corrupt(), readable()]] {
+                    let answer = answers(rows, kind, aggregate);
+                    assert!(
+                        matches!(answer, Err(EvaluationError::Store(_))),
+                        "{kind:?} {aggregate:?}: expected the decode error, got {answer:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A cell whose older claim does not decode answers the newest,
+    /// readable one, whatever the read's type, with or without a pick,
+    /// in either scan order.
+    #[dialog_common::test]
+    fn a_cell_whose_older_claim_does_not_decode_answers_the_newest() -> anyhow::Result<()> {
+        let the: CorpusRelation = "item/size".parse()?;
+        let of = Entity::new()?;
+        let cases = [
+            (ValueDataType::UnsignedInt, Value::UnsignedInt(3)),
+            (ValueDataType::String, Value::String("hello".into())),
+        ];
+        for (kind, value) in cases {
+            for aggregate in [None, Some(Selective::Max)] {
+                let readable = || stored(&the, &of, &value, 2);
+                let corrupt = || undecodable(&the, &of, 1);
+                for rows in [vec![readable(), corrupt()], vec![corrupt(), readable()]] {
+                    let answer = answers(rows, kind, aggregate);
+                    assert!(
+                        matches!(&answer, Ok(Some(answered)) if *answered == value),
+                        "{kind:?} {aggregate:?}: expected {value:?}, got {answer:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
             $branch
