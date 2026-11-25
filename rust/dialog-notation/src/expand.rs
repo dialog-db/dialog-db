@@ -723,7 +723,13 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 /// the same. With labels, it is the fields they name,
 /// `(list/count ?l status: ?s count: ?n)`. A label has what the 64 bytes
 /// of a relation leave beside the domain.
-fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syntax, Error> {
+fn derived(
+    tree: &Syntax,
+    concept: &str,
+    name: &str,
+    domain: &str,
+    reads: bool,
+) -> Result<Syntax, Error> {
     let operand = tree.operand().cloned().unwrap_or_default();
     let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
         ([entity, value], true) => (
@@ -755,27 +761,74 @@ fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syn
              cardinality is what its rules conclude: leave it out"
         )));
     }
-    if let Some(kind) = terms.remove("as") {
-        let typed = kind
-            .keyword()
+    // An elector on a term of a read, `is: (max ?n)`, chooses one of the
+    // claims, as on a line. In a head that derives it is a fold.
+    if reads {
+        for term in terms.values_mut() {
+            if let Some((word, inner)) = elected(term) {
+                let inner = inner.clone();
+                *term = wrap(word, inner)?;
+            }
+        }
+    }
+    let types = || {
+        crate::kernel::TYPES
+            .iter()
+            .map(|word| format!(":{word}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let typed = |kind: &Syntax| {
+        kind.keyword()
             .filter(|word| crate::kernel::TYPES.contains(word))
+            .map(str::to_string)
             .ok_or_else(|| {
                 Error::Refused(format!(
-                    "{tree} gives `as:` {kind}, and a type is one of {}",
-                    crate::kernel::TYPES
-                        .iter()
-                        .map(|word| format!(":{word}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    "{tree} gives `as:` {kind}, and a type is one of {}, or a map of a label to \
+                     its type, `{{:status :text}}`",
+                    types()
                 ))
-            })?;
-        let Some(value) = terms.remove("is") else {
+            })
+    };
+    // `as:` a type is the type of the value under `is:`; a map, of each
+    // field it names, `as: {:status :text}`.
+    let mut typing: Vec<(String, String)> = Vec::new();
+    match terms.remove("as") {
+        None => {}
+        Some(Syntax::Map(entries)) => {
+            for (label, kind) in &entries {
+                // A map's key `:status` is read as the name `status`.
+                let named = match label {
+                    Syntax::Reference(name) if !name.contains(['/', '.']) => Some(name.as_str()),
+                    other => other.keyword(),
+                };
+                let Some(label) = named else {
+                    return Err(Error::Refused(format!(
+                        "{tree} gives `as:` a map whose key {label} is no label: a key is a \
+                         field the read names, `{{:status :text}}`"
+                    )));
+                };
+                typing.push((label.to_string(), typed(kind)?));
+            }
+        }
+        Some(kind) => {
+            let word = typed(&kind)?;
+            if !terms.contains_key("is") {
+                return Err(Error::Refused(format!(
+                    "{tree} gives `as:` and no `is:`: `as:` is the type of the value under \
+                     `is:`; type a labelled field by its label, `as: {{:status {kind}}}`"
+                )));
+            }
+            typing.push(("is".into(), word));
+        }
+    }
+    for (label, word) in typing {
+        let Some(value) = terms.remove(&label) else {
             return Err(Error::Refused(format!(
-                "{tree} gives `as:` and no `is:`: `as:` is the type of the value under `is:`; \
-                 type a labelled field by its value, `(:{typed} ?x)`"
+                "{tree} types `{label}:` under `as:`, which it does not name"
             )));
         };
-        terms.insert("is".into(), wrap(typed, value)?);
+        terms.insert(label, wrap(&word, value)?);
     }
     let room = 64 - syntax::DERIVED_LENGTH - 1;
     if let Some(label) = terms.keys().find(|label| label.len() > room) {
@@ -2824,7 +2877,8 @@ impl Expander {
                     );
                     return self.about(&tree, |_| Err(Error::Refused(message)));
                 }
-                return self.about(&tree, |_| derived(&tree, concept, name, &domain));
+                let reads = position == Position::Premise || self.reporting;
+                return self.about(&tree, |_| derived(&tree, concept, name, &domain, reads));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
                 return Ok(read);
