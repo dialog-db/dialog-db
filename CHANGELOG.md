@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### One number held as two types elects its narrowest type
+
+[#879](https://github.com/dialog-db/dialog-db/pull/879)
+
+A cardinality-one election between claims that stand equal is broken by
+the hash of the value, which hashes the number and not its type, so it
+could not tell one number held as two types (`5` and `5.0`, `3` and the
+integer `3`, or the two zeros) apart and kept whichever it met first.
+Such a tie now goes to the narrowest type: the natural over the integer
+over the float, and `0.0` over `-0.0`. That is the type a read of the
+number band yields, so a deduced election answers what a stored read of
+the same claims would. It is reachable only for one number in two
+representations: any two values that are not the same number hash
+apart.
+
+What this changes for you:
+
+- A deduced cardinality-one read, and a `last`, `max` or `min` pick,
+  over candidates holding one number as two types at equal standing
+  answers the narrowest type, whatever order the candidates arrive in.
+  It answered whichever came first, or, for a pick, the float for `max`.
+- `Cardinality::newer` and `Cardinality::elect` take the narrowest of
+  such a pair; neither was newer than the other.
+- No stored answer changes. A tree a release before 0.3.0 keyed in
+  per-type bands can hold such a pair in one cell, and every stored read
+  of it met the natural first in key order and kept it; it still
+  answers the natural, as it does once migrated into the band.
+
+Why: an election must not depend on the order it meets its candidates
+in, and the narrowest type is what the band itself reads the number as.
+
 ### Two opens of one credential racing both open it
 
 [#878](https://github.com/dialog-db/dialog-db/pull/878)
@@ -132,9 +163,11 @@ What this changes for you:
 - `Value::cmp_number` is new: the order of two numbers by value, total
   and deterministic, NaN least, `-0.0` equal to 0, a float past `2^53`
   read as the decimal it prints as, as the band keys it.
-- Two numbers of one value held as two types, such as 3 and 3.0, pick
-  the same one whatever order they arrive in: `max` the float, `min`
-  the natural.
+- Two numbers of one value held as two types, such as 3 and 3.0, are
+  one value to a pick: the newer claim wins, and between claims that
+  stand equal the narrowest type, whatever order they arrive in, for
+  `max` and `min` alike (see "One number held as two types elects its
+  narrowest type").
 - A text, an entity or a listed type picks as before, and a pick over a
   field of no type holding values of several types that are not numbers
   still orders them by type first.

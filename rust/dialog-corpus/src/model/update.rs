@@ -231,10 +231,35 @@ pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
 
 /// Whether `candidate` wins a tie `incumbent` stands equal in: the
 /// greater [`Value::tiebreak`], the hash of the value, not the value
-/// itself, so the outcome favours no value over another. Equal values
-/// never beat each other.
+/// itself, so the outcome favours no value over another. Two values hash
+/// alike only when they are one number in two representations (the
+/// natural `5` and the float `5.0`, or the two zeros), and then the
+/// narrowest type wins, as a read of the band yields: the natural over
+/// the integer over the float, and `0.0` over `-0.0`. Equal values never
+/// beat each other.
 pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
-    candidate.tiebreak() > incumbent.tiebreak()
+    match candidate.tiebreak().cmp(&incumbent.tiebreak()) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => narrower(candidate, incumbent),
+    }
+}
+
+/// Whether `a` is a narrower representation than `b` of the number both
+/// are: the natural over the integer over the float, and of two floats
+/// (the zeros) the positive one.
+fn narrower(a: &Value, b: &Value) -> bool {
+    fn width(value: &Value) -> u8 {
+        match value {
+            Value::UnsignedInt(_) => 0,
+            Value::SignedInt(_) => 1,
+            _ => 2,
+        }
+    }
+    match (a, b) {
+        (Value::Float(a), Value::Float(b)) => a.is_sign_positive() && b.is_sign_negative(),
+        _ => width(a) < width(b),
+    }
 }
 
 /// The write side of the triple store.
@@ -1206,7 +1231,8 @@ mod tests {
     /// value, not by the value: of two values whose hashes order them the
     /// other way round from their own order, the one with the greater
     /// hash wins, whichever is folded first. One value held by two types
-    /// (the natural 3 and the float 3.0) is a tie neither wins.
+    /// (the natural 3 and the float 3.0) hashes as one, and the narrowest
+    /// type wins, whichever is folded first; of the two zeros, `0.0`.
     #[dialog_common::test]
     fn an_equal_standing_ties_by_the_hash_of_the_value() {
         use super::{Cardinality, Cause, Edition, Standing, Value};
@@ -1234,14 +1260,25 @@ mod tests {
 
         let (natural, float) = (Value::UnsignedInt(3), Value::Float(3.0));
         assert_eq!(natural.tiebreak(), float.tiebreak());
-        assert!(!Cardinality::newer(
-            (&natural, Some(&standing)),
-            (&float, Some(&standing))
-        ));
-        assert!(!Cardinality::newer(
-            (&float, Some(&standing)),
-            (&natural, Some(&standing))
-        ));
+        for (narrow, wide) in [
+            (natural.clone(), float.clone()),
+            (Value::UnsignedInt(3), Value::SignedInt(3)),
+            (Value::SignedInt(-3), Value::Float(-3.0)),
+            (Value::Float(0.0), Value::Float(-0.0)),
+        ] {
+            assert!(Cardinality::newer(
+                (&narrow, Some(&standing)),
+                (&wide, Some(&standing))
+            ));
+            assert!(!Cardinality::newer(
+                (&wide, Some(&standing)),
+                (&narrow, Some(&standing))
+            ));
+            let claims = [(&wide, Some(&standing)), (&narrow, Some(&standing))];
+            assert_eq!(Cardinality::One.elect(claims), Some(1));
+            let claims = [(&narrow, Some(&standing)), (&wide, Some(&standing))];
+            assert_eq!(Cardinality::One.elect(claims), Some(0));
+        }
     }
 
     /// The instructions of a batch come in entity then attribute order,
