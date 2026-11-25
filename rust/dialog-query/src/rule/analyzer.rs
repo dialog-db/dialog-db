@@ -377,20 +377,16 @@ fn head_mismatch(
 
 /// A shape of `present`, the types the body binds a head field's
 /// variable to, when the field's declared types, `target`, read none of
-/// them: the rule could conclude nothing the field holds. A number of
-/// any type shares values with a number field of any other, which
-/// [`head_mismatch`] judges through the band, and a text, a symbol and
-/// an entity convert into one another ([`Value::conform`]), so a field
-/// of one of those reads all of its group here. `None` when the body
-/// binds nothing it knows (an empty set) or something the field reads.
-///
-/// [`Value::conform`]: crate::Value::conform
+/// them: the rule could conclude nothing the field holds. Numbers are
+/// one stratum, keyed by value whatever type wrote them, so a number
+/// field reads every number here and [`head_mismatch`] judges them
+/// through the band. Every other type is a stratum of its own: a text
+/// field reads no symbol and no entity. `None` when the body binds
+/// nothing it knows (an empty set) or something the field reads.
 fn disjoint(present: Primitive, target: Primitive) -> Option<ValueType> {
     let mut readable = target;
-    for group in [Primitive::NUMERIC, Primitive::TEXTUAL] {
-        if target.intersect(group).is_some() {
-            readable = readable.union(group);
-        }
+    if target.intersect(Primitive::NUMERIC).is_some() {
+        readable = readable.union(Primitive::NUMERIC);
     }
     if present.is_empty() || present.intersect(readable).is_some() {
         return None;

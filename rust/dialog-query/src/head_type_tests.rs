@@ -92,7 +92,8 @@ fn var(name: &str) -> serde_json::Value {
 /// A head declared one type over a body that binds its variable to a
 /// type the field reads none of is refused when it compiles, with
 /// `TypeError::HeadField` naming the field, its declared type and the
-/// type the body binds: a typed body field (text into `integer:`) and a
+/// type the body binds: a typed body field (text into `integer:`, and
+/// each of text, symbol and entity into a head of either other) and a
 /// formula's output (a sum into `text:`).
 #[dialog_common::test]
 fn a_head_of_a_type_the_body_binds_none_of_is_refused() {
@@ -107,10 +108,27 @@ fn a_head_of_a_type_the_body_binds_none_of_is_refused() {
         },
         { "assert": "math/sum", "where": { "of": var("n"), "with": 1, "is": var("value") } }
     ]);
-    for (how, declared, when, bound) in [
+    let reading = |declared: &str| {
+        serde_json::json!([{
+            "assert": { "with": { "value": field("source/body", Some(declared)) } },
+            "where": { "this": var("this"), "value": var("value") }
+        }])
+    };
+    let mut cases = vec![
         ("a typed field", "integer:", typed, ValueType::String),
         ("a formula", "text:", formula, ValueType::UnsignedInt),
+    ];
+    for (head, body, bound) in [
+        ("text:", "symbol:", ValueType::Symbol),
+        ("text:", "entity:", ValueType::Entity),
+        ("symbol:", "text:", ValueType::String),
+        ("symbol:", "entity:", ValueType::Entity),
+        ("entity:", "text:", ValueType::String),
+        ("entity:", "symbol:", ValueType::Symbol),
     ] {
+        cases.push(("a textual field", head, reading(body), bound));
+    }
+    for (how, declared, when, bound) in cases {
         let error = compile(declared, when).expect_err(how);
         assert!(
             matches!(
@@ -131,9 +149,8 @@ fn a_head_of_a_type_the_body_binds_none_of_is_refused() {
 }
 
 /// A head declared a type over a body whose variable is open, or bound
-/// to a type the field reads (a number of another number type through
-/// the band, or a text, symbol or entity, which convert into one
-/// another), compiles.
+/// to a type the field reads (a number of another number type, numbers
+/// being one stratum), compiles.
 #[dialog_common::test]
 fn a_head_of_a_type_the_body_may_bind_compiles() {
     let untyped = || {
@@ -154,8 +171,7 @@ fn a_head_of_a_type_the_body_may_bind_compiles() {
         ("boolean:", untyped()),
         ("float:", typed("natural:")),
         ("integer:", typed("natural:")),
-        ("text:", typed("entity:")),
-        ("entity:", typed("text:")),
+        ("symbol:", typed("symbol:")),
     ] {
         if let Err(error) = compile(head, when.clone()) {
             panic!("{head} over {when}: {error}");

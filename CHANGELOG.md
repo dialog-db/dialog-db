@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A rule whose head declares a type its body binds none of is refused
 
+[#869](https://github.com/dialog-db/dialog-db/pull/869)
+
 A head field's declared type is what the rule concludes. A rule whose
 body bound the head's variable to a type the field reads none of (a
 head declared `integer:` over a body field declared `text:`, or a head
@@ -38,9 +40,10 @@ What this changes for you:
 - A rule whose head variable is set equal to a constant of a type the
   head does not read concludes nothing. It concluded the constant.
 - A number of another number type is judged through the band as before
-  (an integer into a `natural:` head is refused as possibly negative),
-  and a text, a symbol and an entity, which convert into one another,
-  are not refused into one another's heads.
+  (an integer into a `natural:` head is refused as possibly negative):
+  numbers are one stratum. A text, a symbol and an entity are each a
+  stratum of their own, so a symbol or an entity into a `text:` head is
+  refused like any other type.
 
 Why: a field's type is part of which attribute a rule concludes, so a
 rule must not put a value of another type under it; where that is
