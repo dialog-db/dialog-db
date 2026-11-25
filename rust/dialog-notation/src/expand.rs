@@ -38,7 +38,9 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{AMONG, CONTROL, ELECTORS, Head, Keyed, RETIRED, Rule, TYPES};
+use crate::kernel::{
+    AMONG, CARDINALITIES, CONTROL, ELECTORS, Head, Keyed, LAYERS, PICKS, RETIRED, Rule, TYPES,
+};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{self, Parameters, Signature, Syntax};
@@ -531,7 +533,7 @@ pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
 
 /// The read a line is. A line is one attribute, by its full name, and
 /// is what a document writes; the read below it is the kernel's, which
-/// the walker writes for it and no document needs to:
+/// the walker writes for it and no document writes:
 ///
 /// ```clj
 /// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
@@ -761,16 +763,8 @@ fn derived(
              cardinality is what its rules conclude: leave it out"
         )));
     }
-    // An elector on a term of a read, `is: (max ?n)`, chooses one of the
-    // claims, as on a line. In a head that derives it is a fold.
-    if reads {
-        for term in terms.values_mut() {
-            if let Some((word, inner)) = elected(term) {
-                let inner = inner.clone();
-                *term = wrap(word, inner)?;
-            }
-        }
-    }
+    // `as:` a type, or a listed type's cases, is the type of the value
+    // under `is:`; a map, of each field it names, `as: {:status :text}`.
     let types = || {
         crate::kernel::TYPES
             .iter()
@@ -778,21 +772,25 @@ fn derived(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let typed = |kind: &Syntax| {
+    let typed = |kind: &Syntax| -> Result<Syntax, Error> {
+        if let Syntax::Tuple(listed) = kind
+            && !listed.is_empty()
+            && listed.iter().all(|case| case.keyword().is_some())
+        {
+            return Ok(kind.clone());
+        }
         kind.keyword()
             .filter(|word| crate::kernel::TYPES.contains(word))
-            .map(str::to_string)
+            .map(|_| kind.clone())
             .ok_or_else(|| {
                 Error::Refused(format!(
-                    "{tree} gives `as:` {kind}, and a type is one of {}, or a map of a label to \
-                     its type, `{{:status :text}}`",
+                    "{tree} gives `as:` {kind}, and a type is one of {}, the cases of a listed \
+                     type, `[:open :done]`, or a map of a label to its type, `{{:status :text}}`",
                     types()
                 ))
             })
     };
-    // `as:` a type is the type of the value under `is:`; a map, of each
-    // field it names, `as: {:status :text}`.
-    let mut typing: Vec<(String, String)> = Vec::new();
+    let mut typing: BTreeMap<String, Syntax> = BTreeMap::new();
     match terms.remove("as") {
         None => {}
         Some(Syntax::Map(entries)) => {
@@ -808,27 +806,54 @@ fn derived(
                          field the read names, `{{:status :text}}`"
                     )));
                 };
-                typing.push((label.to_string(), typed(kind)?));
+                typing.insert(label.to_string(), typed(kind)?);
             }
         }
         Some(kind) => {
-            let word = typed(&kind)?;
+            let kind = typed(&kind)?;
             if !terms.contains_key("is") {
                 return Err(Error::Refused(format!(
                     "{tree} gives `as:` and no `is:`: `as:` is the type of the value under \
                      `is:`; type a labelled field by its label, `as: {{:status {kind}}}`"
                 )));
             }
-            typing.push(("is".into(), word));
+            typing.insert("is".into(), kind);
         }
     }
-    for (label, word) in typing {
-        let Some(value) = terms.remove(&label) else {
-            return Err(Error::Refused(format!(
-                "{tree} types `{label}:` under `as:`, which it does not name"
-            )));
+    if let Some(label) = typing.keys().find(|label| !terms.contains_key(*label)) {
+        return Err(Error::Refused(format!(
+            "{tree} types `{label}:` under `as:`, which it does not name"
+        )));
+    }
+    for (label, term) in terms.iter_mut() {
+        // An elector on a term of a read, `is: (max ?n)`, chooses one of
+        // the claims, as on a line, over the value as it is typed. In a
+        // head that derives it is a fold.
+        let (elector, mut value) = match elected(term).filter(|_| reads) {
+            Some((word, inner)) => (Some(word.to_string()), inner.clone()),
+            None => (None, term.clone()),
         };
-        terms.insert(label, wrap(&word, value)?);
+        match typing.remove(label.as_str()) {
+            Some(Syntax::Tuple(cases)) => {
+                value = Syntax::Application(
+                    Box::new(Syntax::Constant(syntax::entity(&format!("{AMONG}:"))?)),
+                    Parameters {
+                        items: vec![wrap("entity", value)?],
+                        terms: BTreeMap::from([("cases".into(), Syntax::Tuple(cases))]),
+                    },
+                );
+            }
+            Some(kind) => {
+                if let Some(word) = kind.keyword() {
+                    value = wrap(word, value)?;
+                }
+            }
+            None => {}
+        }
+        if let Some(word) = elector {
+            value = wrap(&word, value)?;
+        }
+        *term = value;
     }
     let room = 64 - syntax::DERIVED_LENGTH - 1;
     if let Some(label) = terms.keys().find(|label| label.len() > room) {
@@ -855,7 +880,7 @@ fn derived(
 /// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
 /// (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one)
 ///
-/// (xyz.todo ?i state: (:last (:entity ?s)) title: (:last (:text ?t)))
+/// (xyz.todo ?i state: (:one (:entity ?s)) title: (:one (:text ?t)))
 /// ```
 fn lines(template: Syntax) -> Result<Syntax, Error> {
     let mut any = false;
@@ -919,42 +944,16 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
     })
 }
 
-/// Whether a value in `tree` is wrapped twice in one kind of wrapper,
-/// which the kernel refuses.
-fn twice(tree: &Syntax) -> bool {
-    let mut open = vec![tree];
-    while let Some(part) = open.pop() {
-        if let Syntax::Application(_, operand) = part {
-            for term in operand.terms.values().chain(operand.items.iter()) {
-                if matches!(term, Syntax::Application(operator, _) if operator.keyword().is_some())
-                    && crate::kernel::wrapped(term).is_err()
-                {
-                    return true;
-                }
-                open.push(term);
-            }
-        }
-    }
-    false
-}
-
 /// Whether `part` is written as a line of a concept or a command, not a
 /// read: by a word only a line says, `as:`, `in:`, `cardinality:` or
-/// `by:`, or by the cardinality its value is wrapped in, `is: (:one ?v)`,
-/// which a line may say in place of `cardinality:`. (`of:` is read as the
-/// part with no label, so it says nothing a read does not.)
+/// `by:`. (`of:` is read as the part with no label, so it says nothing a
+/// read does not.)
 fn is_line(part: &Syntax) -> bool {
-    let Some(operand) = part.operand() else {
-        return false;
-    };
-    let said = ["as", "in", "cardinality", "by"]
-        .iter()
-        .any(|word| operand.terms.contains_key(*word));
-    let value = operand.terms.get("is").or_else(|| operand.items.get(1));
-    let wrapped = value.is_some_and(|value| {
-        crate::kernel::wrapped(value).is_ok_and(|wrapped| wrapped.cardinality.is_some())
-    });
-    said || wrapped
+    part.operand().is_some_and(|operand| {
+        ["as", "in", "cardinality", "by"]
+            .iter()
+            .any(|word| operand.terms.contains_key(*word))
+    })
 }
 
 /// `rule` with every variable an expansion named for itself, `?c.<site>`,
@@ -1024,6 +1023,116 @@ fn blanked(rule: Syntax) -> Syntax {
         .map(|premise| walk(premise, &once))
         .collect();
     clauses.into_rule()
+}
+
+/// Whether `tree` is a value wrapped as the kernel reads it: in a type,
+/// a pick, a cardinality or a layer, `(:integer ?n)`, or in a listed
+/// type's cases, `(:among ?s cases: [:open :done])`.
+fn wrapper(tree: &Syntax) -> bool {
+    match tree {
+        Syntax::Application(operator, operand) => match operator.keyword() {
+            Some(AMONG) => {
+                operand.items.len() == 1
+                    && operand.terms.len() == 1
+                    && operand.terms.contains_key("cases")
+            }
+            Some(word) => {
+                (TYPES.contains(&word)
+                    || PICKS.contains(&word)
+                    || CARDINALITIES.contains(&word)
+                    || LAYERS.contains(&word))
+                    && operand.items.len() == 1
+                    && operand.terms.is_empty()
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// A value with the wrappers [`wrapper`] tells taken off it.
+struct Peeled<'a> {
+    kind: Option<&'a str>,
+    pick: Option<&'a str>,
+    cardinality: Option<&'a str>,
+    layer: Option<&'a str>,
+    cases: Option<&'a Syntax>,
+    inner: &'a Syntax,
+}
+
+impl<'a> Peeled<'a> {
+    fn of(mut node: &'a Syntax) -> Self {
+        let mut peeled = Peeled {
+            kind: None,
+            pick: None,
+            cardinality: None,
+            layer: None,
+            cases: None,
+            inner: node,
+        };
+        while wrapper(node) {
+            let Syntax::Application(operator, operand) = node else {
+                break;
+            };
+            let (Some(word), [inner]) = (operator.keyword(), operand.items.as_slice()) else {
+                break;
+            };
+            if word == AMONG {
+                peeled.cases = peeled.cases.or(operand.terms.get("cases"));
+                node = inner;
+                continue;
+            }
+            let slot = if TYPES.contains(&word) {
+                &mut peeled.kind
+            } else if PICKS.contains(&word) {
+                &mut peeled.pick
+            } else if CARDINALITIES.contains(&word) {
+                &mut peeled.cardinality
+            } else {
+                &mut peeled.layer
+            };
+            slot.get_or_insert(word);
+            node = inner;
+        }
+        peeled.inner = node;
+        peeled
+    }
+
+    /// The cardinality said, or the one a pick of every claim or the
+    /// newest says.
+    fn cardinality(&self) -> Option<&'a str> {
+        self.cardinality.or(match self.pick {
+            Some("last") => Some("one"),
+            Some("all") => Some("many"),
+            _ => None,
+        })
+    }
+
+    /// The value, under the elector it is written under.
+    fn value(&self) -> String {
+        match self.pick {
+            Some(elector @ ("max" | "min")) => format!("({elector} {})", self.inner),
+            _ => self.inner.to_string(),
+        }
+    }
+
+    /// The line of `attribute` of `entity` that says this value.
+    fn line(&self, attribute: &str, entity: &str) -> String {
+        let mut line = format!("({attribute} of: {entity} is: {}", self.value());
+        match (self.cases, self.kind) {
+            (Some(cases), _) => line.push_str(&format!(" as: {cases}")),
+            (None, Some(kind)) => line.push_str(&format!(" as: :{kind}")),
+            (None, None) => {}
+        }
+        if let Some(cardinality) = self.cardinality() {
+            line.push_str(&format!(" cardinality: :{cardinality}"));
+        }
+        if let Some(layer) = self.layer {
+            line.push_str(&format!(" in: :{layer}"));
+        }
+        line.push(')');
+        line
+    }
 }
 
 /// The parts with no label of an application, or none.
@@ -1881,11 +1990,113 @@ impl Expander {
             );
             return self.about(&part, |_| Err(Error::Refused(message)));
         }
+        // `top` is refused as what it was, where it stands.
+        if retired(tree).is_ok()
+            && let Some((part, message)) = self.wrapper(tree)
+        {
+            return self.about(&part, |_| Err(Error::Refused(message)));
+        }
         Ok(())
     }
 
-    /// The kernel rules one tree of a document expands to, added to
-    /// `kernel`.
+    /// The first value `tree` writes wrapped as the kernel reads it, in a
+    /// type, a pick, a cardinality or a layer, `(:one (:integer 3))`, and
+    /// what to write in its place. The walker writes these for a line,
+    /// and a document writes none: the read it stands in, and why.
+    fn wrapper(&self, tree: &Syntax) -> Option<(Syntax, String)> {
+        match tree {
+            Syntax::Application(operator, operand) => {
+                if wrapper(tree) {
+                    let message = format!(
+                        "{tree} is a value as the kernel reads it, and a document writes no \
+                         wrapper: say its type, cardinality and layer on a line, `as:`, \
+                         `cardinality:` and `in:`, and an elector on its value, `is: (max ?x)`"
+                    );
+                    return Some((tree.clone(), message));
+                }
+                if let Syntax::Reference(name) = &**operator {
+                    let unlabeled = operand.items.get(1).map(|value| ("is", value));
+                    let labelled = operand
+                        .terms
+                        .iter()
+                        .map(|(label, value)| (label.as_str(), value));
+                    for (label, value) in unlabeled.into_iter().chain(labelled) {
+                        if wrapper(value) {
+                            return Some((tree.clone(), self.unwrapped(tree, name, label, value)));
+                        }
+                    }
+                }
+                std::iter::once(&**operator)
+                    .chain(&operand.items)
+                    .chain(operand.terms.values())
+                    .find_map(|part| self.wrapper(part))
+            }
+            Syntax::Tuple(items) => items.iter().find_map(|item| self.wrapper(item)),
+            Syntax::Map(entries) => entries
+                .iter()
+                .find_map(|(key, value)| self.wrapper(key).or_else(|| self.wrapper(value))),
+            _ => None,
+        }
+    }
+
+    /// What `read`, applying `name`, writes in place of the wrapped
+    /// `value` of its field `label`.
+    fn unwrapped(&self, read: &Syntax, name: &str, label: &str, value: &Syntax) -> String {
+        let peeled = Peeled::of(value);
+        let refused = format!("{read} writes {value}, and a document writes no wrapper");
+        let operand = read.operand();
+        let entity = || {
+            operand
+                .and_then(|operand| operand.terms.get("of").or(operand.items.first()))
+                .map_or("_".to_string(), ToString::to_string)
+        };
+        let attribute = match syntax::named(name) {
+            syntax::Named::Domain => Some(format!("{name}/{label}")),
+            syntax::Named::Attribute => Some(name.to_string()),
+            _ => None,
+        };
+        if let Some(attribute) = attribute {
+            return format!(
+                "{refused}: write the field as a line, `{}`",
+                peeled.line(&attribute, &entity())
+            );
+        }
+        if self.concepts.contains(name) {
+            return format!(
+                "{refused}: a concept's lines say its fields' types, cardinalities and layers, \
+                 so read the field as it is, `{label}: {}`",
+                peeled.inner
+            );
+        }
+        if peeled.cardinality().is_some() {
+            return format!(
+                "{refused}: a derived attribute's cardinality is what its rules conclude, so \
+                 leave it out, `{label}: {}`",
+                peeled.value()
+            );
+        }
+        if let Some(layer) = peeled.layer {
+            return format!(
+                "{refused}: `{name}` is a derived attribute, concluded and read on the default \
+                 layer only, not on the {layer} layer"
+            );
+        }
+        let kind = match (peeled.cases, peeled.kind) {
+            (Some(cases), _) => Some(cases.to_string()),
+            (None, Some(kind)) => Some(format!(":{kind}")),
+            (None, None) => None,
+        };
+        let typed = match (kind, label) {
+            (None, _) => String::new(),
+            (Some(kind), "is") => format!(" as: {kind}"),
+            (Some(kind), label) => format!(" as: {{:{label} {kind}}}"),
+        };
+        format!(
+            "{refused}: write `{label}: {}{typed}`, `as:` typing the value under `is:` or, \
+             as a map, each field it names",
+            peeled.value()
+        )
+    }
     fn each(&mut self, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
         // Where several definitions take a form that is read, the rule
         // is expanded once a definition: what is read is what any of
@@ -2609,50 +2820,6 @@ impl Expander {
                     .ok_or_else(|| ambiguous(&found))
             }
         }?;
-        // A field of a concept read is the concept's: a wrapper the read
-        // puts on it that the concept puts there too is the author's to
-        // take off, said of the field.
-        if let (answer, Some(signature)) = &found[chosen]
-            && let Some(operand) = said.operand()
-            && let Some((label, word)) = operand.terms.iter().find_map(|(label, term)| {
-                let Syntax::Application(operator, _) = term else {
-                    return None;
-                };
-                let word = operator.keyword()?;
-                (crate::kernel::TYPES.contains(&word)
-                    || crate::kernel::CARDINALITIES.contains(&word))
-                .then_some((label, word))
-            })
-            && twice(answer)
-        {
-            return Err(Error::Refused(format!(
-                "{said} wraps `{label}:` in `(:{word} …)`, and the concept `{}` says that of the \
-                 field itself: a read of a concept takes its fields' cardinality and type from \
-                 it, so write `{label}:` bare",
-                signature.name
-            )));
-        }
-        // Nor a pick: the concept says its field's cardinality, which
-        // replaced picks, and elects a claim by its head's elector.
-        if let (_, Some(signature)) = &found[chosen]
-            && let Some(operand) = said.operand()
-            && let Some((label, word)) = operand.terms.iter().find_map(|(label, term)| {
-                let Syntax::Application(operator, _) = term else {
-                    return None;
-                };
-                let word = operator.keyword()?;
-                crate::kernel::PICKS
-                    .contains(&word)
-                    .then_some((label, word))
-            })
-        {
-            return Err(Error::Refused(format!(
-                "{said} wraps `{label}:` in `(:{word} …)`, a pick, and the concept `{}` says its \
-                 field's cardinality, which replaced picks, and elects a claim by the elector in \
-                 its head, `(max ?v)`: write `{label}:` bare",
-                signature.name
-            )));
-        }
         self.answered = patterns.swap_remove(chosen);
         Ok(found.swap_remove(chosen).0)
     }
@@ -3197,7 +3364,9 @@ mod tests {
 
     const TODO: &str = r#"
         (concept (todo ?t list: ?l text: ?x state: ?s)
-          (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
+          (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+          (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+          (xyz.todo/state of: ?t is: ?s cardinality: :one))
         (concept (todo/add todo: ?t list: ?l text: ?x)
           (xyz.todo.add/todo of: ?c is: ?t in: :control cardinality: :many)
           (xyz.todo.add/list of: ?c is: ?l in: :control cardinality: :many)
@@ -3574,7 +3743,9 @@ mod tests {
     fn it_expands_a_document_in_any_order() {
         let declarations = r#"
             (concept (todo ?t list: ?l text: ?x state: ?s)
-              (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
+              (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+          (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+          (xyz.todo/state of: ?t is: ?s cardinality: :one))
             (concept (todo/add todo: ?t list: ?l text: ?x)
               (xyz.todo.add/todo of: ?c is: ?t in: :control cardinality: :many)
               (xyz.todo.add/list of: ?c is: ?l in: :control cardinality: :many)
@@ -3816,8 +3987,8 @@ mod tests {
     fn it_writes_a_concept_of_several_reads_as_a_rule_each() {
         let kernel = expanded(
             "(concept (card ?c title: ?x owner: ?o)
-               (xyz.card ?c title: (:one (:text ?x)))
-               (xyz.owned ?c by: (:one (:entity ?o))))",
+               (xyz.card/title of: ?c is: ?x as: :text cardinality: :one)
+               (xyz.owned/by of: ?c is: ?o as: :entity cardinality: :one))",
             "(rule (assert (card ?c title: ?x owner: ?o))
                (xyz.draft ?c title: ?x by: ?o))",
         )
@@ -3836,8 +4007,8 @@ mod tests {
     fn it_reports_only_the_reads_a_query_names_a_field_of() {
         let kernel = expanded(
             "(concept (card ?c title: ?x owner: ?o)
-               (xyz.card ?c title: (:one (:text ?x)))
-               (xyz.owned ?c by: (:one (:entity ?o))))",
+               (xyz.card/title of: ?c is: ?x as: :text cardinality: :one)
+               (xyz.owned/by of: ?c is: ?o as: :entity cardinality: :one))",
             "(select (card ?c title: ?x ...))",
         )
         .unwrap();
@@ -3850,7 +4021,7 @@ mod tests {
     #[test]
     fn it_expands_a_form_that_is_not_an_application() {
         let kernel = expanded(
-            r#"(rule (syntax (assert (xyz.note ?n text: (:text ?x))))
+            r#"(rule (syntax (assert (xyz.note/text of: ?n is: ?x as: :text)))
                  (expand [note ?n ?x]))"#,
             r#"[note note:1 "hi"]"#,
         )
@@ -3873,7 +4044,7 @@ mod tests {
         // rule uses once, is a blank.
         assert_eq!(
             rule,
-            "(rule (assert (xyz.todo ?t list: (:one (:entity ?l)) state: (:last :open) text: (:one (:text ?x)))) \
+            "(rule (assert (xyz.todo ?t list: (:one (:entity ?l)) state: (:one :open) text: (:one (:text ?x)))) \
              (xyz.todo.add _ list: (:control (:many ?l)) text: (:control (:many ?x)) todo: (:control (:many ?t))))"
         );
         assert!(diagnostics.is_empty());
@@ -4328,18 +4499,22 @@ mod tests {
                        (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
                        (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
                        (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))";
-        let reads = "(concept (todo ?i list: ?l title: ?t state: ?s)
-                       (xyz.todo ?i title: (:one (:text ?t)) state: (:one (:among (:entity ?s) cases: [:open :done])))
-                       (xyz.list ?l task: (:many (:entity ?i))))";
         for text in [
             "(select (todo ?i list: ?l title: ?t state: ?s))",
             "(select (todo ?i title: ?t ...))",
             r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
             "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open ...))",
         ] {
+            // Each line is the kernel's read of its field, the lines of
+            // one entity one read.
             let by_lines = expanded(lines, text).unwrap();
-            assert_eq!(by_lines, expanded(reads, text).unwrap(), "{text}");
             assert!(!by_lines.is_empty());
+            assert!(
+                by_lines.iter().any(|rule| rule.contains("(xyz.todo ")
+                    && rule.contains("state: (:one (:among (:entity ")
+                    && rule.contains("title: (:one (:text ")),
+                "{text}: {by_lines:?}"
+            );
         }
         assert_eq!(
             expanded(
@@ -4350,6 +4525,17 @@ mod tests {
             vec![
                 r#"(rule (assert (xyz.todo todo:1 state: (:one (:among (:entity :open) cases: [:open :done])) title: (:one (:text "Buy milk")))))"#,
                 "(rule (assert (xyz.list list:home task: (:many (:entity todo:1)))))",
+            ]
+        );
+
+        assert_eq!(
+            expanded(
+                lines,
+                "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open ...))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (xyz.open ?i title: ?t) (xyz.todo ?i state: (:one (:among (:entity :open) cases: [:open :done])) title: (:one (:text ?t))) (xyz.list _ task: (:many (:entity ?i))))"
             ]
         );
 

@@ -33,9 +33,7 @@ async fn report(notebook: &mut Notebook, text: &str) -> Result<Vec<String>> {
 
 const TODO: &str = r#"
     (concept (todo ?t list: ?l text: ?x state: ?s)
-      (xyz.todo ?t list: (:last (:entity ?l))
-                   text: (:last (:text ?x))
-                   state: (:last (:entity ?s))))
+      (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one) (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one) (xyz.todo/state of: ?t is: ?s as: :entity cardinality: :one))
 
     ; Adding a to-do, and completing one: commands, a concept each
     ; whose head names no entity, its lines on the control layer.
@@ -52,7 +50,7 @@ const TODO: &str = r#"
 
     ; A write says every field, so one that changes the state alone
     ; writes the relation, not the concept.
-    (rule (assert (xyz.todo ?t state: (:last (:entity :done))))
+    (rule (assert (xyz.todo/state of: ?t is: :done as: :entity cardinality: :one))
       (todo/complete todo: ?t))
 "#;
 
@@ -115,7 +113,7 @@ async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<
             r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
                (rule (assert (todo ?t list: ?l text: ?x state: :open))
                  (todo/add todo: ?t list: ?l text: ?x))
-               (select (xyz.todo ?t text: (:last ?x)))
+               (select (xyz.todo/text of: ?t is: ?x cardinality: :one))
                (concept (todo/add todo: ?t list: ?l text: ?x)
                  (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control cardinality: :many)
                  (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
@@ -180,7 +178,7 @@ async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
 
     notebook
         .submit(
-            r#"(assert (xyz.todo (:id xyz.todo list: list:home text: "Buy milk") tag: (:text "shop")))"#,
+            r#"(assert (xyz.todo/tag of: (:id xyz.todo list: list:home text: "Buy milk") is: "shop" as: :text))"#,
         )
         .await?;
     let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
@@ -264,7 +262,8 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
             r#"(rule (xyz.placed ?x at: ?p) (notebook-entry ?b block: {?p ?x}))
                (rule (assert (notebook-entry ?b block: {?p ?x}))
                  (xyz.move ?x to: ?b at: ?p))
-               (assert (xyz.move block:c to: notebook:1 at: (:text "N3")))"#,
+               (assert (xyz.move block:c to: notebook:1))
+               (assert (xyz.move/at of: block:c is: "N3" as: :text))"#,
         )
         .await?;
     assert_eq!(
@@ -650,7 +649,7 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     // The command's entity is what its content derives.
     notebook
         .submit(
-            r#"(assert (xyz.todo (:id xyz.todo.add list: list:home text: "Buy milk") tag: (:text "made")))"#,
+            r#"(assert (xyz.todo/tag of: (:id xyz.todo.add list: list:home text: "Buy milk") is: "made" as: :text))"#,
         )
         .await?;
     let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
@@ -2164,9 +2163,9 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
 const COUNTER: &str = "
     (concept (counter/increment counter: ?n)
       (xyz.counter.increment/counter of: ?c is: ?n as: :entity in: :control cardinality: :many))
-    (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+    (rule (assert (xyz.counter/count of: ?c is: (+ ?n : 1) as: :natural cardinality: :one))
       (counter/increment counter: ?c)
-      (xyz.counter ?c count: (:last (:natural ?n))))";
+      (xyz.counter/count of: ?c is: ?n as: :natural cardinality: :one))";
 
 /// An attribute takes its two terms unlabeled, the entity and then the
 /// value: in a write, in a rule's head and premises, and in a query,
@@ -2204,7 +2203,7 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
         .submit(&format!(
-            "(assert (xyz.counter counter:a count: (:last (:natural 1))))
+            "(assert (xyz.counter/count of: counter:a is: 1 as: :natural cardinality: :one))
              {COUNTER}"
         ))
         .await?;
@@ -2217,7 +2216,11 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
         .submit("(assert (counter/increment counter: counter:a))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(select (xyz.counter ?c count: (:last ?n)))").await?,
+        report(
+            &mut notebook,
+            "(select (xyz.counter/count of: ?c is: ?n cardinality: :one))"
+        )
+        .await?,
         vec!["(xyz.counter counter:a count: 3)"]
     );
 
@@ -2243,7 +2246,11 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
         "{misspelled:?}"
     );
     assert_eq!(
-        report(&mut notebook, "(select (xyz.counter ?c count: (:last ?n)))").await?,
+        report(
+            &mut notebook,
+            "(select (xyz.counter/count of: ?c is: ?n cardinality: :one))"
+        )
+        .await?,
         vec!["(xyz.counter counter:a count: 3)"]
     );
     Ok(())
@@ -2258,7 +2265,7 @@ async fn it_reads_and_writes_a_backlink_through_a_concept() -> Result<()> {
     notebook
         .submit(
             r#"(concept (list-item ?l todo: ?t)
-                 (xyz.todo ?t list: (:last (:entity ?l))))
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one))
                (assert (list-item list:home todo: todo:1))
                (assert (list-item list:home todo: todo:2))
                (assert (list-item list:work todo: todo:3))"#,
@@ -2288,10 +2295,10 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
     notebook
         .submit(
             r#"(concept (author ?p name: ?n email: ?e)
-                 (io.person ?p name: (:text ?n))
-                 (io.contact ?p email: (:text ?e)))
+                 (io.person/name of: ?p is: ?n as: :text cardinality: :many)
+                 (io.contact/email of: ?p is: ?e as: :text cardinality: :many))
                (assert (author person:ada name: "Ada" email: "ada@example.com"))
-               (assert (io.person person:bob name: (:text "Bob")))"#,
+               (assert (io.person/name of: person:bob is: "Bob" as: :text))"#,
         )
         .await?;
 
@@ -2304,7 +2311,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
         report(
             &mut notebook,
             "(select (io.person ?p name: ?n)
-                   (io.person ?p name: (:text ?n))
+                   (io.person/name of: ?p is: ?n as: :text)
                    (unless (author ?p ...)))"
         )
         .await?,
@@ -2317,7 +2324,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
             &mut notebook,
             "(select (io.person ?p name: ?n)
                (unless (author ?p ...))
-               (io.person ?p name: (:text ?n)))"
+               (io.person/name of: ?p is: ?n as: :text))"
         )
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
@@ -2333,13 +2340,16 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert (shop.item item:tea name: (:text "Tea") price: (:natural 4)))
-               (assert (shop.item item:pot name: (:text "Pot") price: (:natural 30)))
-               (assert (shop.item item:cup name: (:text "Cup") price: (:natural 9)))
+            r#"(assert (shop.item/name of: item:tea is: "Tea" as: :text))
+               (assert (shop.item/price of: item:tea is: 4 as: :natural))
+               (assert (shop.item/name of: item:pot is: "Pot" as: :text))
+               (assert (shop.item/price of: item:pot is: 30 as: :natural))
+               (assert (shop.item/name of: item:cup is: "Cup" as: :text))
+               (assert (shop.item/price of: item:cup is: 9 as: :natural))
 
                ; What costs less than ten.
                (rule (shop.offer ?i name: ?n price: ?p)
-                 (shop.item ?i name: (:text ?n) price: (:natural ?p))
+                 (shop.item/name of: ?i is: ?n as: :text) (shop.item/price of: ?i is: ?p as: :natural)
                  (< ?p : 10))"#,
         )
         .await?;
@@ -2423,7 +2433,7 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
 
                ; What costs less than ten.
                (rule (shop.offer ?i name: ?n price: ?p)
-                 (shop.item ?i name: (:text ?n) price: (:natural ?p))
+                 (shop.item/name of: ?i is: ?n as: :text) (shop.item/price of: ?i is: ?p as: :natural)
                  (< ?p : 10))
 
                (concept (shop/restock item: ?i count: ?n)
@@ -2431,11 +2441,11 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
                  (shop.restock/count of: ?c is: ?n as: :natural in: :control cardinality: :many))
 
                ; Restocking sets the count.
-               (rule (assert (shop.stock ?i count: (:last (:natural ?n))))
+               (rule (assert (shop.stock/count of: ?i is: ?n as: :natural cardinality: :one))
                  (shop/restock item: ?i count: ?n))
 
                (rule (shop.dear ?i name: ?n)
-                 (shop.item ?i name: (:text ?n) price: (:natural ?p))
+                 (shop.item/name of: ?i is: ?n as: :text) (shop.item/price of: ?i is: ?p as: :natural)
                  (> ?p : 100))"#,
         )
         .await?;
@@ -2603,10 +2613,10 @@ async fn it_fires_a_rule_in_the_document_that_installs_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (report, diagnostics) = notebook
         .submit(&format!(
-            "(assert (xyz.counter counter:a count: (:last (:natural 1))))
+            "(assert (xyz.counter/count of: counter:a is: 1 as: :natural cardinality: :one))
              {COUNTER}
              (assert (counter/increment counter: counter:a))
-             (select (xyz.counter ?c count: (:last ?n)))"
+             (select (xyz.counter/count of: ?c is: ?n cardinality: :one))"
         ))
         .await?;
     assert!(diagnostics.is_empty());
@@ -2667,13 +2677,13 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
         .submit(
             r#"(concept (note/jot text: ?x)
                  (xyz.note.jot/text of: ?c is: ?x as: :text in: :control cardinality: :many))
-               (rule (assert (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
+               (rule (assert (xyz.note/text of: (:id xyz.note text: ?x) is: ?x as: :text))
                  (note/jot text: ?x))"#,
         )
         .await?;
     notebook.submit(r#"(assert (note/jot text: "hi"))"#).await?;
     notebook
-        .submit(r#"(assert (xyz.note (:id xyz.note text: "hi") text: (:text "hi")))"#)
+        .submit(r#"(assert (xyz.note/text of: (:id xyz.note text: "hi") is: "hi" as: :text))"#)
         .await?;
     notebook.submit(r#"(assert (note/jot text: "ho"))"#).await?;
 
@@ -2703,7 +2713,11 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
             ],
             "both writes are in the cell"
         );
-        let last = report(&mut notebook, "(select (xyz.todo ?t state: (:last ?s)))").await?;
+        let last = report(
+            &mut notebook,
+            "(select (xyz.todo/state of: ?t is: ?s cardinality: :one))",
+        )
+        .await?;
         assert_eq!(last.len(), 1, "one of them is elected: {last:?}");
         elected.push(last);
     }
@@ -2720,9 +2734,9 @@ async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
     notebook
         .submit(
             r#"(concept (todo ?t title: ?x done: ?d)
-                 (xyz.todo ?t title: (:last (:text ?x)) done: (:last ?d)))
+                 (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one) (xyz.todo/done of: ?t is: ?d cardinality: :one))
                (concept (todo ?t title: ?x pinned: ?p)
-                 (xyz.note ?t title: (:last (:text ?x)) pinned: (:last ?p)))
+                 (xyz.note/title of: ?t is: ?x as: :text cardinality: :one) (xyz.note/pinned of: ?t is: ?p cardinality: :one))
                (assert (todo todo:1 title: "Buy milk" done: false))
                (assert (todo note:1 title: "Call Ada" pinned: true))"#,
         )
@@ -2751,10 +2765,10 @@ async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
 async fn it_keeps_definitions_on_a_branch_under_their_signatures() -> Result<()> {
     let notebook = Notebook::open().await?;
     let definitions = [
-        "(concept (todo ?t title: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
-        "(concept (todo ?t name: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
+        "(concept (todo ?t title: ?x) (xyz.todo/text ?t ?x as: :text cardinality: :one))",
+        "(concept (todo ?t name: ?x) (xyz.todo/text ?t ?x as: :text cardinality: :one))",
         // The first, corrected: the same signature.
-        "(concept (todo ?t title: ?x) (xyz.todo ?t title: (:last (:text ?x))))",
+        "(concept (todo ?t title: ?x) (xyz.todo/title ?t ?x as: :text cardinality: :one))",
     ];
     let name: AttributeDescriptor =
         serde_json::from_value(json!({ "the": "syntax.name/is", "as": "text:" }))?;
@@ -2818,8 +2832,8 @@ async fn it_keeps_definitions_on_a_branch_under_their_signatures() -> Result<()>
     assert_eq!(
         kept,
         vec![
-            "(concept (todo ?t name: ?x) (xyz.todo ?t text: (:last (:text ?x))))",
-            "(concept (todo ?t title: ?x) (xyz.todo ?t title: (:last (:text ?x))))",
+            "(concept (todo ?t name: ?x) (xyz.todo/text ?t ?x as: :text cardinality: :one))",
+            "(concept (todo ?t title: ?x) (xyz.todo/title ?t ?x as: :text cardinality: :one))",
         ]
     );
     Ok(())
@@ -2976,7 +2990,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     // out of a note written after it.
     notebook
         .submit(
-            "(rule (assert (xyz.signed ?n by: (:last (:text ?who))))
+            "(rule (assert (xyz.signed/by of: ?n is: ?who as: :text cardinality: :one))
                (xyz.note ?n about: {:author ?who}))",
         )
         .await?;
@@ -3013,9 +3027,9 @@ async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<(
                    (xyz.name.first/name of: ?c is: ?n as: :entity in: :control cardinality: :many))
                  (concept (name/second name: ?n)
                    (xyz.name.second/name of: ?c is: ?n as: :entity in: :control cardinality: :many))
-                 (rule (assert (xyz.name ?n referent: (:last (:entity concept:a))))
+                 (rule (assert (xyz.name/referent of: ?n is: concept:a as: :entity cardinality: :one))
                    (name/first name: ?n))
-                 (rule (assert (xyz.name ?n referent: (:last (:entity concept:b))))
+                 (rule (assert (xyz.name/referent of: ?n is: concept:b as: :entity cardinality: :one))
                    (name/second name: ?n))";
     let first = "(assert (name/first name: name:todo))";
     let second = "(assert (name/second name: name:todo))";
@@ -3041,9 +3055,12 @@ async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<(
         ]
     );
     assert_eq!(
-        report(&mut twice, "(select (xyz.name ?n referent: (:last ?r)))")
-            .await?
-            .len(),
+        report(
+            &mut twice,
+            "(select (xyz.name/referent of: ?n is: ?r cardinality: :one))"
+        )
+        .await?
+        .len(),
         1
     );
     Ok(())
@@ -3060,8 +3077,8 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     notebook
         .submit(
             r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
-               (assert (xyz.note text: (:text "by label") of: note:1))
-               (assert (xyz.note note:2 text: (:text "by position")))"#,
+               (assert (xyz.note text: "by label" of: note:1))
+               (assert (xyz.note note:2 text: "by position"))"#,
         )
         .await?;
 
@@ -3439,7 +3456,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
     // the document that says it is written.
     let retracted = notebook
         .submit(
-            r#"(assert (xyz.todo todo:9 text: (:text "kept")))
+            r#"(assert (xyz.todo/text of: todo:9 is: "kept" as: :text))
                (retract (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#,
         )
         .await;
@@ -3593,7 +3610,7 @@ async fn it_names_one_entity_of_a_number_read_and_written() -> Result<()> {
     let made = report(&mut notebook, "(select (todo ?t n: ?n ...))").await?;
     assert_eq!(made.len(), 1, "{made:?}");
     notebook
-        .submit(r#"(assert (xyz.todo (:id xyz.todo list: list:home n: 1) tag: (:text "shop")))"#)
+        .submit(r#"(assert (xyz.todo/tag of: (:id xyz.todo list: list:home n: 1) is: "shop" as: :text))"#)
         .await?;
     let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
     let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
@@ -4253,7 +4270,8 @@ async fn it_pins_a_rule_written_by_hand() -> Result<()> {
 /// of it as an integer or an entity answers nothing, as text it
 /// answers, and a join through a typed read of it answers as the same
 /// join through the stored attribute's line. The kernel's spelling, the
-/// value wrapped in its type, `(:text ?n)`, reads the same. A derived
+/// value wrapped in its type, `(:text ?n)`, is no document's: it is
+/// refused, naming `as:`. A derived
 /// attribute takes no `cardinality:`, which is what its rules conclude,
 /// and `as:` with no `is:` to type is refused.
 #[dialog_common::test]
@@ -4276,8 +4294,6 @@ async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result
             home.clone(),
         ),
         ("(select (list/label ?l is: ?n as: :text))", home.clone()),
-        ("(select (list/label ?l (:text ?n)))", home.clone()),
-        ("(select (list/label ?l (:integer ?n)))", vec![]),
     ] {
         assert_eq!(report(&mut notebook, read).await?, answers, "{read}");
     }
@@ -4300,6 +4316,11 @@ async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result
             "cardinality:",
         ),
         ("(select (list/label of: ?l other: ?n as: :text))", "as:"),
+        ("(select (list/label ?l (:text ?n)))", "is: ?n as: :text"),
+        (
+            "(select (list/label ?l (:integer ?n)))",
+            "is: ?n as: :integer",
+        ),
     ] {
         let refused = notebook
             .submit(read)
@@ -4439,14 +4460,15 @@ async fn it_refuses_a_pick_on_a_concept_read() -> Result<()> {
             .collect();
         assert!(
             refused.len() == 1
-                && refused[0].contains(&format!("(:{pick} …)"))
-                && refused[0].contains("bare"),
+                && refused[0].contains(&format!("(:{pick} "))
+                && refused[0].contains("a document writes no wrapper")
+                && refused[0].contains("a concept's lines say"),
             "{read}: {refused:?}"
         );
     }
     let checked = dialog_notation::check(
         &mut dialog_notation::Analyzer::new()?,
-        &format!("{concept} (select (xyz.n ?t w: (:max ?w)) (xyz.n ?t w: (:max ?w)))"),
+        &format!("{concept} (select (xyz.n/w of: ?t is: (max ?w)) (xyz.n/w of: ?t is: (max ?w)))"),
     );
     assert!(
         checked.refusals().next().is_none(),

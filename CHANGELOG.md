@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### A document writes no wrapper: a line says a value's type, cardinality and layer
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A value wrapped as the
+kernel reads it, in a type `(:integer ?n)`, a pick `(:last ?x)`, a
+cardinality `(:one ?x)`, a listed type's cases `(:among ?s cases: [:a :b])`
+or a layer `(:control ?x)`, is refused wherever a document writes it, as
+`Error::Refused` naming the line to write in its place. The walker still
+writes these for a line, and the kernel still reads them.
+
+What this changes for you:
+
+- A wrapped field of a domain read is written as a line:
+  `(xyz.n ?x v: (:one (:integer 3)))` is
+  `(xyz.n/v of: ?x is: 3 as: :integer cardinality: :one)`, `(:last ?x)` is
+  `cardinality: :one`, `(:all ?x)` is `cardinality: :many`, `(:max ?x)` is
+  `is: (max ?x)`, `(:control …)` is `in: :control`, and
+  `(:among (:entity ?s) cases: [:open :done])` is `as: [:open :done]`. This
+  holds in a write, a `when`, a rule's head and premises, a select's head
+  and premises, `unless` and a concept's body. The refusal writes the line
+  out.
+- A write of several fields of one domain under `:one`, which was one
+  read with each field wrapped, is a line a form, or a write through a
+  concept: a write's head is one application.
+- A derived attribute types its labelled fields with `as:` a map of a
+  label to its type, `(list/tally ?l status: ?s as: {:status :text})`, and
+  takes a listed type's cases as a line does, `as: [:open :done]`, where
+  `(:text ?s)` and `(:among …)` were written. An elector on its value in a
+  read is written as on a line, `(list/size of: ?l is: (max ?n))`, where
+  `(:max ?n)` was; in a head that derives, `(max ?n)` is still a fold.
+- A cardinality on a derived attribute's field, `(:one ?n)`, is refused
+  saying its cardinality is what its rules conclude, and a wrapped field
+  of a concept read saying to read the field as it is: the concept's lines
+  say it.
+- A kernel tree built through the Rust API and passed to `compile` is no
+  document, and compiles with its wrappers as before. Rules a branch
+  holds are unchanged. A document text kept and checked again is refused
+  where it writes a wrapper, and is mended by writing the line the
+  refusal names.
+
+Why: the maintainer's word, "more forms add things to keep in
+mind/context": a line already says each of these, so the wrapper was a
+second spelling of one thing.
+
 ### A document is applied by the notation's own driver, its forms a sequence
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). `dialog_notation::apply`
@@ -217,19 +260,17 @@ What this changes for you:
   conclusion of the attribute known nothing is said, so a read before
   the document that concludes it is accepted as before.
 - A derived attribute is concluded and read on the default layer only:
-  `(rule (list/label ?l (:control ?n)) …)`, which compiled and issued a
-  command into it every round, and a read of one on a layer, `(select
-  (list/label ?l (:control ?n)))`, which answered nothing, are refused
-  naming the attribute and the layer, and so is `in: :control` on one,
-  which was kept as a field named `in`. A command is a concept of its
-  own.
+  `in: :control` on one, `(list/label of: ?l is: ?n in: :control)`, in a
+  rule's head, where it issued a command into the attribute every round,
+  and in a read, where it answered nothing, is refused naming the
+  attribute and the layer, where it was kept as a field named `in`. A
+  command is a concept of its own.
 - A line of a concept or a command is a stored attribute: one that names
   a derived attribute, `(concept (list/go label: ?x) (list/label of: ?c
   is: ?x in: :control cardinality: :many))`, is refused at the
   declaration naming the line, where the concept was left undeclared and
   its use refused as an attribute of `list`. A line is told by
-  `cardinality:`, `as:`, `in:` or `by:`, or by the cardinality its value
-  is wrapped in, `is: (:one (:text ?v))`.
+  `cardinality:`, `as:`, `in:` or `by:`.
 
 Why: a derived attribute should read as a stored one does, and a tree should compile in any process that reads it.
 
@@ -291,11 +332,10 @@ What this changes for you:
   attribute to write instead offers one that is accepted, its domain
   dotted, `xyz.foo.bar/baz` for `foo/bar/baz`. A word with a `:` that is
   no entity, `:on/htmx:after-swap`, is refused saying so, not in the URI
-  parser's text. A read of a concept with a field wrapped in a type or a
-  cardinality the concept says itself, `(a ?t n: (:one ?v))`, is refused
-  naming the field, and so is one wrapped in a pick, `(:last ?v)`,
-  `(:all ?v)`, `(:max ?v)` or `(:min ?v)`, which a concept's
-  `cardinality:` and its head's elector replaced. A select whose only premise must not hold is told
+  parser's text. A read of a concept with a field wrapped in a type, a
+  cardinality or a pick, `(a ?t n: (:one ?v))`, is refused saying that
+  the concept's lines say the field's type and cardinality, and to read
+  the field as it is, `n: ?v`. A select whose only premise must not hold is told
   that its first part is its head and is not read. `check` says a
   compile refusal once per form. An element a view does not make,
   `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where

@@ -914,19 +914,18 @@ mod tests {
         Ok(())
     }
 
-    /// A concept's lines are declared as the kernel reads them, however
-    /// their wrappers are written: a cardinality, `(:one (:text ?x))`,
-    /// an elector, a variant's cases and an entry of a collection each
-    /// give the line its type, its cardinality and its label, and the
-    /// value under them is what it is.
+    /// A concept's lines are declared as the kernel reads them: a type,
+    /// a cardinality, an elector, a variant's cases and an entry of a
+    /// collection each give the line its type, its cardinality and its
+    /// label, and the value under them is what it is.
     #[test]
     fn it_declares_every_line_as_the_kernel_reads_it() -> Result<(), Error> {
         let checked = check(
             &mut Analyzer::new()?,
             r#"(concept (todo ?t text: ?x state: ?s list: ?l)
-                 (xyz.todo ?t text: (:one (:text ?x))
-                              state: (:many (:among (:entity ?s) cases: [:open :done]))
-                              list: (:last (:entity ?l))))
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :many)
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one))
                (concept (account ?a status: (max ?s))
                  (xyz.account/status of: ?a is: ?s as: [:active :suspended] cardinality: :many))"#,
         );
@@ -1002,7 +1001,8 @@ mod tests {
 
 ; Something to do, on a list.
 (concept (todo ?t text: ?x done: ?d)
-  (xyz.todo ?t text: (:last (:text ?x)) done: (:last ?d)))
+  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+  (xyz.todo/done of: ?t is: ?d cardinality: :one))
 
 ; Adding a to-do.
 (concept (todo/add todo: ?t text: ?x)
@@ -1083,7 +1083,7 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
-            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(concept (todo/add text: ?x)\n  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))\n(assert (todo todo:1 text: \"milk\"))\n(assert (todo/add text: \"eggs\"))\n",
+            "(concept (todo ?t text: ?x)\n  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))\n(concept (todo/add text: ?x)\n  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))\n(assert (todo todo:1 text: \"milk\"))\n(assert (todo/add text: \"eggs\"))\n",
         );
         assert_eq!(checked.refusals().count(), 0);
         let [warning] = checked.diagnostics.as_slice() else {
@@ -1213,7 +1213,7 @@ mod tests {
 
     const LIST: &str = "(concept (todo ?t text: ?x list: ?l)
   (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
-  (xyz.todo ?t list: (:last ?l)))
+  (xyz.todo/list of: ?t is: ?l cardinality: :one))
 
 (concept (list ?l item: {?k ?i})
   (xyz.list/?k of: ?l is: ?i by: :position cardinality: :many))
@@ -1583,10 +1583,10 @@ mod tests {
     }
 
     /// A derived attribute is what rules conclude, on the default layer:
-    /// one concluded or read on a layer, `(:control ?n)`, the only layer
+    /// one concluded or read on a layer, `in: :control`, the only layer
     /// there is (`kernel::LAYERS`), is refused naming the attribute, in a
-    /// head unlabeled or under `is:`, and in a select, a premise and
-    /// `unless`.
+    /// head, a select, a premise and `unless`, and in the kernel's
+    /// spelling, which no document writes.
     #[test]
     fn it_refuses_a_derived_attribute_on_a_layer() -> Result<(), Error> {
         let list = "(concept (list ?l name: ?n) \
@@ -1594,14 +1594,15 @@ mod tests {
                     (rule (list/label ?l ?n) (list ?l name: ?n))";
         for layer in crate::kernel::LAYERS {
             for form in [
-                format!("(rule (list/label ?l (:{layer} ?n)) (list ?l name: ?n))"),
-                format!("(rule (list/label ?l is: (:{layer} ?n)) (list ?l name: ?n))"),
-                format!("(select (list/label ?l (:{layer} ?n)))"),
-                format!("(rule (xyz.out ?l v: ?n) (list/label ?l (:{layer} ?n)))"),
+                format!("(rule (list/label of: ?l is: ?n in: :{layer}) (list ?l name: ?n))"),
+                format!("(select (list/label of: ?l is: ?n in: :{layer}))"),
+                format!("(rule (xyz.out ?l v: ?n) (list/label of: ?l is: ?n in: :{layer}))"),
                 format!(
                     "(select (list ?l name: ?n) (list ?l name: ?n) \
-                     (unless (list/label ?l (:{layer} ?q))))"
+                     (unless (list/label of: ?l is: ?q in: :{layer})))"
                 ),
+                // The kernel's spelling is refused as every wrapper is.
+                format!("(select (list/label ?l (:{layer} ?n)))"),
             ] {
                 let text = format!("{list} {form}");
                 let checked = check(&mut Analyzer::new()?, &text);
@@ -1691,8 +1692,7 @@ mod tests {
     }
 
     /// A line is a line however it says what it is: by `cardinality:`,
-    /// by `as:`, `in:` or `by:`, or by the cardinality its value is
-    /// wrapped in, `is: (:one (:text ?v))`. One that names a derived
+    /// or by `as:`, `in:` or `by:`. One that names a derived
     /// attribute is refused at the declaration in each form, in a concept
     /// and a command, and never at a use that quotes what it expanded to.
     #[test]
@@ -1700,10 +1700,10 @@ mod tests {
         let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one)) \
                  (rule (a/x ?t ?n) (a ?t n: ?n))";
         for declaration in [
-            "(concept (k ?t v: ?v) (a/x ?t is: (:one (:text ?v))))",
+            "(concept (k ?t v: ?v) (a/x ?t is: ?v cardinality: :one))",
             "(concept (k ?t v: ?v) (a/x ?t is: ?v as: :text))",
-            "(concept (k/go v: ?v) (a/x ?c is: (:one (:text ?v)) in: :control))",
-            "(concept (k/go v: ?v) (a/x ?c is: (:many ?v) in: :control))",
+            "(concept (k/go v: ?v) (a/x ?c is: ?v in: :control))",
+            "(concept (k/go v: ?v) (a/x ?c is: ?v cardinality: :many in: :control))",
         ] {
             let text = format!("{a} {declaration} (assert (xyz.a x:2 n: \"w\"))");
             let checked = check(&mut Analyzer::new()?, &text);
@@ -1805,8 +1805,9 @@ mod tests {
 
     /// A field of a concept read is the concept's: a cardinality or a
     /// type the read wraps it in, which the concept says itself, is
-    /// refused naming the field and the concept, not as a value "written
-    /// under two cardinalities" the author never wrote twice.
+    /// refused as every wrapper a document writes is, saying to read the
+    /// field as it is, not as a value "written under two cardinalities"
+    /// the author never wrote twice.
     #[test]
     fn it_refuses_a_wrapped_field_of_a_concept_read_naming_it() -> Result<(), Error> {
         let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one))";
@@ -1822,8 +1823,9 @@ mod tests {
                 .collect();
             assert!(
                 refused.len() == 1
-                    && refused[0].contains("wraps `n:`")
-                    && refused[0].contains("the concept `a`")
+                    && refused[0].contains("a document writes no wrapper")
+                    && refused[0].contains("a concept's lines say")
+                    && refused[0].contains("`n: ?v`")
                     && !refused[0].contains("written under two"),
                 "{form}: {refused:?}"
             );

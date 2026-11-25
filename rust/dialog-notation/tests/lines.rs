@@ -337,3 +337,43 @@ async fn it_lists_a_derived_attributes_cases_as_a_line_does() -> Result<()> {
     );
     Ok(())
 }
+
+/// The walker still writes every wrapper for a line, and the kernel still
+/// reads each: a type, a cardinality, an elector, a listed type's cases
+/// and a layer each come out of a line wrapped and compile. A kernel tree
+/// built through the Rust API is no document, and compiles with them.
+#[dialog_common::test]
+fn it_still_reads_every_wrapper_the_walker_writes() -> Result<()> {
+    for (line, wrapped) in [
+        ("(xyz.n/v of: ?x is: ?v as: :integer)", "v: (:integer ?v)"),
+        ("(xyz.n/v of: ?x is: ?v cardinality: :one)", "v: (:one ?v)"),
+        ("(xyz.n/v of: ?x is: (max ?v))", "v: (:max ?v)"),
+        (
+            "(xyz.n/v of: ?x is: ?v as: [:a :b])",
+            "v: (:among (:entity ?v) cases: [:a :b])",
+        ),
+        (
+            "(xyz.n/v of: ?x is: ?v cardinality: :many in: :control)",
+            "v: (:control (:many ?v))",
+        ),
+    ] {
+        let mut analyzer = dialog_notation::Analyzer::new()?;
+        let checked = dialog_notation::check(&mut analyzer, &format!("(select {line})"));
+        assert!(
+            checked.refusals().next().is_none(),
+            "{line}: {:?}",
+            checked.diagnostics()
+        );
+        let [tree] = checked.analyzed() else {
+            panic!("{line}: one tree, {:?}", checked.analyzed());
+        };
+        assert!(tree.to_string().contains(wrapped), "{line}: {tree}");
+        assert!(dialog_notation::compile(tree).is_ok(), "{line}: {tree}");
+    }
+    let built = dialog_notation::parse(
+        "(rule (report (xyz.n ?x v: (:one (:integer ?v)))) (xyz.n ?x v: (:one (:integer ?v))))",
+    )?
+    .remove(0);
+    assert!(dialog_notation::compile(&built).is_ok());
+    Ok(())
+}

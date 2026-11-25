@@ -242,7 +242,7 @@ mod tests {
     #[dialog_common::test]
     fn it_says_every_refusal_of_a_document_and_keeps_nothing_of_it() -> Result<(), Error> {
         let broken = "(concept (todo ?t text: ?x)
-  (xyz.todo ?t text: (:last (:text ?x))))
+  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))
 
 (rule (all (assert (xyz.todo ?t text: ?x))
            (retract (xyz.draft ?t text: ?x)))

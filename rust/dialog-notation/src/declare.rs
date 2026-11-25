@@ -66,8 +66,8 @@ pub struct Line {
     /// The attribute's cardinality, `one` or `many`, as Dialog-DB reads
     /// it. A line of a concept or a command always writes
     /// `cardinality:`, so for one it is what was written. A concept
-    /// written as reads of a domain says it by `(:one …)` or a pick, and
-    /// is `many` where it says none, since such a read takes every claim.
+    /// written as a read of a domain, `(xyz.todo ?t text: ?x)`, says none,
+    /// and is `many`, since such a read takes every claim.
     /// None only where the line does not compile.
     pub cardinality: Option<String>,
     /// `in:`, the layer, as written.
@@ -114,7 +114,7 @@ fn keyword(node: Option<&Syntax>) -> Option<String> {
 }
 
 /// The lines a body part says: one, for a line, or one a field, for a
-/// read written with wrappers.
+/// read of a domain, as the walker writes the lines of one entity.
 fn lines_of(part: &Syntax, description: Option<String>) -> Result<Vec<Line>, Error> {
     let (Some(name), Some(operand)) = (part.applies(), part.operand()) else {
         return Ok(Vec::new());

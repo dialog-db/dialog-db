@@ -2031,3 +2031,14 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 **Asked.** The maintainer, of the entry above, "a derived attribute is one value": "Rule without labels is just sugar for (rule (list/label of: ?l is: ?n) ...). I think it also ok to have other labeled parameters."
 
 **Decided.** By the maintainer, the same day, reversing the coordinating session's decision of that morning: a derived attribute's head and reads carry labels again, each the field it names, and its two terms unlabeled are sugar for `of:` and `is:`, `(list/label ?l ?n)` being `(list/label of: ?l is: ?n)`, which is now read so. What did not hang on the reversed decision stays: `in:` and a layer on a derived attribute are refused, its declared labels are spelled by the name rule and held to the room a relation leaves, a line of a concept or a command naming a derived attribute is refused, and so is a name that is both a concept and a derived attribute. Pinned by `it_concludes_and_reads_a_derived_attribute_with_labels` (`tests/notation.rs`) and the expansion test in `src/expand.rs`.
+
+## 2026-11-25, Decided: a document writes no wrapper
+
+**Asked.** The maintainer, of gaps row 56, why the wrappers are back, `(:integer ?n)` and `(:one …)` written where nothing else says a type or a cardinality.
+
+**Decided.** By the maintainer: "I think we should remove it and potentially add formula per type or something like that. More forms add things to keep in mind/context." A document writes no wrapper. A type, a pick, a cardinality, a listed type's cases or a layer written in a document, anywhere it stands, is refused as `Error::Refused`, naming the line to write in its place. The walker still writes them for a line and the kernel still reads them; a kernel tree built through the Rust API is no document and compiles with them.
+
+**Built.** Every position row 56 listed has a line spelling: four already worked, and two were added, `as:` a map of a label to its type on a derived attribute's labelled fields, `as: {:status :text}`, and an elector on a derived attribute's value, `is: (max ?n)`, as on a line. A sixth position turned up while building, a listed type on a derived attribute, which the kernel's `(:among …)` said and nothing else did: `as: [:open :done]` on a derived attribute, as on a line, is added too. What a document gives up is one form for a write of several fields of one domain under `:one`: it is a line a form, or a concept.
+
+**Open.** "A formula per type" is asked of the maintainer and not built.
+
