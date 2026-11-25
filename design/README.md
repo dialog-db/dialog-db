@@ -99,3 +99,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
+- [A value computed from many writers' claims either loses writes or keeps every one](computed-values.md):
+  **Directing.** Tonk's counter loses concurrent increments; kept as
+  claims they survive, but the store grows with the writes and no
+  authored rule can count them. Owned cells folded on read, a
+  G-Counter's shape, are being weighed against four other approaches.
