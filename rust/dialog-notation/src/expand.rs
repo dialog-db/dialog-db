@@ -4157,7 +4157,6 @@ mod tests {
         // Named by what was written; Dialog-DB's name for it is made
         // where it is compiled.
         let open = syntax::derived_read("list", "count-open");
-        let count = syntax::derived_read("list", "count");
         let concluded = expanded(
             lists,
             "(rule (list/count-open ?l (count ?t))
@@ -4178,15 +4177,17 @@ mod tests {
                 "(rule (report ({open} list:home is: ?n)) ({open} list:home is: ?n))"
             )]
         );
+        // One value: a label other than `is:` is refused (gaps row 48).
         let labelled = expanded(
             lists,
             "(rule (list/count ?l status: ?s count: (count ?t))
                (todo ?t list: ?l state: ?s ...))",
         )
-        .unwrap();
+        .unwrap_err()
+        .to_string();
         assert!(
-            labelled[0].starts_with(&format!("(rule ({count} ?l count: (count ?t) status: ?s) ")),
-            "{labelled:?}"
+            labelled.contains("a derived attribute is one value"),
+            "{labelled}"
         );
         // Under no declared concept, the same spelling is an attribute.
         assert_eq!(
