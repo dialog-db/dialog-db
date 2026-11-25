@@ -65,9 +65,9 @@ use dialog_effects::{
     Rejection,
     blob::{BlobWriter, Import as BlobImportEffect},
 };
-use dialog_peer::Peer;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_peer::helpers::test_owned;
+use dialog_peer::{Peer, PeerSpace};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
 #[cfg(not(feature = "web-integration-tests"))]
@@ -2881,12 +2881,12 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
 /// A durable layer an author wrote many rows into and synced, and a
 /// follower that synced it, both on `storage` under keys `seed` derives
 /// (the follower's space included), with the follower's stack.
-struct Layered {
+struct Layered<S: PeerSpace = VolatileSpace> {
     notes: Entity,
     /// The name of the follower's space.
     space: String,
     follower: crate::Stack,
-    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+    env: Counting<Peer<S, dialog_peer::Session>>,
 }
 
 /// The `doc/note` of `doc` as `text`, written into `layer`.
@@ -2899,9 +2899,7 @@ fn noted(doc: &Entity, text: &str, layer: &Entity) -> impl dialog_corpus::Statem
 }
 
 /// The session a test performs through on `peer`.
-async fn session_of(
-    peer: &Peer<VolatileSpace>,
-) -> Result<Peer<VolatileSpace, dialog_peer::Session>> {
+async fn session_of<S: PeerSpace>(peer: &Peer<S>) -> Result<Peer<S, dialog_peer::Session>> {
     Ok(peer
         .session(b"test")
         .space(peer.state())
@@ -2910,12 +2908,12 @@ async fn session_of(
 }
 
 /// [`Layered`] over `s3`, its profile opened at `location` on `storage`.
-async fn layered(
+async fn layered<S: PeerSpace>(
     seed: &Seed,
     s3: &S3Address,
-    storage: &Storage<VolatileSpace>,
+    storage: &Storage<S>,
     location: &Location,
-) -> Result<Layered> {
+) -> Result<Layered<S>> {
     use crate::{LayerDeclaration, LayerType};
     use dialog_corpus::{Changes, Statement as _};
 
@@ -2998,7 +2996,7 @@ async fn layered(
     })
 }
 
-impl Layered {
+impl<S: PeerSpace> Layered<S> {
     /// The follower writes its note as `text`, and how many blocks it
     /// fetched from the remote to write it.
     async fn write(&self, text: &str) -> Result<u64> {
@@ -8201,5 +8199,119 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
         .try_vec()
         .await?;
     assert_eq!(rows.len(), 2);
+    Ok(())
+}
+
+/// Two writes into a durable layer through one replica, racing on one
+/// thread, both land, on the platform's durable storage: the filesystem
+/// natively, and IndexedDB in the browser.
+///
+/// A write through the stack commits a transaction on the primary and
+/// publishes its head with a compare-and-swap. The loser of a race
+/// between two of them is meant to lose that compare-and-swap with
+/// `VersionMismatch`, and the stack runs it again on the new head. Every
+/// note written is then in the layer.
+///
+/// A reproduction: it fails on main on the native filesystem, in every
+/// run. There the head's cell is written under a lock file that a second
+/// writer does not wait for, and the second write fails with
+/// "Concurrent write in progress" instead of `VersionMismatch`, which
+/// nothing runs again. In the browser it passes: IndexedDB serializes the
+/// two publishes, and the loser loses the compare-and-swap. The volatile
+/// run is [`it_lands_durable_writes_racing_on_one_replica_in_memory`].
+#[dialog_common::test]
+async fn it_lands_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    use dialog_effects::storage::Directory;
+    use dialog_peer::helpers::test_owned;
+
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    #[cfg(not(target_arch = "wasm32"))]
+    let (_root, storage, directory) = {
+        use dialog_storage::provider::storage::NativeSpace;
+        let root = tempfile::tempdir()?;
+        let directory = Directory::At(root.path().to_string_lossy().into_owned());
+        (
+            root,
+            test_owned(Storage::<NativeSpace>::default()).await,
+            directory,
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (storage, directory) = {
+        use dialog_storage::provider::storage::WebSpace;
+        (
+            test_owned(Storage::<WebSpace>::default()).await,
+            Directory::Temp,
+        )
+    };
+    let location = Location::new(directory, unique_name("layered"));
+    race_two_durable_writes(&layered(&seed, &s3, &storage, &location).await?).await
+}
+
+/// [`it_lands_durable_writes_racing_on_one_replica`] in memory, where a
+/// publish compares and swaps under one lock with nothing awaited between
+/// the read and the write, so the loser loses the compare-and-swap and
+/// runs again: no write is lost.
+#[dialog_common::test]
+async fn it_lands_durable_writes_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("layered"));
+    race_two_durable_writes(&layered(&seed, &s3, &storage, &location).await?).await
+}
+
+/// Five rounds of two writes into `layered`'s durable layer, racing, each
+/// to a note of its own; then every note written is in the layer.
+async fn race_two_durable_writes<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    use dialog_corpus::Relation;
+    use dialog_query::attribute::Relation as QueryRelation;
+    use dialog_query::query::Output as _;
+    use dialog_query::{AttributeQuery, Term};
+
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let (a, b) = (format!("doc:a-{round}"), format!("doc:b-{round}"));
+        let (first, second) = futures_util::join!(
+            layered
+                .follower
+                .assert(noted(&a.parse()?, "a", &layered.notes))
+                .perform(&layered.env),
+            layered
+                .follower
+                .assert(noted(&b.parse()?, "b", &layered.notes))
+                .perform(&layered.env),
+        );
+        first.with_context(|| format!("round {round}: the first write lands"))?;
+        second.with_context(|| format!("round {round}: the second write lands"))?;
+        notes.push((a, "a".into()));
+        notes.push((b, "b".into()));
+    }
+
+    let query = AttributeQuery::from(
+        Term::<QueryRelation>::from(QueryRelation::from("doc/note".parse::<Relation>()?))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<String>::var("v")),
+    )
+    .with_layer(Term::Constant(Value::Entity(layered.notes.clone())));
+    let claims = layered
+        .follower
+        .query()
+        .select(query)
+        .perform(&layered.env)
+        .try_vec()
+        .await?;
+    let mut read: Vec<(String, String)> = claims
+        .into_iter()
+        .filter(|claim| !claim.of.to_string().starts_with("doc:bulk-"))
+        .map(|claim| match claim.is {
+            Value::String(text) => Ok((claim.of.to_string(), text)),
+            other => Err(anyhow::anyhow!("a note that is no text: {other:?}")),
+        })
+        .collect::<Result<_>>()?;
+    read.sort();
+    notes.sort();
+    assert_eq!(read, notes, "the layer holds every note either write wrote");
     Ok(())
 }
