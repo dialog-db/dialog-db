@@ -545,6 +545,12 @@ async fn it_refuses_a_report_two_sites_would_derive_alike() -> Result<()> {
         "{:?}",
         refused.err()
     );
+    // What it says names no relation the notation made.
+    let said = refused
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(session::leaks(&said).is_empty(), "{said}");
     drop(kept);
     Ok(())
 }

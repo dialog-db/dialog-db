@@ -1761,6 +1761,43 @@ async fn it_refuses_a_concept_over_a_name_installed_rules_derive() -> Result<()>
     Ok(())
 }
 
+/// A head whose variable no premise binds is refused naming the
+/// variable as the author wrote it and the field it stands in, not the
+/// rule's identity or the field Dialog-DB names it by. What `compile`
+/// refuses, called directly, names a derived attribute as it is written.
+#[dialog_common::test]
+async fn it_says_an_unbound_head_variable_as_the_author_wrote_it() -> Result<()> {
+    let list = "(concept (list ?l name: ?n)
+          (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))";
+    for text in [
+        "(rule (xyz.out ?t v: ?z) (xyz.in ?t w: ?w))".to_string(),
+        "(rule (assert (xyz.out ?t v: ?z)) (xyz.in ?t w: ?w))".to_string(),
+        format!("{list} (rule (list/x ?l ?z) (list ?l name: ?n))"),
+    ] {
+        let mut notebook = Notebook::open().await?;
+        let said = match notebook.submitted(&text).await {
+            Err(error) => format!("{error:#}"),
+            Ok(done) => panic!("{text} was not refused: {done:?}"),
+        };
+        assert!(said.contains("?z"), "{text}: {said}");
+        assert!(session::leaks(&said).is_empty(), "{text}: {said}");
+    }
+    let text = format!("{list} (rule (list/count-open ?l (count ?t)) (xyz.todo ?t list: ?l))");
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(&text)?);
+    let refused: Vec<String> = analysis
+        .analyzed
+        .iter()
+        .filter_map(|tree| dialog_notation::compile(tree).err())
+        .map(|error| error.to_string())
+        .collect();
+    assert!(!refused.is_empty(), "nothing refused");
+    for said in refused {
+        assert!(said.contains("list/count-open"), "{said}");
+        assert!(session::leaks(&said).is_empty(), "{said}");
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a

@@ -61,6 +61,25 @@ pub fn leaks(message: &str) -> Vec<String> {
         }
         at += 1;
     }
+    // An identity Dialog-DB gives a rule or a concept, `concept:8w8P…`,
+    // and the record it prints of one, `{this: Entity,v: Any,}`.
+    for marker in ["concept:", "rule:"] {
+        let mut rest = message;
+        while let Some(at) = rest.find(marker) {
+            let tail = &rest[at + marker.len()..];
+            let id: String = tail
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            if id.len() >= 32 {
+                found.push(format!("{marker}{id}"));
+            }
+            rest = &tail[id.len()..];
+        }
+    }
+    if message.contains("{this: ") {
+        found.push("{this: …}".into());
+    }
     let mut rest = message;
     while let Some(at) = rest.find("dialog.n") {
         let tail = &rest[at..];
