@@ -140,7 +140,12 @@ What this changes for you:
   gathered, and what `(count ?x)` of it counts, is unchanged: a set.
 - A derived attribute read with its entity under `of:`,
   `(list/label of: ?l is: ?n)`, is read as `(list/label ?l ?n)`, of which
-  it is the spelling, where it was refused as needing its entity.
+  it is the spelling, where it was refused as needing its entity. `as:`
+  on it is the type of the value under `is:`, as on a line,
+  `(list/label of: ?l is: ?n as: :text)`, where it was read as a field
+  named `as` and answered nothing. `cardinality:` on one is refused, its
+  cardinality being what its rules conclude, and so is `as:` with no
+  `is:` to type.
 - A count asked of what was not gathered says that count counts what
   was gathered, a set of distinct values, and how to count entities:
   gather a record that holds each, then count it. A fold not there yet

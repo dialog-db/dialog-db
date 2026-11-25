@@ -745,6 +745,38 @@ fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syn
             )));
         }
     };
+    // `as:` is the type of the value under `is:`, as on a line: the
+    // kernel's read wraps the value in it. A derived attribute's
+    // cardinality is what its rules conclude, and no read or head says it.
+    let mut terms = terms;
+    if terms.contains_key("cardinality") {
+        return Err(Error::Refused(format!(
+            "{tree} says `cardinality:` of `{concept}/{name}`, a derived attribute, whose \
+             cardinality is what its rules conclude: leave it out"
+        )));
+    }
+    if let Some(kind) = terms.remove("as") {
+        let typed = kind
+            .keyword()
+            .filter(|word| crate::kernel::TYPES.contains(word))
+            .ok_or_else(|| {
+                Error::Refused(format!(
+                    "{tree} gives `as:` {kind}, and a type is one of {}",
+                    crate::kernel::TYPES
+                        .iter()
+                        .map(|word| format!(":{word}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ))
+            })?;
+        let Some(value) = terms.remove("is") else {
+            return Err(Error::Refused(format!(
+                "{tree} gives `as:` and no `is:`: `as:` is the type of the value under `is:`; \
+                 type a labelled field by its value, `(:{typed} ?x)`"
+            )));
+        };
+        terms.insert("is".into(), wrap(typed, value)?);
+    }
     let room = 64 - syntax::DERIVED_LENGTH - 1;
     if let Some(label) = terms.keys().find(|label| label.len() > room) {
         return Err(Error::Refused(format!(
