@@ -8202,92 +8202,185 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
     Ok(())
 }
 
+/// `$race(&layered, $args...)` over a [`Layered`] keyed by `$seed`, on
+/// the platform's durable storage: the filesystem natively, in a
+/// directory of its own, and IndexedDB in the browser.
+macro_rules! on_durable_storage {
+    ($seed:expr, $s3:expr, $race:ident $(, $arg:expr)*) => {{
+        use dialog_effects::storage::Directory;
+        use dialog_peer::helpers::test_owned;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (_root, storage, directory) = {
+            use dialog_storage::provider::storage::NativeSpace;
+            let root = tempfile::tempdir()?;
+            let directory = Directory::At(root.path().to_string_lossy().into_owned());
+            (
+                root,
+                test_owned(Storage::<NativeSpace>::default()).await,
+                directory,
+            )
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (storage, directory) = {
+            use dialog_storage::provider::storage::WebSpace;
+            (
+                test_owned(Storage::<WebSpace>::default()).await,
+                Directory::Temp,
+            )
+        };
+        let location = Location::new(directory, unique_name("layered"));
+        $race(&layered($seed, $s3, &storage, &location).await? $(, $arg)*).await
+    }};
+}
+
+/// A [`Layered`] keyed by `seed`, in memory.
+async fn layered_in_memory(seed: &Seed, s3: &S3Address) -> Result<Layered> {
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("layered"));
+    layered(seed, s3, &storage, &location).await
+}
+
 /// Two writes into a durable layer through one replica, racing on one
 /// thread, both land, on the platform's durable storage: the filesystem
 /// natively, and IndexedDB in the browser.
 ///
 /// A write through the stack commits a transaction on the primary and
 /// publishes its head with a compare-and-swap. The loser of a race
-/// between two of them is meant to lose that compare-and-swap with
+/// between two of them loses that compare-and-swap with
 /// `VersionMismatch`, and the stack runs it again on the new head. Every
 /// note written is then in the layer.
 ///
-/// A reproduction: it fails on main on the native filesystem, in every
-/// run. There the head's cell is written under a lock file that a second
-/// writer does not wait for, and the second write fails with
-/// "Concurrent write in progress" instead of `VersionMismatch`, which
-/// nothing runs again. In the browser it passes: IndexedDB serializes the
-/// two publishes, and the loser loses the compare-and-swap. The volatile
-/// run is [`it_lands_durable_writes_racing_on_one_replica_in_memory`].
+/// On the filesystem the second write used to fail with "Concurrent
+/// write in progress": the head's cell is written under a lock file, and
+/// a second writer of the same process was refused it instead of waiting
+/// its turn, so it never reached the compare-and-swap and nothing ran it
+/// again. The volatile run is
+/// [`it_lands_durable_writes_racing_on_one_replica_in_memory`].
 #[dialog_common::test]
 async fn it_lands_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<()> {
-    use dialog_effects::storage::Directory;
-    use dialog_peer::helpers::test_owned;
-
     let seed = Seed::new(415);
     let _entropy = seed.entropy();
-    #[cfg(not(target_arch = "wasm32"))]
-    let (_root, storage, directory) = {
-        use dialog_storage::provider::storage::NativeSpace;
-        let root = tempfile::tempdir()?;
-        let directory = Directory::At(root.path().to_string_lossy().into_owned());
-        (
-            root,
-            test_owned(Storage::<NativeSpace>::default()).await,
-            directory,
-        )
-    };
-    #[cfg(target_arch = "wasm32")]
-    let (storage, directory) = {
-        use dialog_storage::provider::storage::WebSpace;
-        (
-            test_owned(Storage::<WebSpace>::default()).await,
-            Directory::Temp,
-        )
-    };
-    let location = Location::new(directory, unique_name("layered"));
-    race_two_durable_writes(&layered(&seed, &s3, &storage, &location).await?).await
+    on_durable_storage!(&seed, &s3, race_durable_writes, 2)
 }
 
-/// [`it_lands_durable_writes_racing_on_one_replica`] in memory, where a
-/// publish compares and swaps under one lock with nothing awaited between
-/// the read and the write, so the loser loses the compare-and-swap and
-/// runs again: no write is lost.
+/// [`it_lands_durable_writes_racing_on_one_replica`] in memory.
 #[dialog_common::test]
 async fn it_lands_durable_writes_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
     let _entropy = seed.entropy();
-    let storage = test_storage().await;
-    let location = Location::profile(seed.name("layered"));
-    race_two_durable_writes(&layered(&seed, &s3, &storage, &location).await?).await
+    race_durable_writes(&layered_in_memory(&seed, &s3).await?, 2).await
 }
 
-/// Five rounds of two writes into `layered`'s durable layer, racing, each
-/// to a note of its own; then every note written is in the layer.
-async fn race_two_durable_writes<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+/// Eight writes into a durable layer through one replica, racing, all
+/// land, on the platform's durable storage. Each round one of the eight
+/// wins the head and the others run again on it, so a write loses at
+/// most seven times, inside the stack's `MAX_RERUNS` of eight.
+#[dialog_common::test]
+async fn it_lands_eight_durable_writes_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_durable_writes, 8)
+}
+
+/// [`it_lands_eight_durable_writes_racing_on_one_replica`] in memory.
+#[dialog_common::test]
+async fn it_lands_eight_durable_writes_racing_on_one_replica_in_memory(
+    s3: S3Address,
+) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_durable_writes(&layered_in_memory(&seed, &s3).await?, 8).await
+}
+
+/// A write into a durable layer racing a sync of the stack, on one
+/// replica, lands, and the sync returns, on the platform's durable
+/// storage.
+#[dialog_common::test]
+async fn it_lands_a_durable_write_racing_a_sync(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_a_write_and_a_sync)
+}
+
+/// [`it_lands_a_durable_write_racing_a_sync`] in memory.
+#[dialog_common::test]
+async fn it_lands_a_durable_write_racing_a_sync_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_a_write_and_a_sync(&layered_in_memory(&seed, &s3).await?).await
+}
+
+/// Five rounds of `writers` writes into `layered`'s durable layer, racing,
+/// each to a note of its own; then every note written is in the layer.
+async fn race_durable_writes<S: PeerSpace>(layered: &Layered<S>, writers: usize) -> Result<()> {
+    use futures_util::future::join_all;
+
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let docs = (0..writers)
+            .map(|writer| format!("doc:w{writer}-{round}"))
+            .collect::<Vec<_>>();
+        let entities = docs
+            .iter()
+            .map(|doc| doc.parse::<Entity>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let written = join_all(entities.iter().map(|doc| {
+            layered
+                .follower
+                .assert(noted(doc, "w", &layered.notes))
+                .perform(&layered.env)
+        }))
+        .await;
+        for (writer, result) in written.into_iter().enumerate() {
+            result.with_context(|| format!("round {round}: writer {writer} lands"))?;
+        }
+        notes.extend(docs.into_iter().map(|doc| (doc, "w".to_string())));
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note the writers wrote"
+    );
+    Ok(())
+}
+
+/// Five rounds of a write into `layered`'s durable layer racing a sync of
+/// the stack; then every note written is in the layer.
+async fn race_a_write_and_a_sync<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let doc = format!("doc:s-{round}");
+        let (written, synced) = futures_util::join!(
+            layered
+                .follower
+                .assert(noted(&doc.parse()?, "s", &layered.notes))
+                .perform(&layered.env),
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+        );
+        written.with_context(|| format!("round {round}: the write lands"))?;
+        synced.with_context(|| format!("round {round}: the sync returns"))?;
+        notes.push((doc, "s".into()));
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note written beside the syncs"
+    );
+    Ok(())
+}
+
+/// The notes in `layered`'s durable layer but the fixture's bulk, as
+/// `(doc, note)`, sorted.
+async fn notes_in<S: PeerSpace>(layered: &Layered<S>) -> Result<Vec<(String, String)>> {
     use dialog_corpus::Relation;
     use dialog_query::attribute::Relation as QueryRelation;
     use dialog_query::query::Output as _;
     use dialog_query::{AttributeQuery, Term};
-
-    let mut notes: Vec<(String, String)> = Vec::new();
-    for round in 0..5 {
-        let (a, b) = (format!("doc:a-{round}"), format!("doc:b-{round}"));
-        let (first, second) = futures_util::join!(
-            layered
-                .follower
-                .assert(noted(&a.parse()?, "a", &layered.notes))
-                .perform(&layered.env),
-            layered
-                .follower
-                .assert(noted(&b.parse()?, "b", &layered.notes))
-                .perform(&layered.env),
-        );
-        first.with_context(|| format!("round {round}: the first write lands"))?;
-        second.with_context(|| format!("round {round}: the second write lands"))?;
-        notes.push((a, "a".into()));
-        notes.push((b, "b".into()));
-    }
 
     let query = AttributeQuery::from(
         Term::<QueryRelation>::from(QueryRelation::from("doc/note".parse::<Relation>()?))
@@ -8302,16 +8395,14 @@ async fn race_two_durable_writes<S: PeerSpace>(layered: &Layered<S>) -> Result<(
         .perform(&layered.env)
         .try_vec()
         .await?;
-    let mut read: Vec<(String, String)> = claims
+    let mut read = claims
         .into_iter()
         .filter(|claim| !claim.of.to_string().starts_with("doc:bulk-"))
         .map(|claim| match claim.is {
             Value::String(text) => Ok((claim.of.to_string(), text)),
             other => Err(anyhow::anyhow!("a note that is no text: {other:?}")),
         })
-        .collect::<Result<_>>()?;
+        .collect::<Result<Vec<_>>>()?;
     read.sort();
-    notes.sort();
-    assert_eq!(read, notes, "the layer holds every note either write wrote");
-    Ok(())
+    Ok(read)
 }
