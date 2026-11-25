@@ -556,8 +556,9 @@ pub(crate) struct RuleContent {
     inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
     /// Why a stored body is no rule on this release, keyed like
     /// `bodies`: what [`judge`](error::judge) found, so a body that did
-    /// not compile is judged once, as one that did.
-    failures: Cache<(Entity, Blake3Hash), error::RuleError>,
+    /// not compile is judged once, as one that did. Built on the first
+    /// such body: they are rare, and a cache reserves its room up front.
+    failures: OnceLock<Cache<(Entity, Blake3Hash), error::RuleError>>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -566,15 +567,23 @@ pub(crate) struct RuleContent {
     selecting: Cache<SelectingKey, Selecting>,
 }
 
+/// The most bodies that are no rule a rule content remembers: such a
+/// body reaches a branch only from elsewhere and is rare, so its cache is
+/// built on the first one and kept small, rather than reserved up front
+/// at the size of the others.
+const FAILURES: usize = 64;
+
 impl RuleContent {
-    /// Rule content remembering up to `capacity` entries of each kind:
+    /// Rule content remembering up to `capacity` entries of each kind
+    /// (and, once one is met, at most [`FAILURES`] bodies that are no
+    /// rule):
     /// heads, deductive bodies, inductive bodies and selecting rules.
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             heads: Cache::with_capacity(capacity),
             bodies: Cache::with_capacity(capacity),
             inductive: Cache::with_capacity(capacity),
-            failures: Cache::with_capacity(capacity),
+            failures: OnceLock::new(),
             selecting: Cache::with_capacity(capacity),
         }
     }
@@ -584,7 +593,7 @@ impl RuleContent {
         self.heads.len()
             + self.bodies.len()
             + self.inductive.len()
-            + self.failures.len()
+            + self.failures.get().map_or(0, Cache::len)
             + self.selecting.len()
     }
 
@@ -863,7 +872,12 @@ impl RuleCache {
         if let Some(body) = self.content.inductive.get_cached(&key) {
             return Ok(error::Hydrated::Inductive(body));
         }
-        if let Some(failure) = self.content.failures.get_cached(&key) {
+        if let Some(failure) = self
+            .content
+            .failures
+            .get()
+            .and_then(|failures| failures.get_cached(&key))
+        {
             return Err(failure);
         }
         let judged = error::judge(rule, bytes);
@@ -875,7 +889,10 @@ impl RuleCache {
                 self.content.inductive.insert(key, body.clone());
             }
             Err(failure) => {
-                self.content.failures.insert(key, failure.clone());
+                self.content
+                    .failures
+                    .get_or_init(|| Cache::with_capacity(FAILURES))
+                    .insert(key, failure.clone());
             }
         }
         judged
@@ -887,6 +904,7 @@ impl RuleCache {
     pub(crate) fn failure(&self, rule: &Entity, bytes: &[u8]) -> Option<error::RuleError> {
         self.content
             .failures
+            .get()?
             .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
     }
 

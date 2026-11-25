@@ -151,18 +151,14 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
     if let Some(format) = format.filter(|format| *format > FORMAT) {
         return Err(RuleError::Newer { format });
     }
-    let deductive = hydrate_deductive(bytes);
-    if let Ok(rule) = &deductive
-        && rule.stored_as(entity)
-    {
-        return Ok(Hydrated::Deductive(rule.clone()));
-    }
-    let inductive = InductiveRule::read(bytes);
-    if let Ok(rule) = &inductive
-        && rule.stored_as(entity)
-    {
-        return Ok(Hydrated::Inductive(rule.clone()));
-    }
+    let deductive = match hydrate_deductive(bytes) {
+        Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Deductive(rule)),
+        other => other,
+    };
+    let inductive = match InductiveRule::read(bytes) {
+        Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Inductive(rule)),
+        other => other,
+    };
     if let Some(format) = format.filter(|format| *format < TERMS_FORMAT) {
         return Err(RuleError::Older { format });
     }
