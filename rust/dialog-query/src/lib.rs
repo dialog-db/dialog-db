@@ -123,6 +123,11 @@ mod head_type_tests;
 #[cfg(test)]
 mod stored_constant_tests;
 
+/// Cardinality-one succession across the types of one attribute,
+/// pinned as tests.
+#[cfg(test)]
+mod succession_tests;
+
 /// A read of a deduced relation whose value is bound to a number
 /// constant, pinned as tests.
 #[cfg(test)]
