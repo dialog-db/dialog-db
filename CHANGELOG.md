@@ -78,7 +78,7 @@ What this changes for you:
   under one of the notation's own words, `concept`, `select`, `query`,
   `rule`, `assert`, `retract`, `report`, `unless`, `once`, `is`, `this`,
   `all`, `when`, `view`, `rows`, `expand`, `syntax`, `warning`,
-  `quote`, `collect`, the words of a query's plan `call`, `required` and
+  `quote`, `collect`, `distinct`, the words of a query's plan `call`, `required` and
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
   is a document's macro, whatever its template. The refusal names the
@@ -459,7 +459,7 @@ What this changes for you:
 - A view's `(count ?x)` of what its own markup collects is kept by
   `Branch::subscribe_fold`.
 - Refused, each with what to write instead or why: a fold in a rule
-  that derives, a query applied by a rule or a concept, `collect` outside
+  that derives, a query applied by a rule or a concept, `distinct` outside
   a query, a query that calls itself, a retract of a command, and the
   other forms listed by `Error::Unsupported`.
 
