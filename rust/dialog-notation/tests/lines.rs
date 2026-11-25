@@ -287,3 +287,53 @@ fn it_refuses_a_wrapper_a_document_writes_naming_the_line() -> Result<()> {
     }
     Ok(())
 }
+
+/// `as:` on a derived attribute takes a listed type's cases as a line's
+/// does, `as: [:open :done]`, and an elector ranks by the listing.
+#[dialog_common::test]
+async fn it_lists_a_derived_attributes_cases_as_a_line_does() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            "(concept (list ?l name: ?n)
+               (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+             (rule (list/state ?l ?s)
+               (list ?l name: ?n)
+               (xyz.item/list of: ?i is: ?l cardinality: :one)
+               (xyz.item/state of: ?i is: ?s cardinality: :one))
+             (assert (list list:home name: \"Home\"))
+             (assert (xyz.item/list of: item:a is: list:home cardinality: :one))
+             (assert (xyz.item/state of: item:a is: :open cardinality: :one))
+             (assert (xyz.item/list of: item:b is: list:home cardinality: :one))
+             (assert (xyz.item/state of: item:b is: :done cardinality: :one))",
+        )
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(select (list/state of: ?l is: (max ?s) as: [:done :open]))"
+        )
+        .await?,
+        vec!["(list/state list:home is: :open)"]
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(select (list/state of: ?l is: (max ?s) as: [:open :done]))"
+        )
+        .await?,
+        vec!["(list/state list:home is: :done)"]
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(select (list/state of: ?l is: ?s as: {:is [:open :done]}))"
+        )
+        .await?,
+        vec![
+            "(list/state list:home is: :done)",
+            "(list/state list:home is: :open)"
+        ]
+    );
+    Ok(())
+}
