@@ -4423,30 +4423,76 @@ mod tests {
     /// tables and every macro the prelude defines is in it, and every
     /// word in it is one of those. A match on a keyword, `:command` or
     /// `:float`, is not on what is applied, and is not read. It reads the
-    /// crate's sources outside their tests, so it runs where there is
-    /// a file system: the list is the same on every target.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// crate's sources outside their tests, embedded when it is built, so
+    /// it runs wherever its binary does, an archive or wasm, and fails
+    /// when a module is declared that it does not embed.
     #[test]
     fn it_lists_every_word_the_notation_defines_in_forms() {
         use std::collections::BTreeSet;
-        let mut sources = String::new();
-        let mut open = vec![std::path::PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src"
-        ))];
+        let files: [(&str, &str); 21] = [
+            ("analyze.rs", include_str!("analyze.rs")),
+            ("check.rs", include_str!("check.rs")),
+            ("compile.rs", include_str!("compile.rs")),
+            ("data.rs", include_str!("data.rs")),
+            ("declare.rs", include_str!("declare.rs")),
+            ("diagnostic.rs", include_str!("diagnostic.rs")),
+            ("expand.rs", include_str!("expand.rs")),
+            ("expand/query.rs", include_str!("expand/query.rs")),
+            ("form.rs", include_str!("form.rs")),
+            ("kernel.rs", include_str!("kernel.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("live.rs", include_str!("live.rs")),
+            ("parse.rs", include_str!("parse.rs")),
+            ("pattern.rs", include_str!("pattern.rs")),
+            ("print.rs", include_str!("print.rs")),
+            ("select.rs", include_str!("select.rs")),
+            ("syntax.rs", include_str!("syntax.rs")),
+            ("view.rs", include_str!("view.rs")),
+            ("view/plan.rs", include_str!("view/plan.rs")),
+            ("view/tree.rs", include_str!("view/tree.rs")),
+            ("written.rs", include_str!("written.rs")),
+        ];
+        // Every module the crate declares, from `lib.rs` down, is one of
+        // them: a `mod name;` in `lib.rs` is `name.rs`, and in `a.rs` is
+        // `a/name.rs`.
+        let held: BTreeSet<&str> = files.iter().map(|(path, _)| *path).collect();
+        let mut declared = BTreeSet::new();
+        let mut open = vec!["lib.rs".to_string()];
         while let Some(path) = open.pop() {
-            for entry in std::fs::read_dir(&path).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    open.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    let text = std::fs::read_to_string(&path).unwrap();
-                    // A file's tests are not what it defines.
-                    let code = text.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
-                    sources.push_str(code);
-                    sources.push('\n');
+            let text = files
+                .iter()
+                .find(|(held, _)| *held == path)
+                .map(|(_, text)| *text)
+                .unwrap_or_else(|| panic!("`{path}` is declared and not embedded here"));
+            let under = match path.as_str() {
+                "lib.rs" => String::new(),
+                other => format!("{}/", other.trim_end_matches(".rs")),
+            };
+            for line in text.lines() {
+                let line = line.trim();
+                let name = ["mod ", "pub mod ", "pub(crate) mod "]
+                    .iter()
+                    .find_map(|start| line.strip_prefix(start))
+                    .and_then(|rest| rest.strip_suffix(';'));
+                if let Some(name) = name {
+                    let module = format!("{under}{name}.rs");
+                    if declared.insert(module.clone()) {
+                        open.push(module);
+                    }
                 }
             }
+        }
+        declared.insert("lib.rs".to_string());
+        assert_eq!(
+            declared.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+            held,
+            "the modules the crate declares and the files embedded here"
+        );
+        let mut sources = String::new();
+        for (_, text) in files {
+            // A file's tests are not what it defines.
+            sources.push_str(text.split("#[cfg(test)]\nmod tests").next().unwrap_or(""));
+            sources.push('\n');
         }
         // Each quoted word in `Some("…")` and `Some("…" | "…")` on a line
         // that asks what is applied, and in the arms of a `match` on it:
