@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A pick orders numbers by value
+
+A field that picks `max` or `min` compared two values by their type
+first: a float outranked every integer, and an integer every natural,
+whatever the numbers, so `max` over {3, -5, 2.5, 10} answered 2.5 and an
+`integer:` field's `max` over {3, -5, 10} answered -5. Numbers are one
+stratum, keyed by value in the band whatever type wrote them, so a pick
+now orders two numbers of different types by their value, as their keys
+sort.
+
+What this changes for you:
+
+- `max` and `min` over numbers answer the greatest and the least number,
+  stored or deduced, through a field of no type, a `number:` field or
+  any number type. They answered by type first.
+- `Value::cmp_number` is new: the order of two numbers by value, total
+  and deterministic, NaN least, `-0.0` equal to 0, a float past `2^53`
+  read as the decimal it prints as, as the band keys it.
+- A text, an entity or a listed type picks as before, and a pick over a
+  field of no type holding values of several types that are not numbers
+  still orders them by type first.
+- The `max` and `min` folds of a rule's `reduce` still refuse a group
+  holding numbers of different types, as before.
+
+Why: a number is one value whatever type holds it, so which one a pick
+elects must not depend on the type it decodes as.
+
 ### A typed read bound to a constant its type does not read answers nothing
 
 A field that declares a type reads only the values of that type, so a
