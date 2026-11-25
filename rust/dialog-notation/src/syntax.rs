@@ -566,6 +566,20 @@ pub fn unspelled_field(form: &dyn std::fmt::Display, label: &str) -> Option<Erro
     })
 }
 
+/// The refusal of `form`, which gives the derived attribute `concept/
+/// field` the label `label:`: a derived attribute is one value (gaps row
+/// 48), and several fields are a domain a rule concludes, read through a
+/// concept, which the refusal shows.
+pub fn one_value(form: &dyn std::fmt::Display, concept: &str, field: &str, label: &str) -> Error {
+    let domain = format!("xyz.{}.{field}", concept.replace('/', "."));
+    Error::Refused(format!(
+        "{form} gives `{concept}/{field}` the field `{label}:`, and a derived attribute is one \
+         value, its entity and the value, unlabeled or under `is:`. For several fields, \
+         conclude a domain and read it through a concept: `(rule ({domain} ?e {label}: …) …)` \
+         and `(concept ({concept}/{field} ?e {label}: …) ({domain} ?e {label}: …))`"
+    ))
+}
+
 /// Whether a document may declare a concept, a command or a query under
 /// `name`: one that [`declarable`], none of the notation's own words,
 /// [`FORMS`], and no longer than it is kept in, [`limit`]. Every place a

@@ -681,16 +681,14 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 /// concept changed.
 ///
 /// ```clj
-/// (list/count-open ?l (count ?t))
-/// (dialog.n.c.<hash of list, count-open> ?l is: (count ?t))
-///
-/// (list/count ?l status: ?s count: (count ?t))
-/// (dialog.n.c.<hash of list, count> ?l count: (count ?t) status: ?s)
+/// (list/open ?l ?n)
+/// (dialog.n.c.<hash of list, open> ?l is: ?n)
 /// ```
 ///
-/// Its two terms unlabeled are the entity and the value, under `is:`.
-/// With labels, it is the fields they name. A label has what the 64 bytes
-/// of a relation leave beside the domain.
+/// Its two terms unlabeled are the entity and the value, under `is:`, or
+/// the entity and `is:` written. It is one value: any other label is
+/// refused, and several fields are a domain a rule concludes, read
+/// through a concept (gaps row 48, decided 2026-11-25).
 fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syntax, Error> {
     let operand = tree.operand().cloned().unwrap_or_default();
     let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
@@ -698,12 +696,23 @@ fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syn
             entity.clone(),
             BTreeMap::from([("is".into(), value.clone())]),
         ),
-        ([entity], false) => (entity.clone(), operand.terms),
+        // One value, under `is:`: any other label is refused, but for
+        // `in:`, a layer, which the kernel refuses as one.
+        ([entity], false) => {
+            if let Some(label) = operand
+                .terms
+                .keys()
+                .find(|label| !matches!(label.as_str(), "is" | "in"))
+            {
+                return Err(syntax::one_value(tree, concept, name, label));
+            }
+            (entity.clone(), operand.terms)
+        }
         _ => {
             return Err(Error::Refused(format!(
-                "{tree} needs its entity and a value, or its entity and labelled fields: it \
-                 is read as an attribute in the domain of the concept `{concept}`, since no \
-                 concept is declared under its name"
+                "{tree} needs its entity and a value, unlabeled or under `is:`: it is read as \
+                 an attribute in the domain of the concept `{concept}`, since no concept is \
+                 declared under its name"
             )));
         }
     };

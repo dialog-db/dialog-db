@@ -83,6 +83,19 @@ What this changes for you:
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
   is a document's macro, whatever its template. The refusal names the
   name and why.
+- A derived attribute is one value: its head and its reads take the
+  entity and the value, unlabeled or under `is:`. `(rule (list/count ?l
+  status: ?s n: ?n) …)` and `(select (list/label ?l other: ?o))` are
+  refused, where the first concluded and read several fields and the
+  second answered nothing, saying to conclude a domain and read it
+  through a concept, `(rule (xyz.list.count ?l status: ?s n: ?n) …)` and
+  `(concept (list/count ?l status: ?s n: ?n) (xyz.list.count ?l status:
+  ?s n: ?n))`.
+- A count asked of what was not collected says that count counts what
+  was collected, a set of distinct values, and how to count entities:
+  collect a record that holds each, then count it. A fold not there yet
+  names the one that is, `(count ?x)`. The crate's documentation says
+  what a collection holds and what is counted, against Datomic.
 - A declared name is spelled as a stored name's part is: each part
   between `/` starts with a lowercase letter, holds lowercase letters,
   digits and `-` only, and does not end with `-`. A concept, query,
