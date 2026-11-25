@@ -1327,7 +1327,7 @@ async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> R
     let rule = "(rule (xyz.out ?t v: ?x) (list/count ?t ?x))";
     let declare = "(list-kind list)";
     let open = || async {
-        let mut notebook = Notebook::open().await?;
+        let notebook = Notebook::open().await?;
         anyhow::Ok(notebook)
     };
     // Read first, it read the stored `list/count`: refused by the

@@ -21,7 +21,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
-use crate::form::Kind;
 use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
 use crate::syntax::{Parameters, Signature, Syntax};
 
