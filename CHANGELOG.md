@@ -14,6 +14,40 @@ says how to cut a release.
 
 ## Unreleased
 
+### A typed read elects and picks among the values its type reads
+
+A value of another type under an attribute is a claim of another
+relation, yet a stored cardinality-one read elected among every value
+of the cell and only then read the winner through the field's type. When
+the newest value, or the one a pick chose, was of a type the field does
+not read, the read answered nothing, though the cell held a value of its
+type. A field declared `natural:` over `3`, `-3`, `2.5` and then `hello`
+answered nothing, and its `min` picked `-3` and answered nothing. The
+stored scan and its challenge now set such a value aside before
+electing, reading its type off the key and decoding only to ask a
+number type whether it reads the number, so the stored read answers
+what the deduced one already did.
+
+What this changes for you:
+
+- A stored cardinality-one read through a field of a type answers the
+  newest value its type reads. It answered nothing when the newest
+  value was of another type.
+- A pick over a stored field of a type (`max`, `min`, `last`, ...) picks
+  among the values its type reads, as the type reads them: `natural:`
+  `min` over `3`, `-3`, `2.5` answers `2`, and `text:` `last` answers
+  the newest text. It answered nothing when the value it picked was one
+  the type does not read.
+- A read of a deduced relation answers as before.
+- A read through a field that declares no type answers as before: it
+  elects among every value of the cell, whatever its type.
+- What a write stores, and how a cardinality-one write supersedes a
+  claim of another type, is unchanged.
+
+Why: a field's type is part of which attribute it reads, so a value of
+another type must not decide what the field answers, and a stored read
+must answer what a deduced one does.
+
 ### A pick orders numbers by value
 
 [#874](https://github.com/dialog-db/dialog-db/pull/874)

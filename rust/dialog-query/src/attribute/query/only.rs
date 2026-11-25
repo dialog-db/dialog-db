@@ -3,7 +3,7 @@ use super::pipelined;
 use crate::Claim;
 use crate::Value;
 use crate::attribute::Relation;
-use crate::corpus::{Constrained, CorpusRelation, Selector};
+use crate::corpus::{Constrained, CorpusRelation, Selector, Type as ValueDataType};
 use crate::environment::Environment;
 #[cfg(feature = "trace-hydration")]
 use crate::hydration;
@@ -55,6 +55,7 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
 /// ranks a corrupt row below any readable one.
 fn elect(
     ranking: Option<&Ranking>,
+    lens: Option<&Kind>,
     current: FactView,
     challenger: FactView,
 ) -> Result<FactView, DialogCorpusError> {
@@ -63,6 +64,15 @@ fn elect(
     };
     let (Ok(mine), Ok(theirs)) = (current.value(), challenger.value()) else {
         return current.elect(challenger);
+    };
+    // A pick compares the values as the read's type reads them: the
+    // natural `2` a `natural:` field reads `2.5` as, not the float.
+    let (mine, theirs) = match lens {
+        Some(kind) => (
+            kind.view(mine.clone()).unwrap_or(mine),
+            kind.view(theirs.clone()).unwrap_or(theirs),
+        ),
+        None => (mine, theirs),
     };
     Ok(match ranking.order(&mine, &theirs) {
         Ordering::Greater => current,
@@ -112,8 +122,14 @@ trait Windowed: Sized {
     }
 
     /// The row of the cell that stands, of this one and `challenger`,
-    /// under `ranking` when the read picks by one.
-    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError>;
+    /// under `ranking` when the read picks by one, comparing values as
+    /// `lens` reads them.
+    fn elect(
+        self,
+        challenger: Self,
+        ranking: Option<&Ranking>,
+        lens: Option<&Kind>,
+    ) -> Result<Self, DialogCorpusError>;
 
     /// The row and the index of its layer, when it carries one.
     fn into_parts(self) -> (FactView, Option<LayerIndex>);
@@ -126,8 +142,13 @@ impl Windowed for FactView {
     }
 
     #[inline(always)]
-    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError> {
-        elect(ranking, self, challenger)
+    fn elect(
+        self,
+        challenger: Self,
+        ranking: Option<&Ranking>,
+        lens: Option<&Kind>,
+    ) -> Result<Self, DialogCorpusError> {
+        elect(ranking, lens, self, challenger)
     }
 
     #[inline(always)]
@@ -148,8 +169,13 @@ impl Windowed for (FactView, LayerIndex) {
     }
 
     #[inline(always)]
-    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError> {
-        Ok((elect(ranking, self.0, challenger.0)?, self.1))
+    fn elect(
+        self,
+        challenger: Self,
+        ranking: Option<&Ranking>,
+        lens: Option<&Kind>,
+    ) -> Result<Self, DialogCorpusError> {
+        Ok((elect(ranking, lens, self.0, challenger.0)?, self.1))
     }
 
     #[inline(always)]
@@ -168,15 +194,67 @@ fn slide<R: Windowed>(
     window: &mut Option<R>,
     row: R,
     ranking: Option<&Ranking>,
+    is: &Term<Any>,
 ) -> Result<Option<R>, DialogCorpusError> {
     if let Some(current) = window
         && current.shares_cell(&row)?
     {
         let current = window.take().expect("the window holds the cell's row");
-        *window = Some(current.elect(row, ranking)?);
+        *window = Some(contend(current, row, ranking, is)?);
         return Ok(None);
     }
     Ok(window.replace(row))
+}
+
+/// The row that stands of `current` and `challenger`, two rows of one
+/// cell. A value the read's type does not read is a claim of another
+/// relation: it takes no part in the cell's election, so the newest
+/// claim of the read's own type stands. Asked only when a cell holds
+/// two rows, so the read's type is taken from `is` here and not before:
+/// a cell's one row, of whatever type, stands and is read through the
+/// type as the cell closes (see [`admitted`]).
+#[inline(always)]
+fn contend<R: Windowed>(
+    current: R,
+    challenger: R,
+    ranking: Option<&Ranking>,
+    is: &Term<Any>,
+) -> Result<R, DialogCorpusError> {
+    let lens = is.kind();
+    let lens = lens.as_ref();
+    if lens.is_some() {
+        if !reads(lens, challenger.view())? {
+            return Ok(current);
+        }
+        if !reads(lens, current.view())? {
+            return Ok(challenger);
+        }
+    }
+    current.elect(challenger, ranking, lens)
+}
+
+/// Whether `lens`, the type the read's value term declares, reads
+/// `row`'s value: every value when it declares none. The value's type
+/// is read off the key, so a row of a type the lens lists is admitted
+/// without decoding it, and a number is admitted without decoding it by
+/// a lens that reads every number (`float:`, `number:`). Any other row,
+/// a number under `natural:`, `integer:` or a sized type among them,
+/// decodes its value to ask the lens.
+#[inline(always)]
+fn reads(lens: Option<&Kind>, row: &FactView) -> Result<bool, DialogCorpusError> {
+    let Some(kind) = lens else {
+        return Ok(true);
+    };
+    if let (Kind::Primitive(primitive), Some(stored)) = (kind, row.stored_type()) {
+        if stored.is_number() || stored == ValueDataType::Number {
+            if primitive.contains(ValueDataType::Float) {
+                return Ok(true);
+            }
+        } else if primitive.contains(stored) {
+            return Ok(true);
+        }
+    }
+    Ok(kind.reads(&row.value()?))
 }
 
 /// `base` extended by `winner`, a cell's elected row read from `layer`
@@ -267,12 +345,13 @@ where
     Env: crate::Scope<'a>,
     'a: 'b,
 {
+    let is = selector.is();
     try_stream! {
         let Layered { layers, rows } = Provider::<SelectIn<'_>>::execute(env, input).await?;
         let mut window: Option<(FactView, LayerIndex)> = None;
         let mut placement: Option<Placement> = None;
         for await row in rows {
-            let Some(closed) = slide(&mut window, row?, ranking)? else {
+            let Some(closed) = slide(&mut window, row?, ranking, is)? else {
                 continue;
             };
             let (winner, at) = closed.into_parts();
@@ -345,7 +424,7 @@ where
             // through it.
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => elect(ranking.as_ref(), winner, challenger)?,
+                Some(winner) => contend(winner, challenger, ranking.as_ref(), selector.is())?,
             });
         }
 
@@ -604,7 +683,7 @@ impl AttributeQueryOnly {
                         let stream = Provider::<Select<'_>>::execute(env, input).await?;
                         let mut window: Option<FactView> = None;
                         for await fact in stream {
-                            let Some(winner) = slide(&mut window, fact?, ranking.as_ref())? else {
+                            let Some(winner) = slide(&mut window, fact?, ranking.as_ref(), selector.is())? else {
                                 continue;
                             };
                             if let Some(extension) = admitted(&selector, &mut placement, &base, winner, value_constraint.as_ref(), pinned)? {
