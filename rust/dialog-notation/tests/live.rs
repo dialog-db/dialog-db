@@ -670,3 +670,61 @@ async fn it_tells_an_evaluation_error_in_the_authors_terms() -> Result<()> {
     assert!(!told.contains("dialog.n.c."), "{told}");
     Ok(())
 }
+
+/// A watched view tells an evaluation error in the author's terms too,
+/// by the derived attributes its layers read: a view over one.
+#[dialog_common::test]
+async fn it_tells_an_evaluation_error_of_a_view_in_the_authors_terms() -> Result<()> {
+    let notebook = Notebook::open().await?;
+    let text = "(concept (list ?l name: ?n)
+           (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+         (rule (list/label ?l ?n) (list ?l name: ?n))
+         (query (list/chip ?l is: ?chip) (list/label ?l ?n) (view ?chip [:span ?n]))
+         (select (list/chip ?l is: ?chip))";
+    let analysis = Analyzer::new()?.analyze(&parse(text)?);
+    let plan = analysis
+        .analyzed
+        .iter()
+        .find_map(|tree| match compile(tree).ok()?.as_slice() {
+            [Step::View(plan)] => Some((**plan).clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("a view: {:?}", analysis.diagnostics))?;
+    let hash = format!("{plan:?}")
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '/'))
+        .find_map(|part| {
+            part.strip_prefix("dialog.n.c/")
+                .and_then(|written| written.rsplit_once('/'))
+                .map(|(concept, field)| (concept.to_string(), field.to_string()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("no derived attribute in {plan:?}"))?;
+    let live = Live::new(notebook.branch.clone());
+    let watched = live.watch(plan, None)?;
+    let error = dialog_notation::live::LiveError::Evaluation(
+        dialog_query::EvaluationError::UnboundVariable {
+            variable_name: format!("{}/is", derived_hash(&hash.0, &hash.1)?),
+        },
+    );
+    let told = watched.told(&error);
+    assert!(told.contains("list/label"), "{told}");
+    assert!(!told.contains("dialog.n.c."), "{told}");
+    Ok(())
+}
+
+/// Dialog-DB's name for the derived attribute `field` of `concept`, as
+/// a check of a document that derives it shows it in its steps.
+fn derived_hash(concept: &str, field: &str) -> Result<String> {
+    let checked = dialog_notation::check(
+        &mut Analyzer::new()?,
+        &format!(
+            "(concept ({concept} ?l name: ?n)
+               (xyz.probe/name of: ?l is: ?n as: :text cardinality: :one))
+             (rule ({concept}/{field} ?l ?n) ({concept} ?l name: ?n))"
+        ),
+    );
+    format!("{:?}", checked.steps)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+        .find(|part| part.starts_with("dialog.n.c."))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no derived relation: {:?}", checked.diagnostics))
+}
