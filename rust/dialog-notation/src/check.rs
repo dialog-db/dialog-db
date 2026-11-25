@@ -1367,7 +1367,7 @@ mod tests {
     /// A derived attribute's relation is named by a hash of its concept's
     /// written name and its own, of one length whatever they are: the
     /// same concept and attribute in two documents make one relation;
-    /// long names, and names a relation could not spell, compile; a
+    /// long names compile; a
     /// label past what the relation leaves room for is refused saying
     /// so; and no refusal an author sees names the hash.
     #[test]
@@ -1384,18 +1384,16 @@ mod tests {
         assert_eq!(once[0].len(), "dialog.n.c.".len() + 26, "{once:?}");
         let long = "abcdefghijabcdefghijabcdefghijabcd";
         let cafe = "caf\u{e9}";
-        for text in [
-            format!(
-                "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
+        for text in [format!(
+            "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
                  (rule ({long}/abcdefghijabcdefghijabcdefghij ?l ?n) ({long} ?l name: ?n))"
-            ),
-            format!(
-                "(concept ({cafe} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
-                 (rule ({cafe}/count ?l ?n) ({cafe} ?l name: ?n))"
-            ),
-        ] {
+        )] {
             let checked = check(&mut Analyzer::new()?, &text);
-            assert!(checked.refusals().next().is_none(), "{text}: {:?}", checked.diagnostics);
+            assert!(
+                checked.refusals().next().is_none(),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
             assert_eq!(derived_in(&checked).len(), 1, "{text}");
         }
         // A label past the room the relation leaves, and an attribute a

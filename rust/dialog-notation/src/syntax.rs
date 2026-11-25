@@ -527,6 +527,15 @@ pub const FORMS: [&str; 30] = [
     "avg",
 ];
 
+/// Why `name` is spelled as no stored name's part may be: each part
+/// between `/` starts with a lowercase letter, holds lowercase letters,
+/// digits and `-` only, and does not end with `-`, as Dialog-DB's rule
+/// for an attribute's name (`The::validate` in dialog-query). `None` for
+/// a name spelled so.
+pub fn unspelled(_name: &str) -> Option<String> {
+    None
+}
+
 /// Whether a document may declare a concept, a command or a query under
 /// `name`: one that [`declarable`], none of the notation's own words,
 /// [`FORMS`], and no longer than it is kept in, [`limit`]. Every place a

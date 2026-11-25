@@ -4359,46 +4359,65 @@ mod tests {
         assert!(kernel[0].to_string().starts_with("(rule (report (xyz.t ?x"));
     }
 
-    /// What a name may hold beyond what [`syntax::named`] tells apart is
-    /// undecided (gaps row 47): a zero-width space, an accent written as
-    /// one character or as a letter and a combining mark, a `#` or a `?`
-    /// inside it. Today each is a name of its own, declared and read
-    /// back under exactly what was written, and `tx` written with a
-    /// zero-width space in it is not `tx`.
+    /// A declared name follows the rule a stored name's part does (gaps
+    /// row 47, decided): each part between `/` starts with a lowercase
+    /// letter, holds lowercase letters, digits and `-` only, and does not
+    /// end with `-`. One that does not is refused, naming the part and
+    /// the character, as a concept, a query, a command, a macro and a
+    /// derived attribute's name alike: a zero-width space, an accent, a
+    /// `#`, a `?`, an uppercase letter, a `_`, a leading digit.
     #[test]
-    fn it_declares_a_name_with_what_is_undecided_as_written() {
-        for name in ["t\u{200b}x", "caf\u{e9}", "cafe\u{301}", "a#b", "a?b"] {
-            let text = format!(
-                "(concept ({name} ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one)) \
-                 (select ({name} ?x name: ?n))"
-            );
-            assert_eq!(
-                expanded("", &text).unwrap(),
-                vec!["(rule (report (xyz.t ?x name: (:one ?n))) (xyz.t ?x name: (:one ?n)))"],
-                "{name:?}"
-            );
+    fn it_refuses_a_declared_name_with_a_character_a_stored_one_has_not() {
+        let line = "(xyz.t/name of: ?x is: ?n cardinality: :one)";
+        for (name, says) in [
+            ("t\u{200b}x", "`t\u{200b}x` holds `\u{200b}`"),
+            ("caf\u{e9}", "`caf\u{e9}` holds `\u{e9}`"),
+            ("cafe\u{301}", "`cafe\u{301}` holds `\u{301}`"),
+            ("a#b", "`a#b` holds `#`"),
+            ("a?b", "`a?b` holds `?`"),
+            ("Todo", "`Todo` starts with `T`"),
+            ("to_do", "`to_do` holds `_`"),
+            ("9lives", "`9lives` starts with `9`"),
+            ("todo-", "`todo-` ends with `-`"),
+            ("nb/Blocks", "`Blocks` starts with `B`"),
+        ] {
+            for text in [
+                format!("(concept ({name} ?x name: ?n) {line})"),
+                format!(
+                    "(concept ({name} name: ?n) (xyz.t.go/name of: ?c is: ?n in: :control cardinality: :many))"
+                ),
+                format!("(query ({name} ?x is: ?n) (xyz.t ?x name: ?n))"),
+                format!("(rule (syntax (+ ?x 1)) (expand ({name} ?x)))"),
+            ] {
+                let refused = expanded("", &text).unwrap_err().to_string();
+                assert!(
+                    refused.contains(says) && refused.contains("a lowercase letter"),
+                    "{text}: {refused}"
+                );
+            }
         }
-        assert!(matches!(
-            expanded(
-                "(concept (t\u{200b}x ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
-                "(select (tx ?x name: ?n))"
-            ),
-            Err(Error::Unknown(_))
-        ));
-        assert!(matches!(
-            expanded(
-                "(concept (caf\u{e9} ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
-                "(select (cafe\u{301} ?x name: ?n))"
-            ),
-            Err(Error::Unknown(_))
-        ));
+        // A derived attribute's field, under a declared concept.
+        let concept = format!("(concept (t ?x name: ?n) {line})");
+        for (field, says) in [
+            ("Count", "`Count` starts with `C`"),
+            ("open_n", "`open_n` holds `_`"),
+        ] {
+            let text = format!("(rule (t/{field} ?x ?n) (t ?x name: ?n))");
+            let refused = expanded(&concept, &text).unwrap_err().to_string();
+            assert!(refused.contains(says), "{text}: {refused}");
+        }
+        // What a stored name's part may be, a declared one may.
+        for name in [
+            "count-open",
+            "notebook/blocks",
+            "dialog/position",
+            "nb/blocks/count",
+            "a9-b",
+        ] {
+            assert_eq!(syntax::unspelled(name), None, "{name}");
+        }
     }
 
-    /// A name too long, holding a NUL, or a domain with an empty part
-    /// between its dots is refused in what the author wrote: the name,
-    /// its length and the limit, never the relation the notation keeps a
-    /// tree's names under. A name with no `.` is at most 63 bytes, one
-    /// with a `.` and an attribute's domain, `/` and field at most 64.
     #[test]
     fn it_refuses_a_name_dialog_db_cannot_keep_in_the_authors_terms() {
         let line = "(xyz.t/name of: ?x is: ?n cardinality: :one)";
