@@ -1281,6 +1281,17 @@ mod tests {
         assert!(made.names.contains_key(&format!("h{}", WRITTEN_KEPT + 9)));
     }
 
+    /// A variable the notation tagged in front, `?[q1]x`, is the
+    /// author's `?x`, as one tagged behind, `?x[1]`, is; one tagged with
+    /// no name of the author's after it, `?[2]`, is `_`. A name of any
+    /// letters is kept whole.
+    #[test]
+    fn it_untags_a_variable_tagged_in_front_or_behind() {
+        assert_eq!(told("?[q1]x and ?[source]label"), "?x and ?label");
+        assert_eq!(told("?x[1], ?[2] and ?[q3]"), "?x, _ and _");
+        assert_eq!(told("?[q1]été and ?名前[2]"), "?été and ?名前");
+    }
+
     /// A text is told in one pass: each derived attribute named as it is
     /// written, under its label or as its value, and each tagged variable
     /// untagged, wherever they stand and however many there are.
