@@ -13,6 +13,7 @@ use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
+use crate::types::Any;
 use crate::{Cardinality, ConceptQuery, Entity, Match, Parameters, Term, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use serde_json::json;
@@ -289,8 +290,7 @@ async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyho
             .map(|row| {
                 Ok(format!(
                     "{:?}",
-                    row.lookup(&Term::<crate::types::Any>::var("kept"))?
-                        .content()?
+                    row.lookup(&Term::<Any>::var("kept"))?.content()?
                 ))
             })
             .collect::<anyhow::Result<Vec<String>>>()?;
