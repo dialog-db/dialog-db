@@ -89,6 +89,17 @@ What this changes for you:
   failed with Dialog-DB's text. The facts of rules, concepts, layers,
   commands and providers and a branch's revision and tree are written as
   Dialog-DB writes them, and every read stays allowed.
+- Refusals say what the author can act on. One that offers the stored
+  attribute to write instead offers one that is accepted, its domain
+  dotted, `xyz.foo.bar/baz` for `foo/bar/baz`. A word with a `:` that is
+  no entity, `:on/htmx:after-swap`, is refused saying so, not in the URI
+  parser's text. A read of a concept with a field wrapped in a type or a
+  cardinality the concept says itself, `(a ?t n: (:one ?v))`, is refused
+  naming the field. A select whose only premise must not hold is told
+  that its first part is its head and is not read. `check` says a
+  compile refusal once per form. An element a view does not make,
+  `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
+  it would let a row's values reach script.
 - A retract through a concept by its entity alone, `(retract (p x:1))`
   or a rule's `(retract (p ?t))`, retracts every claim of each of the
   concept's fields on that entity, where it retracted only the claim a

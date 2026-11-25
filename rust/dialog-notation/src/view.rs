@@ -233,10 +233,27 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                 })?
                 .to_string();
             if !made(&tag) {
-                return Err(Error::Unsafe(format!(
+                let said = format!(
                     "{tree}: [:{tag} …] is no element a view makes: a view makes the HTML \
                      elements of text, lists, tables, forms and media, and custom elements"
-                )));
+                );
+                // Only an element that runs or loads what it holds, or
+                // moves what every URL is read against, is a way to script.
+                if scripted(tree) {
+                    return Err(Error::Unsafe(said));
+                }
+                // An attribute of it a row's values reach script by is
+                // said as one.
+                if let Some(Syntax::Map(entries)) = rest.first() {
+                    for (key, value) in entries {
+                        if let Syntax::Reference(name) = key
+                            && let Ok(attribute) = attribute(name, value)
+                        {
+                            safe(&tag, name, &attribute)?;
+                        }
+                    }
+                }
+                return Err(refused(said));
             }
             // A map right after the tag is the element's attributes, as in
             // Hiccup.
@@ -431,6 +448,50 @@ const RESERVED: [&str; 8] = [
     "font-face-name",
     "missing-glyph",
 ];
+
+/// The elements not made that would let a row's values reach script:
+/// each runs or loads what it holds, or, `base`, changes what every URL
+/// on the page is read against.
+/// `style`, `link` and `meta` load or move to what they name; the
+/// animation elements and `foreignObject` set any attribute of another,
+/// or hold HTML, inside SVG (gaps row 40).
+const SCRIPTED: [&str; 18] = [
+    "script",
+    "iframe",
+    "frame",
+    "frameset",
+    "object",
+    "embed",
+    "applet",
+    "portal",
+    "base",
+    "style",
+    "link",
+    "meta",
+    "set",
+    "animate",
+    "animatemotion",
+    "animatetransform",
+    "foreignobject",
+    "noscript",
+];
+
+/// Whether `tree` is, or holds, an element of [`SCRIPTED`]: SVG or
+/// MathML holding one is a way to script, and alone is only not made.
+fn scripted(tree: &Syntax) -> bool {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        if let Syntax::Tuple(items) = part {
+            if let Some(tag) = items.first().and_then(Syntax::keyword)
+                && SCRIPTED.contains(&tag.to_ascii_lowercase().as_str())
+            {
+                return true;
+            }
+            open.extend(items.iter());
+        }
+    }
+    false
+}
 
 /// Whether a view makes the element `tag`: one of [`ELEMENTS`], or a
 /// custom element, a lowercase name with a `-` that SVG and MathML do
@@ -956,10 +1017,6 @@ mod safety {
                 "[:div [:animate {:attributeName \"href\" :values ?url}]]",
                 "animate",
             ),
-            ("[:math [:mi ?x]]", "math"),
-            ("[:marquee ?x]", "marquee"),
-            ("[:template [:p ?x]]", "template"),
-            ("[:font-face]", "font-face"),
             ("[:a {:xlink/href ?u}]", "xlink/href"),
             ("[:a {:xml/base ?u}]", "xml/base"),
             ("[:a {:xml/base \"https://example.org/\"}]", "xml/base"),
@@ -975,6 +1032,19 @@ mod safety {
         ] {
             assert!(
                 matches!(read(text), Err(Error::Unsafe(said)) if said.contains(part)),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        // An element only not made says so, and nothing of script.
+        for text in [
+            "[:math [:mi ?x]]",
+            "[:marquee ?x]",
+            "[:template [:p ?x]]",
+            "[:font-face]",
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Refused(said)) if said.contains("is no element a view makes")),
                 "{text}: {:?}",
                 read(text)
             );
