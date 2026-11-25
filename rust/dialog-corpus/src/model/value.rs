@@ -5,6 +5,7 @@
 //! type information and serialization utilities.
 
 use std::{
+    cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -215,6 +216,60 @@ impl Value {
         match (self.number(), other.number()) {
             (Some(a), Some(b)) => a == b,
             _ => self == other,
+        }
+    }
+
+    /// How this number orders against `other` by value, as the band keys
+    /// them: the natural 3, the integer 3 and the float 3.0 are equal, a
+    /// negative integer is less than every natural, `-0.0` is 0, NaN is
+    /// less than every other number and equal to itself, so the order is
+    /// total. `None` unless both are numbers. Two whole numbers, and a
+    /// whole number and a float while the whole number is at most `2^53`
+    /// in size, compare without allocating; beyond that they compare
+    /// through the band's [`Number`], which reads a float as the decimal
+    /// it prints as.
+    pub fn cmp_number(&self, other: &Value) -> Option<Ordering> {
+        /// The largest size a whole number has that every float near it
+        /// tells apart from its neighbours.
+        const EXACT: u128 = 1 << 53;
+        let whole_against_float = |whole: &Value, size: u128, negative: bool, float: f64| {
+            if float.is_nan() {
+                return Some(Ordering::Greater);
+            }
+            if size <= EXACT {
+                let whole = if negative {
+                    -(size as f64)
+                } else {
+                    size as f64
+                };
+                return whole.partial_cmp(&float);
+            }
+            Some(whole.number()?.cmp(&Number::from(float)))
+        };
+        match (self, other) {
+            (Value::UnsignedInt(a), Value::UnsignedInt(b)) => Some(a.cmp(b)),
+            (Value::SignedInt(a), Value::SignedInt(b)) => Some(a.cmp(b)),
+            (Value::UnsignedInt(a), Value::SignedInt(b)) => Some(match u128::try_from(*b) {
+                Ok(b) => a.cmp(&b),
+                Err(_) => Ordering::Greater,
+            }),
+            (Value::SignedInt(_), Value::UnsignedInt(_)) => {
+                other.cmp_number(self).map(Ordering::reverse)
+            }
+            (Value::Float(a), Value::Float(b)) => Some(match (a.is_nan(), b.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => a.partial_cmp(b)?,
+            }),
+            (Value::UnsignedInt(a), Value::Float(b)) => whole_against_float(self, *a, false, *b),
+            (Value::SignedInt(a), Value::Float(b)) => {
+                whole_against_float(self, a.unsigned_abs(), *a < 0, *b)
+            }
+            (Value::Float(_), Value::UnsignedInt(_) | Value::SignedInt(_)) => {
+                other.cmp_number(self).map(Ordering::reverse)
+            }
+            _ => None,
         }
     }
 
@@ -1884,6 +1939,238 @@ impl From<bool> for ValueDataType {
 impl From<ValueDataType> for PhantomData<ValueDataType> {
     fn from(_value: ValueDataType) -> Self {
         PhantomData
+    }
+}
+
+#[cfg(test)]
+mod cmp_number_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use std::cmp::Ordering;
+
+    fn cmp(a: &Value, b: &Value) -> Ordering {
+        let forward = a.cmp_number(b).expect("two numbers compare");
+        let backward = b.cmp_number(a).expect("two numbers compare");
+        assert_eq!(forward, backward.reverse(), "{a:?} against {b:?}");
+        forward
+    }
+
+    /// Integers either side of `2^53` against the floats around them: a
+    /// float there is a whole number, and the integers it cannot hold
+    /// order by their value against it.
+    #[dialog_common::test]
+    fn it_orders_whole_numbers_around_two_to_the_fifty_three_against_floats() {
+        let exact: u128 = 1 << 53;
+        let float = exact as f64;
+        assert_eq!(
+            cmp(&Value::UnsignedInt(exact), &Value::Float(float)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(exact - 1), &Value::Float(float)),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(exact + 1), &Value::Float(float)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(exact + 2), &Value::Float(float + 2.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(exact + 1), &Value::Float(float + 2.0)),
+            Ordering::Less
+        );
+        let negative = -(exact as i128);
+        assert_eq!(
+            cmp(&Value::SignedInt(negative), &Value::Float(-float)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::SignedInt(negative - 1), &Value::Float(-float)),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp(&Value::SignedInt(negative + 1), &Value::Float(-float)),
+            Ordering::Greater
+        );
+    }
+
+    /// `u64::MAX` and `i64::MIN` against the floats nearest them. Past
+    /// `2^53` a float is the decimal it prints as, as the band keys it:
+    /// `2^64` is 18446744073709552000, greater than `u64::MAX`, and
+    /// `-2^63` is -9223372036854776000, less than `i64::MIN`, so the
+    /// order is the order their keys sort in.
+    #[dialog_common::test]
+    fn it_orders_the_widest_machine_integers_against_floats() {
+        let two_to_the_64 = 18_446_744_073_709_551_616.0;
+        let minus_two_to_the_63 = -9_223_372_036_854_775_808.0;
+        assert_eq!(
+            cmp(
+                &Value::UnsignedInt(u64::MAX as u128),
+                &Value::Float(two_to_the_64)
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp(
+                &Value::UnsignedInt(18_446_744_073_709_552_000),
+                &Value::Float(two_to_the_64)
+            ),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(
+                &Value::SignedInt(i64::MIN as i128),
+                &Value::Float(minus_two_to_the_63)
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp(
+                &Value::SignedInt(-9_223_372_036_854_776_000),
+                &Value::Float(minus_two_to_the_63)
+            ),
+            Ordering::Equal
+        );
+    }
+
+    /// Zero is `-0.0` and `0.0`; NaN is less than every number and
+    /// equal to itself; the infinities bound every number.
+    #[dialog_common::test]
+    fn it_orders_zero_nan_and_the_infinities() {
+        assert_eq!(
+            cmp(&Value::UnsignedInt(0), &Value::Float(-0.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::SignedInt(0), &Value::Float(0.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::Float(-0.0), &Value::Float(0.0)),
+            Ordering::Equal
+        );
+        let nan = Value::Float(f64::NAN);
+        assert_eq!(cmp(&nan, &nan), Ordering::Equal);
+        for number in [
+            Value::UnsignedInt(0),
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(i128::MIN),
+            Value::Float(f64::NEG_INFINITY),
+            Value::Float(f64::INFINITY),
+        ] {
+            assert_eq!(cmp(&nan, &number), Ordering::Less, "NaN against {number:?}");
+        }
+        let infinity = Value::Float(f64::INFINITY);
+        let negative_infinity = Value::Float(f64::NEG_INFINITY);
+        for number in [
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(i128::MIN),
+            Value::SignedInt(i128::MAX),
+            Value::Float(f64::MAX),
+        ] {
+            assert_eq!(cmp(&infinity, &number), Ordering::Greater, "{number:?}");
+            assert_eq!(
+                cmp(&negative_infinity, &number),
+                Ordering::Less,
+                "{number:?}"
+            );
+        }
+    }
+
+    /// Equal numbers of different types compare equal, and a list of
+    /// numbers of every type sorts into one total order.
+    #[dialog_common::test]
+    fn it_orders_numbers_of_every_type_as_one() {
+        assert_eq!(
+            cmp(&Value::UnsignedInt(3), &Value::SignedInt(3)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(3), &Value::Float(3.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::SignedInt(-3), &Value::Float(-3.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(3), &Value::SignedInt(-5)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp(&Value::UnsignedInt(10), &Value::Float(2.5)),
+            Ordering::Greater
+        );
+        let ordered = [
+            Value::Float(f64::NAN),
+            Value::Float(f64::NEG_INFINITY),
+            Value::SignedInt(i128::MIN),
+            Value::SignedInt(-5),
+            Value::Float(-0.5),
+            Value::UnsignedInt(0),
+            Value::Float(2.5),
+            Value::SignedInt(3),
+            Value::UnsignedInt(10),
+            Value::UnsignedInt(u128::MAX),
+            Value::Float(f64::INFINITY),
+        ];
+        for (i, a) in ordered.iter().enumerate() {
+            for (j, b) in ordered.iter().enumerate() {
+                assert_eq!(cmp(a, b), i.cmp(&j), "{a:?} against {b:?}");
+            }
+        }
+    }
+
+    /// The order is the order the band's keys sort in, for numbers of
+    /// every type across the range where a float stops holding every
+    /// whole number, so a pick and a range scan order numbers alike.
+    #[dialog_common::test]
+    fn it_orders_numbers_as_their_band_keys_sort() {
+        use crate::{NUMBER_BAND, encode_key_value_owned};
+        let mut numbers = vec![
+            Value::Float(f64::NAN),
+            Value::Float(f64::NEG_INFINITY),
+            Value::Float(f64::INFINITY),
+            Value::Float(-0.0),
+            Value::Float(0.5),
+            Value::Float(-2.5),
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(i128::MIN),
+        ];
+        for exponent in [52u32, 53, 54, 62, 63, 64, 100] {
+            let power = 1u128 << exponent;
+            for whole in [power - 1, power, power + 1] {
+                numbers.push(Value::UnsignedInt(whole));
+                numbers.push(Value::SignedInt(-(whole as i128)));
+            }
+            numbers.push(Value::Float(power as f64));
+            numbers.push(Value::Float(-(power as f64)));
+        }
+        for a in &numbers {
+            for b in &numbers {
+                let keys = encode_key_value_owned(a, NUMBER_BAND)
+                    .cmp(&encode_key_value_owned(b, NUMBER_BAND));
+                assert_eq!(cmp(a, b), keys, "{a:?} against {b:?}");
+            }
+        }
+    }
+
+    /// Only two numbers compare.
+    #[dialog_common::test]
+    fn it_compares_nothing_that_is_not_a_number() {
+        assert_eq!(
+            Value::UnsignedInt(3).cmp_number(&Value::String("3".into())),
+            None
+        );
+        assert_eq!(
+            Value::Boolean(true).cmp_number(&Value::UnsignedInt(1)),
+            None
+        );
     }
 }
 
