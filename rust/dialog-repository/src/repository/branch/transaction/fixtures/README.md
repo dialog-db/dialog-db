@@ -329,3 +329,68 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
 ```
+
+`main-f8f2655.json` is what `main` at `f8f2655` stores for a deductive
+rule whose head field is declared `integer:` and whose body reads it
+from a `text:` field: a rule this release refuses when it compiles. The
+tests in `../../head_type_tests.rs` install these facts as that release
+did, past the check, and pin that the rule is inert and listed as
+invalid. It was produced by the program below, added as a workspace
+member `rust/capture` of a checkout of `f8f2655`.
+
+```rust
+use dialog_corpus::{Changes, Instruction, Value};
+use dialog_query::Statement;
+use dialog_query::rule::DeductiveRuleDescriptor;
+use serde_json::{Value as Json, json};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn value(value: &Value) -> Json {
+    match value {
+        Value::Bytes(bytes) => json!({ "bytes": hex(bytes) }),
+        Value::Entity(entity) => json!({ "entity": entity.to_string() }),
+        Value::Symbol(symbol) => json!({ "symbol": symbol.to_string() }),
+        Value::String(text) => json!({ "string": text }),
+        other => panic!("not captured: {other:?}"),
+    }
+}
+
+fn main() {
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": { "with": { "value": { "the": "note/body", "as": "integer:", "cardinality": "many" } } },
+        "when": [{
+            "assert": { "with": { "value": { "the": "source/body", "as": "text:", "cardinality": "many" } } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "value": { "?": { "name": "value" } }
+            }
+        }]
+    }))
+    .unwrap();
+    let rule = descriptor.compile().unwrap();
+    let mut changes = Changes::new();
+    (&rule).assert(&mut changes);
+    let mut facts: Vec<Json> = changes
+        .into_instructions()
+        .into_iter()
+        .map(|instruction| match instruction {
+            Instruction::Assert(fact, _) => json!({
+                "the": fact.the.to_string(),
+                "of": fact.of.to_string(),
+                "is": value(&fact.is),
+            }),
+            Instruction::Retract(_) => panic!("an install retracts nothing"),
+        })
+        .collect();
+    facts.sort_by_key(|fact| fact.to_string());
+    let out = json!({
+        "rules": {
+            "text-into-integer": { "entity": rule.this().to_string(), "facts": facts }
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+```

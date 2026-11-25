@@ -13,6 +13,7 @@ use std::fmt;
 
 use crate::corpus::Type as ValueType;
 use crate::pattern::Pattern;
+use crate::rule::types::TypeEnv;
 use crate::selection::Match;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -69,7 +70,40 @@ fn kind_of(side: &Pattern) -> Option<Kind> {
     }
 }
 
+/// Whether a bind took: `false` for a value the term's type does not
+/// read, any other failure an error.
+fn read(bound: Result<(), EvaluationError>) -> Result<bool, EvaluationError> {
+    match bound {
+        Ok(()) => Ok(true),
+        Err(EvaluationError::KindMismatch { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 impl Equality {
+    /// This equality with each variable side that declares no type
+    /// typed as `types` infers it: what the rule proved of the variable,
+    /// a head's declared type among it, holds where the equality binds
+    /// the variable too.
+    pub(crate) fn typed(self, types: &TypeEnv) -> Self {
+        let side = |pattern: Pattern| match pattern {
+            Pattern::Term(term) if term.kind().is_none() => {
+                match term.name().and_then(|name| types.get(name)) {
+                    Some(kind) => Pattern::Term(Term::typed_var(
+                        term.name().unwrap_or_default().to_string(),
+                        kind.clone(),
+                    )),
+                    None => Pattern::Term(term),
+                }
+            }
+            other => other,
+        };
+        Self {
+            this: side(self.this),
+            is: side(self.is),
+        }
+    }
+
     /// Creates a new equality constraint between two parameters.
     pub fn new(this: Term<Any>, is: Term<Any>) -> Self {
         Self {
@@ -170,15 +204,20 @@ impl Equality {
                             (Ok(Binding::Absent), Ok(Binding::Present(_)))
                             | (Ok(Binding::Present(_)), Ok(Binding::Absent)) => {}
                             // One side Present, other unbound: propagate the value.
+                            // A value the unbound term's type does not
+                            // read makes no row, as a scan into the same
+                            // term passes it over.
                             (Err(_), Ok(Binding::Present(is_val))) => {
                                 let mut extension = base.clone();
-                                extension.bind(this, is_val)?;
-                                yield extension;
+                                if read(extension.bind(this, is_val))? {
+                                    yield extension;
+                                }
                             }
                             (Ok(Binding::Present(this_val)), Err(_)) => {
                                 let mut extension = base.clone();
-                                extension.bind(is, this_val)?;
-                                yield extension;
+                                if read(extension.bind(is, this_val))? {
+                                    yield extension;
+                                }
                             }
                             // One side Absent, other unbound: propagate Absent
                             // iff the unbound term's kind explicitly admits
