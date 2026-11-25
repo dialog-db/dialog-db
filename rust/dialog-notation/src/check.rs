@@ -1757,4 +1757,28 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A select whose only premise must not hold is told that its first
+    /// part is its head, which says what an answer is and is not read:
+    /// what must hold is written again as a premise after it.
+    #[test]
+    fn it_tells_a_select_its_first_part_is_its_head() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one))";
+        let checked = check(
+            &mut Analyzer::new()?,
+            &format!("{a} (select (a ?t n: ?n) (unless (a/hidden ?t ?n)))"),
+        );
+        let refused: Vec<_> = checked
+            .refusals()
+            .map(|said| said.message.clone())
+            .collect();
+        assert!(
+            refused.len() == 1
+                && refused[0].starts_with("(select (a ?t n: ?n) (unless (a/hidden ?t ?n)))")
+                && refused[0].contains("first part of a select is its head")
+                && refused[0].contains("is not read"),
+            "{refused:?}"
+        );
+        Ok(())
+    }
 }
