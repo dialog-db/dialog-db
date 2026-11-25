@@ -728,3 +728,60 @@ fn derived_hash(concept: &str, field: &str) -> Result<String> {
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("no derived relation: {:?}", checked.diagnostics))
 }
+
+/// A selection kept standing follows writes through a concept: two
+/// claims of a `cardinality: :one` field answer the newest, and a retract
+/// of the entity alone, which retracts every claim, leaves it answering
+/// nothing of that entity, as a select asked once does.
+#[dialog_common::test]
+async fn it_keeps_a_selection_standing_through_a_retract_of_every_claim() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let checked = dialog_notation::check(
+        &mut Analyzer::new()?,
+        "(concept (p ?t n: ?n) (xyz.p/n of: ?t is: ?n as: :text cardinality: :one))
+         (query (p/name ?t is: ?n) (p ?t n: ?n))
+         (select (p/name ?t is: ?n))",
+    );
+    let selection = checked
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Select(selection) => Some((**selection).clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("a selection: {:?}", checked.diagnostics))?;
+    notebook
+        .submit(
+            "(concept (p ?t n: ?n) (xyz.p/n of: ?t is: ?n as: :text cardinality: :one))
+             (query (p/name ?t is: ?n) (p ?t n: ?n))",
+        )
+        .await?;
+    let live = Live::new(notebook.branch.clone());
+    let mut standing = live.standing(selection.clone())?;
+    let env = notebook.operator.clone();
+    let said = |answers: Vec<_>| {
+        let mut said: Vec<String> = answers.iter().map(ToString::to_string).collect();
+        said.sort();
+        said
+    };
+    notebook.submit(r#"(assert (xyz.p x:1 n: "a"))"#).await?;
+    notebook.submit(r#"(assert (xyz.p x:1 n: "b"))"#).await?;
+    notebook.submit(r#"(assert (xyz.p x:2 n: "kept"))"#).await?;
+    let mut answers = standing.poll(&env).await?.unwrap_or_default();
+    assert_eq!(
+        said(answers.clone()),
+        said(live.select(&selection, &env).await?)
+    );
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    notebook.submit("(retract (p x:1))").await?;
+    if let Some(now) = standing.poll(&env).await? {
+        answers = now;
+    }
+    assert_eq!(
+        said(answers.clone()),
+        said(live.select(&selection, &env).await?)
+    );
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert!(said(answers)[0].contains("kept"));
+    Ok(())
+}
