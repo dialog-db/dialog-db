@@ -159,14 +159,12 @@ pub(crate) fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
             Syntax::Application(_, operand) if operand.terms.contains_key(THIS) => {
                 return Some((part, format!("{THIS}:")));
             }
-            // A label is a name like any other: one under the
-            // namespace would conclude or read what the notation keeps.
-            Syntax::Application(_, operand)
-                if let Some(label) = operand.terms.keys().find(|label| reserved_name(label)) =>
-            {
-                return Some((part, format!("{label}:")));
-            }
             Syntax::Application(operator, operand) => {
+                // A label is a name like any other: one under the
+                // namespace would conclude or read what the notation keeps.
+                if let Some(label) = operand.terms.keys().find(|label| reserved_name(label)) {
+                    return Some((part, format!("{label}:")));
+                }
                 open.extend(operand.terms.values().rev());
                 open.extend(operand.items.iter().rev());
                 open.push(operator);
