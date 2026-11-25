@@ -1924,4 +1924,65 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A read of a derived attribute's label that no conclusion of it
+    /// this analyzer knows writes is a warning, never a refusal, said
+    /// once the whole document is expanded: in the document that
+    /// concludes it, and in a later one. With no conclusion known, which
+    /// may live on the branch, nothing is said, so a read before the
+    /// document that concludes it is accepted and stays so.
+    #[test]
+    fn it_warns_of_a_derived_label_no_known_rule_concludes() -> Result<(), Error> {
+        let list = r#"(concept (list ?l name: ?n)
+              (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))"#;
+        let warned = |checked: &Checked| -> Vec<String> {
+            checked
+                .diagnostics
+                .iter()
+                .filter(|said| said.refusal.is_none() && said.message.contains("list/label"))
+                .map(|said| said.message.clone())
+                .collect()
+        };
+        // Read before anything concludes it, and then concluded.
+        let mut analyzer = Analyzer::new()?;
+        let early = check(
+            &mut analyzer,
+            &format!("{list} (select (list/label ?l wat: ?q))"),
+        );
+        assert!(early.refusals().next().is_none(), "{:?}", early.diagnostics);
+        assert!(warned(&early).is_empty(), "{:?}", warned(&early));
+        let rule = "(rule (list/label ?l is: ?n other: ?n) (list ?l name: ?n))";
+        let concluded = check(&mut analyzer, rule);
+        assert!(
+            concluded.refusals().next().is_none(),
+            "{:?}",
+            concluded.diagnostics
+        );
+        // A later document, and the same one.
+        for text in [
+            "(select (list/label ?l wat: ?q))".to_string(),
+            format!("{list} {rule} (select (list/label ?l wat: ?q))"),
+        ] {
+            let mut fresh = Analyzer::new()?;
+            let analyzer = if text.contains("(rule") {
+                &mut fresh
+            } else {
+                &mut analyzer
+            };
+            let checked = check(analyzer, &text);
+            assert!(
+                checked.refusals().next().is_none(),
+                "{:?}",
+                checked.diagnostics
+            );
+            let said = warned(&checked);
+            assert!(
+                said.len() == 1 && said[0].contains("`wat:`") && said[0].contains("`other:`"),
+                "{text}: {said:?}"
+            );
+        }
+        let read = check(&mut analyzer, "(select (list/label ?l other: ?q))");
+        assert!(warned(&read).is_empty(), "{:?}", warned(&read));
+        Ok(())
+    }
 }
