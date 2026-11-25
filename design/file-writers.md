@@ -31,6 +31,15 @@ it unstarted, and keeps branch heads and credentials out of the file
 ([design.md, "Not in this design"](../research/single-file-format/design.md)).
 No measurement so far has two branches of one replica writing at once.
 
+Seen from tonk (2026-11-25): with several `tonk` processes writing one
+branch on the `fs` provider, a publish that finds the head cell's lock
+held is refused at once as `MemoryError::Storage` (`FileSystemError::Lock`,
+`native.rs` `CLAIM_ATTEMPTS = 2`), not as `VersionMismatch`, so neither
+`Branch::transact` nor `Stack::transact` retries it; on Chronicle the
+writer waits for the file's turn instead. 17 of 64 failures at 2-16
+writers were this refusal. Tonk's design topic `concurrent-cli-writers`
+(in `tonk-labs/tonk`, `design/`) has the measurements.
+
 ## Problem
 
 Many processes work on separate branches of one space at once. On main
