@@ -1206,7 +1206,8 @@ mod tests {
     /// value, not by the value: of two values whose hashes order them the
     /// other way round from their own order, the one with the greater
     /// hash wins, whichever is folded first. One value held by two types
-    /// (the natural 3 and the float 3.0) is a tie neither wins.
+    /// (the natural 3 and the float 3.0) hashes as one, and the narrowest
+    /// type wins, whichever is folded first; of the two zeros, `0.0`.
     #[dialog_common::test]
     fn an_equal_standing_ties_by_the_hash_of_the_value() {
         use super::{Cardinality, Cause, Edition, Standing, Value};
@@ -1234,14 +1235,25 @@ mod tests {
 
         let (natural, float) = (Value::UnsignedInt(3), Value::Float(3.0));
         assert_eq!(natural.tiebreak(), float.tiebreak());
-        assert!(!Cardinality::newer(
-            (&natural, Some(&standing)),
-            (&float, Some(&standing))
-        ));
-        assert!(!Cardinality::newer(
-            (&float, Some(&standing)),
-            (&natural, Some(&standing))
-        ));
+        for (narrow, wide) in [
+            (natural.clone(), float.clone()),
+            (Value::UnsignedInt(3), Value::SignedInt(3)),
+            (Value::SignedInt(-3), Value::Float(-3.0)),
+            (Value::Float(0.0), Value::Float(-0.0)),
+        ] {
+            assert!(Cardinality::newer(
+                (&narrow, Some(&standing)),
+                (&wide, Some(&standing))
+            ));
+            assert!(!Cardinality::newer(
+                (&wide, Some(&standing)),
+                (&narrow, Some(&standing))
+            ));
+            let claims = [(&wide, Some(&standing)), (&narrow, Some(&standing))];
+            assert_eq!(Cardinality::One.elect(claims), Some(1));
+            let claims = [(&narrow, Some(&standing)), (&wide, Some(&standing))];
+            assert_eq!(Cardinality::One.elect(claims), Some(0));
+        }
     }
 
     /// The instructions of a batch come in entity then attribute order,

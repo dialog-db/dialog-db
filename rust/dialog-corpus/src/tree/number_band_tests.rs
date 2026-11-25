@@ -250,23 +250,17 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A tree an earlier release keyed in per-type bands holds `5` and `5.0`
-/// as two claims of one cell, and two claims one commit wrote stand
-/// equal. [`Value::tiebreak`] hashes the number, not the type, so the
-/// tie between them must still elect one of the two whatever order the
-/// election meets them in, as it does for any other two values.
-///
-/// Fails today: the tie elects whichever claim it holds first. Not yet
-/// established, and to settle before a fix:
-///
-/// - Whether a tree a release before 0.3.0 wrote holds such a pair at
-///   equal standing: here neither claim has a revision or a cause.
-/// - Whether a stored read is order-dependent in practice: one scan
-///   meets a cell's rows in key order, where the natural's type byte
-///   sorts first, so one tree elects one claim each time; whether the
-///   entity scan and the value-known challenge meet them in one order
-///   is unchecked.
-/// - Which claim survives when `rekey` moves both onto one band key.
+/// A tree a release before 0.3.0 keyed in per-type bands holds `5` and
+/// `5.0` as two claims of one cell when one commit asserted both under
+/// cardinality many: that release wrote an assertion with no cause and
+/// stamped every claim of a commit with the commit's version, so the two
+/// stand equal. [`Value::tiebreak`] hashes the number, not the type, so
+/// it cannot tell them apart, and the election takes the narrowest type,
+/// the natural, whichever order it meets them in. That is what the tree
+/// answers once rewritten into the band (`rekey_tree`), which puts both
+/// claims on one key that reads back as the natural `5`, and what every
+/// stored read of the unmigrated tree already answered: each meets a
+/// cell's rows in key order, and per-type keys sort the natural first.
 #[dialog_common::test]
 async fn it_elects_one_of_a_number_held_as_two_types_in_either_order() -> anyhow::Result<()> {
     let item = Entity::new()?;
@@ -285,28 +279,35 @@ async fn it_elects_one_of_a_number_held_as_two_types_in_either_order() -> anyhow
         .scan_owned(
             store.clone(),
             SpillCache::with_budget(0),
-            Selector::new().of(item),
+            Selector::new().of(item.clone()),
         )
         .try_collect()
         .await?;
     let [natural, float] = rows.as_slice() else {
         anyhow::bail!("expected two claims of the cell, found {}", rows.len());
     };
+    assert_eq!(
+        (&natural.is, &float.is),
+        (&Value::UnsignedInt(5), &Value::Float(5.0)),
+        "the scan meets the natural first"
+    );
 
     let forward = FactView::from(natural.clone()).elect(FactView::from(float.clone()))?;
     let backward = FactView::from(float.clone()).elect(FactView::from(natural.clone()))?;
-    assert_eq!(
-        forward.to_owned()?.is,
-        backward.to_owned()?.is,
-        "a stored cardinality-one read elects the same claim in either order"
-    );
+    assert_eq!(forward.to_owned()?.is, Value::UnsignedInt(5));
+    assert_eq!(backward.to_owned()?.is, Value::UnsignedInt(5));
 
-    let natural = (&natural.is, None);
-    let float = (&float.is, None);
-    assert_ne!(
-        Cardinality::newer(natural, float),
-        Cardinality::newer(float, natural),
-        "exactly one of the two is the newer, whichever is the candidate"
+    let manifest = Manifest {
+        value_encoding: NUMBER_BAND,
+        ..per_type.manifest(&store).await?
+    };
+    let mut delta = ArchiveDelta::zero();
+    let band = super::rekey::rekey_tree(&per_type, &store, &mut delta, manifest).await?;
+    delta.flush_into(&store);
+    assert_eq!(
+        values(&band, &store, Selector::new().of(item)).await?,
+        vec![Value::UnsignedInt(5)],
+        "the rewrite holds the number once, read as the natural the election took"
     );
     Ok(())
 }

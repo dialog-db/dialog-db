@@ -253,33 +253,42 @@ impl Hash for Ranking {
 mod tests {
     use super::*;
 
-    /// One number held as two types, standing equal, is picked the same
-    /// way whichever comes first: `max` takes the float `3.0` and `min`
-    /// the natural `3`, by type, as their value, standing and hash are
-    /// all equal. Numbers of different values order by value.
+    /// One number held as two types (the natural `3` and the float
+    /// `3.0`) is one value to a pick: their value, standing and hash are
+    /// all equal, and the election's tie takes the narrowest type, as a
+    /// read of the band yields, whichever comes first and for `max`,
+    /// `min` and `last` alike. The two zeros resolve the same way, `0.0`
+    /// over `-0.0`, and the natural `0` over either. Numbers of
+    /// different values order by value.
     #[dialog_common::test]
     fn it_picks_one_number_of_two_types_the_same_in_either_order() {
         let natural = Value::UnsignedInt(3);
+        let integer = Value::SignedInt(3);
         let float = Value::Float(3.0);
         assert_eq!(natural.tiebreak(), float.tiebreak(), "one number, one hash");
-        for (aggregate, expected) in [(Selective::Max, &float), (Selective::Min, &natural)] {
-            let picked = |first: &Value, second: &Value| {
-                if aggregate.prefers(&[], (second, None), (first, None)) {
-                    second.clone()
-                } else {
-                    first.clone()
-                }
-            };
-            assert_eq!(
-                &picked(&natural, &float),
-                expected,
-                "{aggregate:?}, natural first"
-            );
-            assert_eq!(
-                &picked(&float, &natural),
-                expected,
-                "{aggregate:?}, float first"
-            );
+        let cases = [
+            (&natural, &float, &natural),
+            (&natural, &integer, &natural),
+            (&integer, &float, &integer),
+            (&Value::Float(0.0), &Value::Float(-0.0), &Value::Float(0.0)),
+            (
+                &Value::UnsignedInt(0),
+                &Value::Float(-0.0),
+                &Value::UnsignedInt(0),
+            ),
+        ];
+        for aggregate in [Selective::Max, Selective::Min, Selective::Last] {
+            for (a, b, expected) in cases {
+                let picked = |first: &Value, second: &Value| {
+                    if aggregate.prefers(&[], (second, None), (first, None)) {
+                        second.clone()
+                    } else {
+                        first.clone()
+                    }
+                };
+                assert_eq!(&picked(a, b), expected, "{aggregate:?}, {a:?} first");
+                assert_eq!(&picked(b, a), expected, "{aggregate:?}, {b:?} first");
+            }
         }
         assert!(Selective::Max.prefers(&[], (&Value::UnsignedInt(4), None), (&float, None)));
         assert!(Selective::Min.prefers(&[], (&Value::Float(2.5), None), (&natural, None)));
