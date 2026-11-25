@@ -1204,6 +1204,41 @@ mod tests {
     use super::*;
     use crate::form::read;
 
+    /// The names of derived attributes kept are the latest made, no more
+    /// than the bound: the oldest is let go first, and one made again is
+    /// not counted twice.
+    #[test]
+    fn it_keeps_the_latest_names_of_derived_attributes_to_a_bound() {
+        let mut made = Made {
+            names: BTreeMap::new(),
+            order: std::collections::VecDeque::new(),
+        };
+        for at in 0..WRITTEN_KEPT + 10 {
+            made.insert(format!("h{at}"), format!("c/n{at}"));
+            made.insert("h0".into(), "c/n0".into());
+        }
+        assert!(made.names.len() <= WRITTEN_KEPT);
+        assert_eq!(made.names.len(), made.order.len());
+        assert!(!made.names.contains_key("h1"));
+        assert!(made.names.contains_key(&format!("h{}", WRITTEN_KEPT + 9)));
+    }
+
+    /// A text is told in one pass: each derived attribute named as it is
+    /// written, under its label or as its value, and each tagged variable
+    /// untagged, wherever they stand and however many there are.
+    #[test]
+    fn it_tells_a_text_in_the_authors_terms_in_one_pass() {
+        let open = derived("list", "count-open").unwrap();
+        let count = derived("list", "count").unwrap();
+        assert_eq!(
+            told(&format!(
+                "{open}/is and {count}/status beside ?t[0], ?[2] and {open}"
+            )),
+            "list/count-open and list/count status: beside ?t, _ and list/count-open"
+        );
+        assert_eq!(told("dialog.n.c.unknown/is"), "dialog.n.c.unknown/is");
+    }
+
     fn one(text: &str) -> Syntax {
         Syntax::try_from(&read(text).unwrap()[0]).unwrap()
     }
