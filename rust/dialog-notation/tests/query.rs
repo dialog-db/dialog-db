@@ -1388,3 +1388,33 @@ async fn it_takes_an_answer_apart_by_its_keys_in_any_order() -> Result<()> {
     assert_eq!(answers[0], answers[1]);
     Ok(())
 }
+
+/// A pin, not a decision (gaps row 53): what `(collect ?x)` gathers is a
+/// set, so two entities whose field holds the same value are collected
+/// once, and a count over the collection counts the value once.
+#[dialog_common::test]
+async fn it_pins_that_a_collection_is_a_set() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (memo ?m text: ?x)
+                 (xyz.memo/text of: ?m is: ?x as: :text cardinality: :one))
+               (query (memo/texts is: ?all) (memo _ text: (collect ?all)))
+               (query (memo/size is: ?size)
+                 (memo _ text: (collect ?all))
+                 (is ?size {:texts (count ?all)}))
+               (assert (memo memo:1 text: "same"))
+               (assert (memo memo:2 text: "same"))
+               (assert (memo memo:3 text: "other"))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (memo/texts is: ?all))").await?,
+        vec![r#"(memo/texts is: {: "other" : "same"})"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(select (memo/size is: ?size))").await?,
+        vec!["(memo/size is: {:texts 2})"]
+    );
+    Ok(())
+}
