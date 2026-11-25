@@ -1319,6 +1319,11 @@ pub struct Expander {
     /// relation than its own text does. A use is kept only while its form
     /// is: one refused is forgotten, as it installed nothing.
     derived_uses: BTreeMap<String, Vec<(usize, usize, String)>>,
+    /// Each derived attribute a rule concludes, `list/label`, with each
+    /// conclusion: the document, the form in it, and the labels its head
+    /// writes. What a read of a label no conclusion writes is warned of
+    /// by. A conclusion is kept only while its form is.
+    derived_concluded: BTreeMap<String, Vec<(usize, usize, BTreeSet<String>)>>,
     /// The documents checked so far, this one among them.
     documents: usize,
     /// The sites of the tree being expanded, each by its reference,
@@ -1633,10 +1638,12 @@ impl Expander {
                 }
             }
         }
+        let reads = self.conclusions(&kernel);
         let forgotten: BTreeSet<usize> = refused.keys().copied().collect();
         self.forget_uses(&forgotten);
         let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
+        diagnostics.extend(self.unconcluded(reads, &trees));
         (kernel, diagnostics)
     }
 
@@ -1648,6 +1655,99 @@ impl Expander {
             uses.retain(|(at, tree, _)| *at != document || !refused.contains(tree));
             !uses.is_empty()
         });
+        self.derived_concluded.retain(|_, concluded| {
+            concluded.retain(|(at, tree, _)| *at != document || !refused.contains(tree));
+            !concluded.is_empty()
+        });
+    }
+
+    /// Record what each rule of `kernel` concludes of a derived
+    /// attribute, and give each read of one its premises make: the form
+    /// it came of, the derived attribute, and the labels it reads.
+    fn conclusions(&mut self, kernel: &[Syntax]) -> Vec<(usize, String, BTreeSet<String>)> {
+        let derived = |tree: &Syntax| -> Option<(String, BTreeSet<String>)> {
+            let name = tree.applies()?.strip_prefix(syntax::DERIVED_READ)?;
+            let labels = tree
+                .operand()
+                .map(|operand| operand.terms.keys().cloned().collect())
+                .unwrap_or_default();
+            Some((name.to_string(), labels))
+        };
+        let mut reads = Vec::new();
+        for (rule, at) in kernel.iter().zip(&self.origin) {
+            let Some(operand) = rule.operand() else {
+                continue;
+            };
+            let Some((head, premises)) = operand.items.split_first() else {
+                continue;
+            };
+            if let Some((name, labels)) = derived(head) {
+                self.derived_concluded
+                    .entry(name)
+                    .or_default()
+                    .push((self.documents, *at, labels));
+            }
+            for premise in premises {
+                let parts: Vec<&Syntax> = if premise.applies() == Some("unless") {
+                    premise
+                        .operand()
+                        .map(|operand| operand.items.iter().collect())
+                        .unwrap_or_default()
+                } else {
+                    vec![premise]
+                };
+                for part in parts {
+                    if let Some((name, labels)) = derived(part) {
+                        reads.push((*at, name, labels));
+                    }
+                }
+            }
+        }
+        reads
+    }
+
+    /// A warning of each of `reads` that names a label no conclusion of
+    /// its derived attribute this expander knows writes, when it knows
+    /// one: a rule it does not know, one on the branch, may conclude it,
+    /// so it is never refused, and with none known nothing is said.
+    fn unconcluded(
+        &self,
+        reads: Vec<(usize, String, BTreeSet<String>)>,
+        trees: &[Syntax],
+    ) -> Vec<Diagnostic> {
+        let mut said: Vec<Diagnostic> = Vec::new();
+        for (at, name, labels) in reads {
+            let Some(concluded) = self.derived_concluded.get(&name) else {
+                continue;
+            };
+            let known: BTreeSet<&String> =
+                concluded.iter().flat_map(|(_, _, labels)| labels).collect();
+            let unknown: Vec<String> = labels
+                .iter()
+                .filter(|label| !known.contains(label))
+                .map(|label| format!("`{label}:`"))
+                .collect();
+            if unknown.is_empty() {
+                continue;
+            }
+            let concludes: Vec<String> = known.iter().map(|label| format!("`{label}:`")).collect();
+            let diagnostic = Diagnostic {
+                form: trees.get(at).cloned(),
+                message: format!(
+                    "a read of `{name}` names {}, which no rule known here concludes of it: they \
+                     conclude {}. A rule on the branch may; if not, the read answers nothing",
+                    unknown.join(", "),
+                    concludes.join(", ")
+                ),
+                path: vec![Segment::Item(at)],
+                span: None,
+                refusal: None,
+            };
+            if !said.contains(&diagnostic) {
+                said.push(diagnostic);
+            }
+        }
+        said
     }
 
     /// Say the tree being expanded defines `key`: refused, naming both,

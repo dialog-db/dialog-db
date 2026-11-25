@@ -146,6 +146,12 @@ What this changes for you:
   named `as` and answered nothing. `cardinality:` on one is refused, its
   cardinality being what its rules conclude, and so is `as:` with no
   `is:` to type.
+- A read of a derived attribute's label that no rule the analyzer knows
+  concludes of it, `(select (list/label ?l wat: ?q))` beside a rule
+  concluding `is:` and `other:`, is a warning naming what they conclude,
+  never a refusal: a rule on the branch may conclude it. With no
+  conclusion of the attribute known nothing is said, so a read before
+  the document that concludes it is accepted as before.
 - A count asked of what was not gathered says that count counts what
   was gathered, a set of distinct values, and how to count entities:
   gather a record that holds each, then count it. A fold not there yet
