@@ -1059,7 +1059,12 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
                 )),
                 other => {
                     return Err(Error::Refused(format!(
-                        "{shape}: {other} is not the whole of a field, and count counts one"
+                        "{shape}: {other} is not the whole of a field, and count counts what was \
+                         collected, `(collect ?x)`, which is a set: equal values are one. To \
+                         count entities, collect something that holds each, a record with the \
+                         entity in it, and count that: `(query (item/card ?t is: ?c) (item ?t \
+                         title: ?x) (is ?c {{:id ?t :title ?x}}))`, then `(item/card _ is: \
+                         (collect ?cards))` and `(count ?cards)`"
                     )));
                 }
             },
@@ -1077,6 +1082,7 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
 /// What a function of a collection other than `count` is refused with.
 pub fn unknown_function(shape: &Syntax) -> Error {
     Error::Unsupported(format!(
-        "{shape}: the one function of what was collected there is yet is `(count ?x)`"
+        "{shape}: the one function of what was collected there is yet is `(count ?x)`, the \
+         size of the set; `count-distinct`, `sum`, `min`, `max` and `avg` are not there yet"
     ))
 }
