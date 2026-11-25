@@ -27,6 +27,7 @@
 //! [`DeductiveRule::apply`](crate::DeductiveRule), which binds
 //! concrete values into the head.
 
+use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 use crate::corpus::Type as ValueType;
@@ -328,9 +329,22 @@ pub fn analyze(
 /// float not as an integer (it may have a fraction). Only a variable
 /// the body types as a number is held to the band; one it leaves
 /// open, or types outside the numbers, is not judged here.
-fn head_mismatch(field: &str, declared: &Kind, inferred: &Kind) -> Option<(ValueType, String)> {
+fn head_mismatch(
+    field: &str,
+    the: &The,
+    declared: &Kind,
+    inferred: &Kind,
+) -> Option<(ValueType, String)> {
     let present = inferred.clone().required().primitive_part();
     let target = declared.clone().required().primitive_part();
+    if let Some(shape) = disjoint(present, target) {
+        return Some((
+            shape,
+            format!(
+                "{the} holds no value of the one, so the rule would conclude nothing; bind ?{field} from a value the field reads, or declare the field {inferred}"
+            ),
+        ));
+    }
     let numbers = Primitive::NUMERIC;
     if present.intersect(numbers) != Some(present) || target.intersect(numbers).is_none() {
         return None;
@@ -359,6 +373,29 @@ fn head_mismatch(field: &str, declared: &Kind, inferred: &Kind) -> Option<(Value
         return Some((shape, reason));
     }
     None
+}
+
+/// A shape of `present`, the types the body binds a head field's
+/// variable to, when the field's declared types, `target`, read none of
+/// them: the rule could conclude nothing the field holds. A number of
+/// any type shares values with a number field of any other, which
+/// [`head_mismatch`] judges through the band, and a text, a symbol and
+/// an entity convert into one another ([`Value::conform`]), so a field
+/// of one of those reads all of its group here. `None` when the body
+/// binds nothing it knows (an empty set) or something the field reads.
+///
+/// [`Value::conform`]: crate::Value::conform
+fn disjoint(present: Primitive, target: Primitive) -> Option<ValueType> {
+    let mut readable = target;
+    for group in [Primitive::NUMERIC, Primitive::TEXTUAL] {
+        if target.intersect(group).is_some() {
+            readable = readable.union(group);
+        }
+    }
+    if present.is_empty() || present.intersect(readable).is_some() {
+        return None;
+    }
+    present.iter().next()
 }
 
 /// [`analyze`] with a `reduce` clause: `(field, spec)` pairs in
@@ -482,7 +519,9 @@ pub fn analyze_with(
         let Some(inferred) = types.get(field) else {
             continue;
         };
-        if let Some((offending, reason)) = head_mismatch(field, &declared, inferred) {
+        if let Some((offending, reason)) =
+            head_mismatch(field, descriptor.the(), &declared, inferred)
+        {
             let bound_by = types
                 .narrowings()
                 .iter()
