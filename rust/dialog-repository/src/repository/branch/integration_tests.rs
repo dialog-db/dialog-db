@@ -8421,3 +8421,79 @@ async fn notes_in<S: PeerSpace>(layered: &Layered<S>) -> Result<Vec<(String, Str
     read.sort();
     Ok(read)
 }
+
+/// Two syncs of a stack racing on one replica both return, on the
+/// platform's durable storage, and the replica's write reaches the
+/// remote.
+///
+/// Each sync pushes the replica's head. Both push the same head from the
+/// same base, so the second's publish to the remote loses the
+/// compare-and-swap the first won, to the very head it meant to publish.
+///
+/// A reproduction: it fails on main, on every provider, with "Failed to
+/// publish revision to upstream: Version mismatch: expected …, found an
+/// unknown state". The remote says only that the condition failed, not
+/// what it holds, and the push takes a lost compare-and-swap it cannot
+/// see past as the push's answer.
+#[dialog_common::test]
+async fn it_lands_two_syncs_racing_on_one_replica(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_two_syncs)
+}
+
+/// [`it_lands_two_syncs_racing_on_one_replica`] in memory, where it fails
+/// the same way: the race is at the remote, not in the replica's store.
+#[dialog_common::test]
+async fn it_lands_two_syncs_racing_on_one_replica_in_memory(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    race_two_syncs(&layered_in_memory(&seed, &s3).await?).await
+}
+
+/// Five rounds of a write into `layered`'s durable layer, then two syncs
+/// of the stack racing; then every note written is in the layer, and the
+/// remote's head, as the replica recorded it, is the replica's own.
+async fn race_two_syncs<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    for round in 0..5 {
+        let doc = format!("doc:t-{round}");
+        layered
+            .follower
+            .assert(noted(&doc.parse()?, "t", &layered.notes))
+            .perform(&layered.env)
+            .await?;
+        notes.push((doc, "t".into()));
+        let (first, second) = futures_util::join!(
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+            layered
+                .follower
+                .sync(crate::Download::QueriedRanges)
+                .perform(&layered.env),
+        );
+        first.with_context(|| format!("round {round}: the first sync returns"))?;
+        second.with_context(|| format!("round {round}: the second sync returns"))?;
+    }
+    notes.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        notes,
+        "the layer holds every note written between the syncs"
+    );
+    let primary = layered.follower.primary();
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        primary.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the primary pulls from no remote");
+    };
+    let upstream = remote.branch(branch).open().perform(&layered.env).await?;
+    assert_eq!(
+        upstream.revision().map(|head| head.tree),
+        primary.revision().map(|head| head.tree),
+        "the syncs published the replica's head, and recorded it"
+    );
+    Ok(())
+}
