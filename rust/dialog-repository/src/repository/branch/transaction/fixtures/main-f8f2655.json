@@ -1,0 +1,37 @@
+{
+  "rules": {
+    "text-into-integer": {
+      "entity": "rule:JCckzqBYMuzzDLExfZaSTiv1VTkgZgmNiPnSWKzFjCzo",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a362617365746578743a637468656b736f757263652f626f64796b63617264696e616c697479646d616e7966646564756365a16477697468a1627e30a362617368696e74656765723a63746865696e6f74652f626f64796b63617264696e616c697479646d616e7966666f726d617404"
+          },
+          "of": "rule:JCckzqBYMuzzDLExfZaSTiv1VTkgZgmNiPnSWKzFjCzo",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:2wuZtqVpKyoghm87Xxta4n9kT4MPY6jBw6V2uqqEp9Wv"
+          },
+          "of": "rule:JCckzqBYMuzzDLExfZaSTiv1VTkgZgmNiPnSWKzFjCzo",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:note/body"
+          },
+          "of": "rule:JCckzqBYMuzzDLExfZaSTiv1VTkgZgmNiPnSWKzFjCzo",
+          "the": "dialog.rule/derives"
+        },
+        {
+          "is": {
+            "entity": "on:source/body"
+          },
+          "of": "rule:JCckzqBYMuzzDLExfZaSTiv1VTkgZgmNiPnSWKzFjCzo",
+          "the": "dialog.rule/reads"
+        }
+      ]
+    }
+  }
+}
