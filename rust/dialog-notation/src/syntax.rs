@@ -123,7 +123,8 @@ pub fn derived_read(concept: &str, field: &str) -> String {
 /// The concept and the field a derived attribute's name as the analyzer
 /// writes it holds, split at its last `/`: `dialog.n.c/nb/blocks/count`
 /// is `nb/blocks` and `count`. None where the name is no such one: the
-/// concept a declarable name, the field a label of one, neither empty.
+/// concept a name a document may declare ([`declares`]), the field a
+/// label of one, neither empty.
 pub fn derived_parts(name: &str) -> Option<(&str, &str)> {
     let (concept, field) = name.strip_prefix(DERIVED_READ)?.rsplit_once('/')?;
     let label =
@@ -132,7 +133,7 @@ pub fn derived_parts(name: &str) -> Option<(&str, &str)> {
         && !concept.starts_with('/')
         && !concept.ends_with('/')
         && !concept.contains("//")
-        && named(concept) == Named::Declarable
+        && declares(concept)
         && label(field))
     .then_some((concept, field))
 }

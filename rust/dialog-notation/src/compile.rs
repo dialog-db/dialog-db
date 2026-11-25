@@ -594,6 +594,25 @@ fn writes_reserved(form: &Syntax) -> Option<Result<Error, Error>> {
             }
         }
     }
+    // A head into the record of descriptions written as its attribute,
+    // `(syntax.meta/description ?t is: ?n)`, as a document's is.
+    if let [head, ..] = form
+        .operand()
+        .map_or(&[][..], |operand| operand.items.as_slice())
+        && form.applies() == Some("rule")
+    {
+        let written = match head.applies() {
+            Some("assert" | "retract") => head.operand().and_then(|operand| operand.items.first()),
+            _ => Some(head),
+        };
+        if written
+            .and_then(Syntax::applies)
+            .and_then(|name| name.split_once('/'))
+            .is_some_and(|(domain, _)| domain == DESCRIBED)
+        {
+            return Some(Ok(Error::Reserved(DESCRIBED.to_string())));
+        }
+    }
     let rule = Rule::parse(form).ok()?;
     let read = match &rule.head {
         Head::Assert(read) | Head::Retract(read) | Head::Hold(read) | Head::Derive(read) => read,
