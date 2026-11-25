@@ -3775,3 +3775,117 @@ async fn it_pins_what_a_derived_attribute_with_labels_answers_today() -> Result<
     );
     Ok(())
 }
+
+/// A pin, not a decision (gaps row 47): what Dialog-DB refuses of an
+/// attribute's domain and field beyond what the notation tells apart is
+/// refused when it is compiled, as the whole form the author wrote, at
+/// its place in the document, with Dialog-DB's reason. The notation does
+/// not mirror these rules; this is the list of what is refused today and
+/// with what text.
+#[dialog_common::test]
+fn it_pins_what_dialog_db_refuses_of_an_attribute_today() -> Result<()> {
+    for (text, said) in [
+        (
+            "(select (Xyz.t ?x name: ?n))",
+            "invalid relation \"Xyz.t/name\": domain must start with a lowercase letter",
+        ),
+        (
+            "(select (xyz_q.t ?x name: ?n))",
+            "invalid relation \"xyz_q.t/name\": domain must contain only lowercase letters, \
+             digits, hyphens, or dots",
+        ),
+        (
+            "(select (xyz.t ?x Name: ?n))",
+            "invalid relation \"xyz.t/Name\": name must start with a lowercase letter",
+        ),
+        (
+            "(select (xyz.t ?x 9name: ?n))",
+            "invalid relation \"xyz.t/9name\": name must start with a lowercase letter",
+        ),
+        (
+            "(select (xyz.t ?x na_me: ?n))",
+            "invalid relation \"xyz.t/na_me\": name must contain only lowercase letters, digits, \
+             or hyphens",
+        ),
+        (
+            "(select (xyz.t ?x caf\u{e9}: ?n))",
+            "invalid relation \"xyz.t/caf\u{e9}\": name must contain only lowercase letters, \
+             digits, or hyphens",
+        ),
+        (
+            "(select (xyz.t ?x name-: ?n))",
+            "invalid relation \"xyz.t/name-\": name must not end with a hyphen",
+        ),
+        (
+            "(assert (xyz.t x:1 na_me: 1))",
+            "invalid relation \"xyz.t/na_me\": name must contain only lowercase letters, digits, \
+             or hyphens",
+        ),
+    ] {
+        let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, text);
+        let written = read(text)?;
+        assert_eq!(
+            checked.diagnostics.len(),
+            1,
+            "{text}: {:?}",
+            checked.diagnostics
+        );
+        let refused = &checked.diagnostics[0];
+        assert_eq!(refused.message, said, "{text}");
+        assert_eq!(
+            refused.form.as_ref().map(ToString::to_string),
+            Some(written[0].to_string()),
+            "{text}"
+        );
+        assert_eq!(
+            refused.path,
+            vec![dialog_notation::Segment::Item(0)],
+            "{text}"
+        );
+    }
+    Ok(())
+}
+
+/// At the limits of what Dialog-DB keeps, a document runs end to end: a
+/// concept named in 63 bytes is declared, written and read; an attribute
+/// of 64 bytes, and a domain whose read makes one of 64, are written and
+/// read. One byte more of each is refused (`it_refuses_a_name_dialog_db_
+/// cannot_keep_in_the_authors_terms`, `src/expand.rs`).
+#[dialog_common::test]
+async fn it_runs_a_document_at_the_limits_of_a_name() -> Result<()> {
+    let concept = "c".repeat(63);
+    let attribute = format!("xyz.{}/name", "a".repeat(55));
+    let domain = format!("xyz.{}", "d".repeat(54));
+    assert_eq!(
+        (concept.len(), attribute.len(), domain.len() + "/name".len()),
+        (63, 64, 63)
+    );
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!(
+            r#"(concept ({concept} ?x name: ?n)
+                 ({attribute} of: ?x is: ?n as: :text cardinality: :one))
+               (assert ({concept} t:1 name: "kept"))
+               (assert ({domain} t:2 name: "also"))"#
+        ))
+        .await?;
+    // The concept is read through its line, and said as the line's
+    // domain.
+    let kept = format!(
+        r#"({} t:1 name: "kept")"#,
+        attribute.split_once('/').unwrap().0
+    );
+    assert_eq!(
+        report(&mut notebook, &format!("(select ({concept} ?x name: ?n))")).await?,
+        vec![kept.clone()]
+    );
+    assert_eq!(
+        report(&mut notebook, &format!("(select ({attribute} ?x ?n))")).await?,
+        vec![kept]
+    );
+    assert_eq!(
+        report(&mut notebook, &format!("(select ({domain} ?x name: ?n))")).await?,
+        vec![format!(r#"({domain} t:2 name: "also")"#)]
+    );
+    Ok(())
+}

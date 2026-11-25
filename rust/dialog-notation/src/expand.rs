@@ -4532,4 +4532,35 @@ mod tests {
             vec!["(rule (report (xyz.t ?x name: ?n)) (xyz.t ?x name: ?n))"]
         );
     }
+
+    /// A name in a value's place is kept as a tree's names are, so one
+    /// too long is refused as one applied is, in the author's terms; in
+    /// a write a bare name is no value at all, and is refused saying so
+    /// where it is compiled.
+    #[test]
+    fn it_refuses_a_name_too_long_in_a_values_place() {
+        let long = "a".repeat(64);
+        let says = format!("`{long}` is 64 bytes, and a name is at most 63 bytes");
+        for text in [
+            format!("(select (xyz.t ?x state: {long}))"),
+            format!(
+                "(concept (t ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one)) \
+                 (select (t ?x name: {long}))"
+            ),
+        ] {
+            let refused = expanded("", &text).unwrap_err().to_string();
+            assert!(refused.contains(&says), "{text}: {refused}");
+        }
+        let checked = crate::check::check(
+            &mut crate::analyze::Analyzer::new().unwrap(),
+            &format!("(assert (xyz.t x:1 state: {long}))"),
+        );
+        assert!(
+            checked
+                .refusals()
+                .any(|refused| refused.message.contains("is a name, not a value")),
+            "{:?}",
+            checked.diagnostics
+        );
+    }
 }
