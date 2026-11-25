@@ -240,6 +240,95 @@ Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
 
+### A rule can be laid over one query of a transaction
+
+[#873](https://github.com/dialog-db/dialog-db/pull/873)
+
+`TransactionQuery::with_rule` lays a deductive rule over a single query
+of a transaction's view: the rule reads the claims the branch holds and
+the ones the transaction stages, a staged cardinality-one replace as the
+commit will leave the cell, and nothing of it is staged or written. A
+transaction's view stays closed to more fact sources; a rule adds no
+fact, only a way of reading the facts there are.
+
+What this changes for you:
+
+- New: `TransactionQuery::with_rule(DeductiveRule)`, chainable before
+  `select`. Each `Transaction::query()` starts with no rule laid over
+  it, so one query's rules are never another's.
+- Nothing else: a transaction query with no rule laid over it reads as
+  before.
+
+Why: a write computed from a read in the middle of a transaction, such
+as a notation document's `when`, may read through a rule of its own, a
+query of several premises. It had to read the branch without the
+transaction's own writes, or stage the rule and take it back before the
+commit.
+### A rule whose head declares a type its body binds none of is refused
+
+[#869](https://github.com/dialog-db/dialog-db/pull/869)
+
+A head field's declared type is what the rule concludes. A rule whose
+body bound the head's variable to a type the field reads none of (a
+head declared `integer:` over a body field declared `text:`, or a head
+declared `text:` set from a formula's sum) compiled and concluded those
+values under the head anyway. It is now refused when it compiles, with
+`TypeError::HeadField` naming the field, the attribute, its declared
+type and the type the body binds, and so cannot be installed. Where the
+body leaves the variable open (a field that declares no type, or an
+equality with a constant), the head's type now narrows it, as it already
+did for a number head, and the rule concludes only the values the field
+reads.
+
+What this changes for you:
+
+- `DeductiveRuleDescriptor::compile` and `DeductiveRule::new` return
+  `TypeError::HeadField` for such a rule. It compiled.
+- A rule with a non-number head over a body field of no type concludes
+  only the values of the head's type: a `text:` head over a field
+  holding `"hello"` and `7` concludes `"hello"`. It concluded both.
+- A rule whose head variable is set equal to a constant of a type the
+  head does not read concludes nothing. It concluded the constant.
+- A number of another number type is judged through the band as before
+  (an integer into a `natural:` head is refused as possibly negative):
+  numbers are one stratum. A text, a symbol and an entity are each a
+  stratum of their own, so a symbol or an entity into a `text:` head is
+  refused like any other type.
+
+Why: a field's type is part of which attribute a rule concludes, so a
+rule must not put a value of another type under it; where that is
+certain from the rule alone, saying so when it is written is better
+than concluding values no typed read can see.
+
+### A typed read bound to a constant its type does not read answers nothing
+
+[#868](https://github.com/dialog-db/dialog-db/pull/868)
+
+A field that declares a type reads only the values of that type, so a
+value of another type is no fact of the field. A cardinality-one read
+whose entity was unbound and whose value was bound to a constant found
+the facts holding that constant by the constant alone, and answered one
+whatever its type: a field declared `text:` bound to the integer `-3`
+answered the stored `-3`, and a field that picks `max` over `natural:`
+bound to `"hello"` answered the stored `"hello"`. Each fact such a read
+finds is now read through the field's type, as the read with its value
+unbound reads it.
+
+What this changes for you:
+
+- A read through a typed field whose value is bound to a constant the
+  type does not read answers nothing, under every cardinality and
+  through a pick, with the entity bound or unbound. Under cardinality
+  one with the entity unbound it answered the facts holding the
+  constant.
+- A constant of another number type than the stored number still finds
+  it: a `float:` field bound to the natural `3` finds a stored `3`.
+- A read whose value is unbound, and a read through a field that
+  declares no type, answer as before.
+
+Why: a field's type is part of which attribute it reads, so binding the
+value must not widen what the read answers.
+
 ### A typed read of a relation a rule deduces reads it as it reads a stored one
 
 [#866](https://github.com/dialog-db/dialog-db/pull/866)
@@ -1553,6 +1642,17 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule whose head declares a type its body binds none of: an older
+  replica may hold one, installed by a release that compiled it.
+  Nothing is rewritten. On upgrade it fails to hydrate, so it is inert:
+  it derives nothing, fires at no commit, and no read, commit or pull
+  fails over it, and `dialog.rule/invalid` lists it as `undecodable:`
+  with the head's attribute and both types. An older release still runs
+  it, so until every replica upgrades a mixed fleet differs in what the
+  rule derives. The author re-authors the rule (reads the body field as
+  the head's type, or declares the head as the body's), which gives it
+  a new identity. `Branch::upgrade_rules` leaves it as it is and lists
+  it in `RulesUpgraded::undecodable`.
 - A claim one round of induction both retracts and asserts: nothing
   stored changes shape, no identity moves and nothing is rewritten on
   upgrade. What induction writes differs: such a claim keeps its row,

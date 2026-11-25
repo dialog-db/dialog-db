@@ -113,6 +113,16 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// A rule whose head declares a type its body does not bind, pinned as
+/// tests.
+#[cfg(test)]
+mod head_type_tests;
+
+/// A typed read of a stored attribute whose value is bound to a
+/// constant, pinned as tests.
+#[cfg(test)]
+mod stored_constant_tests;
+
 /// A read of a deduced relation whose value is bound to a number
 /// constant, pinned as tests.
 #[cfg(test)]

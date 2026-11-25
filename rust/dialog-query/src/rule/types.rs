@@ -247,19 +247,25 @@ impl TypeEnv {
                 Inferred::Static(kind) => kind,
                 Inferred::Variable(root) => Kind::from(ctx.constraint(root)),
             };
-            // Only a number is narrowed from the head here: the band
-            // is what gives a declared number type a reading of an
-            // open numeric variable. The variable keeps its
-            // optionality either way; the required-head check judges
-            // that separately.
-            let numeric = declared.clone().required().primitive_part();
-            if numeric.intersect(Primitive::NUMERIC) != Some(numeric) {
-                continue;
-            }
-            let target = if open.is_optional() {
-                declared.clone().optional()
+            // An open variable is narrowed to what the head field
+            // holds: a rule concludes no value the field does not read.
+            // A number head narrows through its declared type, whose
+            // band is what gives it a reading of an open numeric
+            // variable; any other head narrows to its primitive types,
+            // its refinements (a prefix, a listing) are left to the
+            // values themselves. The variable keeps its optionality
+            // either way; the required-head check judges that
+            // separately.
+            let primitive = declared.clone().required().primitive_part();
+            let declared = if primitive.intersect(Primitive::NUMERIC) == Some(primitive) {
+                declared.clone()
             } else {
-                declared.clone().required()
+                Kind::from(primitive)
+            };
+            let target = if open.is_optional() {
+                declared.optional()
+            } else {
+                declared.required()
             };
             let membership = open.primitive_part();
             if membership == target.primitive_part()
