@@ -523,20 +523,24 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     // What is said of the tree is said by the names it was written with.
     let names = crate::syntax::derived_names(form);
     let told = |text: &str| crate::syntax::told_with(text, &names);
-    match writes_reserved(form) {
-        Some(Ok(reserved)) => return Err(Error::Reserved(reserved)),
-        Some(Err(refused)) => return Err(refused.said(&told)),
-        None => {}
+    if let Some(refused) = write_refusal(form) {
+        return Err(refused.said(&told));
     }
     compiled(form).map_err(|error| error.said(&told))
 }
 
-/// The relation under the notation's namespace a kernel rule `form`
-/// writes or derives into, where the notation did not make it: an assert,
-/// a retract or a command into it, or a derived attribute this process
-/// did not name. A tree the notation analyzed derives only what it made
-/// and writes nothing there; a tree built otherwise may name anything.
-fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
+/// Why nothing may write what the kernel rule `form` writes, where it
+/// writes what only the notation writes: the one test of writes, which
+/// the analyzer asks of every rule it makes and [`compile`] of every tree
+/// it is given, however it was built. A hash of the notation's, a
+/// malformed derived attribute, a write into the notation's namespace or
+/// into its record of descriptions, `syntax.meta`, a field `this:`, and a
+/// field labelled by an attribute that is none of a domain's.
+pub(crate) fn write_refusal(form: &Syntax) -> Option<Error> {
+    writes_reserved(form).map(|refused| refused.unwrap_or_else(|error| error))
+}
+
+fn writes_reserved(form: &Syntax) -> Option<Result<Error, Error>> {
     use crate::syntax::{DERIVED, Named, named};
     // A hash of the notation's is no name a tree holds: a derived
     // attribute is named by what was written, `dialog.n.c/list/label`,
@@ -566,7 +570,7 @@ fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
                 _ => name,
             };
             if relation.starts_with(DERIVED) && named(relation) != Named::Derived {
-                return Some(Ok(name.to_string()));
+                return Some(Ok(Error::Reserved(name.to_string())));
             }
         }
     }
@@ -575,14 +579,22 @@ fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
         Head::Assert(read) | Head::Retract(read) | Head::Hold(read) | Head::Derive(read) => read,
         Head::Report(_) => return None,
     };
+    // The record of what is described is the notation's to write.
+    if read.domain == DESCRIBED {
+        return Some(Ok(Error::Reserved(DESCRIBED.to_string())));
+    }
+    // `this` is what every rule calls the entity: no field is named so.
+    if read.fields.iter().any(|field| field.label == "this") {
+        return Some(Ok(Error::Reserved("this:".to_string())));
+    }
     // A rule derives a derived attribute it names, and writes nothing
     // into one; it writes nothing into the rest of the namespace.
     let derives = matches!(rule.head, Head::Derive(_)) && read.written.is_some();
     if !derives && (read.written.is_some() || named(&read.domain) == Named::Reserved) {
-        return Some(Ok(read.written.as_ref().map_or_else(
+        return Some(Ok(Error::Reserved(read.written.as_ref().map_or_else(
             || read.domain.clone(),
             |written| format!("{DERIVED}/{written}"),
-        )));
+        ))));
     }
     // A field is written as an attribute of the head's domain, or, where
     // its label holds a `/`, as the attribute the label names: that must
@@ -592,7 +604,15 @@ fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
             return None;
         }
         match named(&field.attribute) {
-            Named::Reserved | Named::Derived => Some(Ok(field.label.clone())),
+            Named::Reserved | Named::Derived => Some(Ok(Error::Reserved(field.label.clone()))),
+            Named::Attribute
+                if field
+                    .attribute
+                    .split_once('/')
+                    .is_some_and(|(domain, _)| domain == DESCRIBED) =>
+            {
+                Some(Ok(Error::Reserved(field.label.clone())))
+            }
             Named::Attribute => None,
             _ => Some(Err(Error::Refused(format!(
                 "{form} writes `{}:`, which is no attribute of a domain: a field is written as \

@@ -125,10 +125,6 @@ pub(crate) const DEEPEST: usize = 2 * crate::form::DEPTH;
 const GROWTH: usize = 16;
 const SPARE: usize = 1024;
 
-/// The relation the notation writes a rule's description in: a document
-/// reads it and never writes it.
-pub const READ_ONLY: &str = crate::compile::DESCRIBED;
-
 /// The label no field may have: what every query and rule calls the
 /// entity.
 pub const THIS: &str = "this";
@@ -307,22 +303,6 @@ fn slashed(tree: &Syntax) -> Option<(&Syntax, String)> {
         }
     }
     None
-}
-
-/// Whether a kernel rule writes or derives into [`READ_ONLY`]: its head
-/// is no report and what it concludes is of that relation.
-fn writes_read_only(rule: &Syntax) -> bool {
-    let Some(head) = items(rule).first() else {
-        return false;
-    };
-    let concluded = match head.applies() {
-        Some("report") => return false,
-        Some(word) if HEAD_WORDS.contains(&word) => items(head).first(),
-        _ => Some(head),
-    };
-    concluded.and_then(Syntax::applies).is_some_and(|word| {
-        word.split_once('/').map_or(word, |(relation, _)| relation) == READ_ONLY
-    })
 }
 
 /// What the two writes were called while a mark told what is kept from
@@ -1381,9 +1361,13 @@ impl Expander {
                 let expanded = self
                     .written(tree)
                     .and_then(|()| self.each(tree, &mut rules))
-                    .and_then(|()| match rules.iter().any(writes_read_only) {
-                        true => self.about(tree, |_| Err(Error::Reserved(READ_ONLY.into()))),
-                        false => Ok(()),
+                    .and_then(|()| {
+                        // What no rule may write, by the test `compile`
+                        // makes of a tree however it was built.
+                        match rules.iter().find_map(crate::compile::write_refusal) {
+                            Some(refused) => self.about(tree, |_| Err(refused)),
+                            None => Ok(()),
+                        }
                     });
                 match expanded {
                     Ok(()) => {
