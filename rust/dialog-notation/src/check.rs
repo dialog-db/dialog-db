@@ -1659,4 +1659,32 @@ mod tests {
         assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics);
         Ok(())
     }
+
+    /// `in:` names a layer wherever it is written, so on a derived
+    /// attribute it is refused as a layer is, in a head and in a read,
+    /// with F1's reason, never kept as a field named `in`.
+    #[test]
+    fn it_refuses_in_on_a_derived_attribute() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one)) \
+                 (rule (a/x ?t ?n) (a ?t n: ?n))";
+        for form in [
+            "(rule (a/y ?t is: ?n in: :control) (a ?t n: ?n))",
+            "(select (a/x ?t is: ?n in: :control))",
+            "(rule (xyz.out ?t v: ?n) (a/x ?t is: ?n in: :control))",
+        ] {
+            let checked = check(&mut Analyzer::new()?, &format!("{a} {form}"));
+            let refused: Vec<_> = checked
+                .refusals()
+                .map(|said| said.message.clone())
+                .collect();
+            assert!(
+                refused
+                    .iter()
+                    .any(|message| message.contains("a derived attribute, on the control layer")),
+                "{form}: {refused:?}"
+            );
+            assert!(checked.steps.is_empty(), "{form}");
+        }
+        Ok(())
+    }
 }
