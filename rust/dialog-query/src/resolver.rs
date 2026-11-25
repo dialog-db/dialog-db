@@ -658,7 +658,10 @@ fn rows(base: &Match, projected: Vec<Vec<Slot<'_>>>) -> Result<Vec<Match>, Evalu
         for (term, value) in slots {
             let bound = match (term, value) {
                 (Term::Constant(expected), Some(value)) => {
-                    if *expected != value {
+                    if *expected != value
+                        && (expected.data_type() == value.data_type()
+                            || !expected.same_number(&value))
+                    {
                         continue 'row;
                     }
                     Ok(())

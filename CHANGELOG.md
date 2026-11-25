@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### Two numbers of one value are equal whatever types they were read as
+
+A rule's `==` compared two values by type first, so two numbers of one
+value read through different number types were not equal and the row
+was dropped, with no error: `3` read as `natural:` was not `3` read as
+`integer:` or as `float:`, since a typed read gives each number the
+representation of its type. `==` now holds between two numbers of one
+value whatever types they were read as, as the band keys them (`3`,
+`+3` and `3.0` are one number). The same holds where a computed value is
+checked against a constant (a formula's output, a row of the tree's
+inspection relations) and where a recursive relation tells a derived
+value from the values of its cell it displaces.
+
+What this changes for you:
+
+- `==` between numbers of one value read through different number types
+  holds. It was a non-match.
+- Two values of one type, and a number against a value of another type,
+  compare as before.
+- A variable joined across two reads of different number types is still
+  refused when the rule compiles.
+
+Why: a rule that passes analysis must not answer wrongly because of the
+type a number happened to be read as.
+
 ### One number held as two types elects its narrowest type
 
 [#879](https://github.com/dialog-db/dialog-db/pull/879)
@@ -1079,6 +1104,12 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- Two numbers of one value equal whatever types read them: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A stored rule keeps its identity and now keeps the rows its `==`
+  dropped between numbers of different types; an older release still
+  drops them, so a mixed fleet differs in what such a rule derives until
+  every replica upgrades.
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a
   pattern is written in format 5. Only the reader changed: a body that

@@ -100,7 +100,9 @@ impl Bindings {
         // For constant parameters, verify the computed value matches the constant.
         // Match::bind treats constants as no-ops, so we must check here.
         if let Term::Constant(expected) = param {
-            if expected != value {
+            if expected != value
+                && (expected.data_type() == value.data_type() || !expected.same_number(value))
+            {
                 return Err(EvaluationError::Conflict {
                     parameter: key.into(),
                     actual: Box::new(Term::Constant(value.clone())),
