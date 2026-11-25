@@ -1668,6 +1668,12 @@ where
                             if current.of != fact.of || current.the != fact.the {
                                 continue;
                             }
+                            // A claim of another stratum is a claim of
+                            // another relation: the write succeeds none
+                            // of it.
+                            if current.is.stratum() != fact.is.stratum() {
+                                continue;
+                            }
                             // The cell holds the written value when a
                             // reader of the value's type observes it: an
                             // integer 4 asserted over a stored 4.3 is what

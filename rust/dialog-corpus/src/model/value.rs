@@ -637,6 +637,16 @@ impl Value {
         make_reference(self.to_bytes())
     }
 
+    /// The stratum this value belongs to: the relation, among those one
+    /// attribute names, that a claim of it is a claim of. A cardinality-one
+    /// write succeeds only the claims of its own stratum. Numbers of every
+    /// type are one stratum, as the band keys them; every other type is a
+    /// stratum of its own, so a listed text, a prefixed text and a text are
+    /// one (they are all text).
+    pub fn stratum(&self) -> ValueDataType {
+        self.data_type().band(NUMBER_BAND)
+    }
+
     /// What an election compares two values by when nothing else
     /// separates them: the hash of this value's
     /// [`identity_key`](Self::identity_key), the greater winning. Values
