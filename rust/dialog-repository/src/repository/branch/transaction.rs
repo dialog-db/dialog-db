@@ -10,6 +10,8 @@ mod oracle;
 mod pick_migration;
 #[cfg(test)]
 mod quarantine;
+#[cfg(test)]
+mod refuse_tests;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;
