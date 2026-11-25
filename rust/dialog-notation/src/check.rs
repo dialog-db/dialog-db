@@ -770,6 +770,29 @@ mod tests {
                 assert_eq!(meaning(&order.join("\n"))?, first, "{order:#?}");
             }
         }
+        // Concepts whose bodies read each other round, two and three:
+        // refused as a cycle in every order alike.
+        for forms in [
+            vec![
+                "(concept (a ?t v: ?x) (b ?t v: ?x))",
+                "(concept (b ?t v: ?x) (a ?t v: ?x))",
+                "(select (a ?t v: ?x))",
+            ],
+            vec![
+                "(concept (p ?t v: ?x) (q ?t v: ?x))",
+                "(concept (q ?t v: ?x) (r ?t v: ?x))",
+                "(concept (r ?t v: ?x) (p ?t v: ?x))",
+            ],
+        ] {
+            let first = meaning(&forms.join("\n"))?;
+            assert!(
+                first.0.iter().any(|said| said == "refused: cycle"),
+                "{first:#?}"
+            );
+            for order in orders(&forms) {
+                assert_eq!(meaning(&order.join("\n"))?, first, "{order:#?}");
+            }
+        }
         // The two the reviewer wrote, refused naming both forms.
         for (text, named) in [
             (

@@ -1864,6 +1864,57 @@ async fn it_says_an_unbound_head_variable_as_the_author_wrote_it() -> Result<()>
     Ok(())
 }
 
+/// Concepts whose bodies read each other round cannot expand to
+/// anything finite: whichever is written first, of two or of three, the
+/// document is refused as a cycle naming every concept on it, and
+/// nothing is declared.
+#[dialog_common::test]
+async fn it_refuses_concepts_that_read_each_other_round_in_any_order() -> Result<()> {
+    let two = [
+        "(concept (a ?t v: ?x) (b ?t v: ?x))",
+        "(concept (b ?t v: ?x) (a ?t v: ?x))",
+    ];
+    let three = [
+        "(concept (p ?t v: ?x) (q ?t v: ?x))",
+        "(concept (q ?t v: ?x) (r ?t v: ?x))",
+        "(concept (r ?t v: ?x) (p ?t v: ?x))",
+    ];
+    for (forms, names) in [
+        (vec![two[0], two[1]], vec!["(a ", "(b "]),
+        (vec![two[1], two[0]], vec!["(a ", "(b "]),
+        (
+            vec![three[0], three[1], three[2]],
+            vec!["(p ", "(q ", "(r "],
+        ),
+        (
+            vec![three[2], three[1], three[0]],
+            vec!["(p ", "(q ", "(r "],
+        ),
+    ] {
+        let mut notebook = Notebook::open().await?;
+        let text = forms.join("\n");
+        let refused = notebook
+            .submit(&text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Cycle(form, through)))
+                if names.iter().all(|name| form.contains(name) || through.iter().any(|part| part.contains(name)))),
+            "{text}: {refused:?}"
+        );
+        // Nothing was declared: a later read of either is no concept.
+        let unknown = notebook
+            .submit("(select (a ?t v: ?x))")
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&unknown, Err(Ok(Error::Unknown(_)))),
+            "{unknown:?}"
+        );
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
