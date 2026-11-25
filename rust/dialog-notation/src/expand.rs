@@ -2445,6 +2445,27 @@ impl Expander {
                 signature.name
             )));
         }
+        // Nor a pick: the concept says its field's cardinality, which
+        // replaced picks, and elects a claim by its head's elector.
+        if let (_, Some(signature)) = &found[chosen]
+            && let Some(operand) = said.operand()
+            && let Some((label, word)) = operand.terms.iter().find_map(|(label, term)| {
+                let Syntax::Application(operator, _) = term else {
+                    return None;
+                };
+                let word = operator.keyword()?;
+                crate::kernel::PICKS
+                    .contains(&word)
+                    .then_some((label, word))
+            })
+        {
+            return Err(Error::Refused(format!(
+                "{said} wraps `{label}:` in `(:{word} …)`, a pick, and the concept `{}` says its \
+                 field's cardinality, which replaced picks, and elects a claim by the elector in \
+                 its head, `(max ?v)`: write `{label}:` bare",
+                signature.name
+            )));
+        }
         self.answered = patterns.swap_remove(chosen);
         Ok(found.swap_remove(chosen).0)
     }

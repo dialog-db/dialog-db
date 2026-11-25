@@ -170,7 +170,9 @@ What this changes for you:
   no entity, `:on/htmx:after-swap`, is refused saying so, not in the URI
   parser's text. A read of a concept with a field wrapped in a type or a
   cardinality the concept says itself, `(a ?t n: (:one ?v))`, is refused
-  naming the field. A select whose only premise must not hold is told
+  naming the field, and so is one wrapped in a pick, `(:last ?v)`,
+  `(:all ?v)`, `(:max ?v)` or `(:min ?v)`, which a concept's
+  `cardinality:` and its head's elector replaced. A select whose only premise must not hold is told
   that its first part is its head and is not read. `check` says a
   compile refusal once per form. An element a view does not make,
   `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
