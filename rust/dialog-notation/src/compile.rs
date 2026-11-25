@@ -739,9 +739,14 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
     }
     if rule.when.is_empty() {
         if !rule.unless.is_empty() {
-            return Err(Error::Refused(format!(
-                "{form} says what must not hold and nothing that must"
-            )));
+            return Err(Error::Refused(match rule.head {
+                Head::Report(_) => format!(
+                    "{form} says what must not hold and nothing that must: the first part of a \
+                     select is its head, what each answer says, and is not read, so write what \
+                     must hold again after it, as a premise"
+                ),
+                _ => format!("{form} says what must not hold and nothing that must"),
+            }));
         }
         return Ok(vec![ground(&rule.head)?]);
     }
