@@ -1760,7 +1760,14 @@ fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
     }
     let collection = read.fields.iter().any(|field| field.key.is_some());
     if !collection && !unnamed(&read.entity) && read.named(&bound).is_empty() {
-        let every = read.clone();
+        // Every claim of each field is matched, and so retracted, not the
+        // one a read under `cardinality: :one` elects: two claims of one
+        // field are what two replicas make.
+        let mut every = read.clone();
+        for field in &mut every.fields {
+            field.cardinality = Some("many".into());
+            field.pick = None;
+        }
         if rule.when.is_empty() && rule.unless.is_empty() {
             // With no premise its entity is written, as any write's is:
             // a variable there would retract every instance there is.

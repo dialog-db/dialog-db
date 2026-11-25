@@ -82,6 +82,11 @@ What this changes for you:
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A retract through a concept by its entity alone, `(retract (p x:1))`
+  or a rule's `(retract (p ?t))`, retracts every claim of each of the
+  concept's fields on that entity, where it retracted only the claim a
+  read under `cardinality: :one` or an elector picked, so an older claim,
+  another replica's, was left and read again.
 - A view's attribute name is one a page can set, a letter or `_`, then
   letters, digits, `-`, `_`, `.`, with at most one `/` between two such
   parts: `{:a//b …}`, `{:a/ …}` and `{:-a …}` are refused naming the
