@@ -15,8 +15,8 @@ use crate::key::fact_index_keys;
 use crate::key::varkey::parse_key_ref;
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Cardinality, Entity, Fact, Instruction, NUMBER_BAND, Relation, Selector, Value,
-    ValueDataType,
+    ArchiveDelta, Cardinality, Entity, Fact, FactView, Instruction, NUMBER_BAND, Relation,
+    Selector, Value, ValueDataType,
 };
 
 /// A tree written under `value_encoding`, holding `facts`.
@@ -246,6 +246,68 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
             .await?
             .len(),
         2
+    );
+    Ok(())
+}
+
+/// A tree a release before 0.3.0 keyed in per-type bands holds `5` and
+/// `5.0` as two claims of one cell when one commit asserted both under
+/// cardinality many: that release wrote an assertion with no cause and
+/// stamped every claim of a commit with the commit's version, so the two
+/// stand equal. [`Value::tiebreak`] hashes the number, not the type, so
+/// it cannot tell them apart, and the election takes the narrowest type,
+/// the natural, whichever order it meets them in. That is what the tree
+/// answers once rewritten into the band (`rekey_tree`), which puts both
+/// claims on one key that reads back as the natural `5`, and what every
+/// stored read of the unmigrated tree already answered: each meets a
+/// cell's rows in key order, and per-type keys sort the natural first.
+#[dialog_common::test]
+async fn it_elects_one_of_a_number_held_as_two_types_in_either_order() -> anyhow::Result<()> {
+    let item = Entity::new()?;
+    let facts = [Value::UnsignedInt(5), Value::Float(5.0)]
+        .into_iter()
+        .map(|is| Fact {
+            the: size(),
+            of: item.clone(),
+            is,
+            cause: None,
+        })
+        .collect::<Vec<_>>();
+    let (per_type, store) = tree(0, facts).await?;
+    let rows: Vec<Fact> = per_type
+        .clone()
+        .scan_owned(
+            store.clone(),
+            SpillCache::with_budget(0),
+            Selector::new().of(item.clone()),
+        )
+        .try_collect()
+        .await?;
+    let [natural, float] = rows.as_slice() else {
+        anyhow::bail!("expected two claims of the cell, found {}", rows.len());
+    };
+    assert_eq!(
+        (&natural.is, &float.is),
+        (&Value::UnsignedInt(5), &Value::Float(5.0)),
+        "the scan meets the natural first"
+    );
+
+    let forward = FactView::from(natural.clone()).elect(FactView::from(float.clone()))?;
+    let backward = FactView::from(float.clone()).elect(FactView::from(natural.clone()))?;
+    assert_eq!(forward.to_owned()?.is, Value::UnsignedInt(5));
+    assert_eq!(backward.to_owned()?.is, Value::UnsignedInt(5));
+
+    let manifest = Manifest {
+        value_encoding: NUMBER_BAND,
+        ..per_type.manifest(&store).await?
+    };
+    let mut delta = ArchiveDelta::zero();
+    let band = super::rekey::rekey_tree(&per_type, &store, &mut delta, manifest).await?;
+    delta.flush_into(&store);
+    assert_eq!(
+        values(&band, &store, Selector::new().of(item)).await?,
+        vec![Value::UnsignedInt(5)],
+        "the rewrite holds the number once, read as the natural the election took"
     );
     Ok(())
 }
