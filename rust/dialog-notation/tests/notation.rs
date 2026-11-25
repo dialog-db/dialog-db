@@ -4073,7 +4073,7 @@ fn it_refuses_a_rule_that_writes_into_dialog_and_reads_from_it() -> Result<()> {
     for text in [
         r#"(rule (assert (dialog.meta ?t description: ?n)) (xyz.t ?t n: ?n))"#,
         r#"(retract (dialog.anything x:1 v: 1))"#,
-        r#"(rule (dialog.meta ?t description: (:control ?n)) (xyz.t ?t n: ?n))"#,
+        r#"(rule (retract (dialog.meta ?t description: ?n)) (xyz.t ?t n: ?n))"#,
     ] {
         let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, text);
         assert_eq!(

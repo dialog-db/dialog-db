@@ -83,6 +83,12 @@ What this changes for you:
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
   is a document's macro, whatever its template. The refusal names the
   name and why.
+- A write under `dialog.` that Dialog-DB refuses to commit, `(assert
+  (dialog.meta x:1 description: "z"))`, is refused when it is checked, in
+  the author's terms, once per form, where it was accepted and the commit
+  failed with Dialog-DB's text. The facts of rules, concepts, layers,
+  commands and providers and a branch's revision and tree are written as
+  Dialog-DB writes them, and every read stays allowed.
 - A retract through a concept by its entity alone, `(retract (p x:1))`
   or a rule's `(retract (p ?t))`, retracts every claim of each of the
   concept's fields on that entity, where it retracted only the claim a

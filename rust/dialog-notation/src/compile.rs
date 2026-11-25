@@ -616,6 +616,23 @@ fn writes_reserved(form: &Syntax) -> Option<Result<Error, Error>> {
             |written| format!("{DERIVED}/{written}"),
         ))));
     }
+    // What Dialog-DB keeps for itself under `dialog.` it refuses to
+    // commit, and the notation refuses to write, in the author's terms.
+    if matches!(rule.head, Head::Assert(_) | Head::Retract(_))
+        && let Some(field) = read.fields.iter().find(|field| {
+            // The notation's own, under `dialog.n`, it refuses as its
+            // own, below.
+            writes_into_dialog(&field.attribute)
+                && !matches!(named(&field.attribute), Named::Reserved | Named::Derived)
+        })
+    {
+        return Some(Ok(Error::Refused(format!(
+            "`{}` is Dialog-DB's own: an attribute under `dialog.` is the database's to write, \
+             but for the facts of rules, concepts, layers, commands and providers and a \
+             branch's revision and tree; read it, and write your own domain, `xyz.…`",
+            field.attribute
+        ))));
+    }
     // A field is written as an attribute of the head's domain, or, where
     // its label holds a `/`, as the attribute the label names: that must
     // be an attribute of a domain, and none of the notation's.
@@ -642,6 +659,29 @@ fn writes_reserved(form: &Syntax) -> Option<Result<Error, Error>> {
             )))),
         }
     })
+}
+
+/// Whether Dialog-DB refuses to commit a write of `attribute` from an
+/// application: one under `dialog.`, but for the facts of rules,
+/// concepts, layers, commands and providers and a branch's revision and
+/// tree. A copy of the check in dialog-corpus's `tree.rs`, which has no
+/// predicate of its own to call;
+/// `it_refuses_the_writes_into_dialog_that_dialog_db_refuses`
+/// (`tests/notation.rs`) commits each on a real branch and fails when
+/// the two part.
+fn writes_into_dialog(attribute: &str) -> bool {
+    attribute.starts_with("dialog.")
+        && ![
+            "dialog.rule/",
+            "dialog.concept/",
+            "dialog.layer/",
+            "dialog.command/",
+            "dialog.provider/",
+        ]
+        .iter()
+        .any(|allowed| attribute.starts_with(allowed))
+        && attribute != "dialog.branch/revision"
+        && attribute != "dialog.branch/tree"
 }
 
 /// [`compile`], with no check of what `form` names and its refusals as
