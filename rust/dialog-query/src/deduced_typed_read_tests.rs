@@ -819,22 +819,24 @@ async fn a_read_bound_to_a_constant_its_type_does_not_read_answers_nothing_store
 ///
 /// | read                     | A stored | A deduced | B stored | B deduced |
 /// |--------------------------|----------|-----------|----------|-----------|
-/// | `natural:`, `pick: max`  | 2        | 3         | 2        | 3         |
-/// | `float:`, `pick: max`    | 2.5      | 3.0       | 2.5      | 3.0       |
+/// | `natural:`, `pick: max`  | 3        | 3         | 3        | 3         |
+/// | `float:`, `pick: max`    | 3.0      | 3.0       | 3.0      | 3.0       |
 /// | `natural:`, no pick      | 2        | 2         | nothing  | 2         |
 /// | `text:`, `pick: last`    | nothing  | hello     | hello    | hello     |
 ///
-/// Two questions are open, and their answers flip named assertions:
+/// A pick orders numbers by value on both sides, so `max` agrees. Two
+/// differences remain, and their answers flip named assertions:
 ///
 /// - A plain cardinality-one read: the stored read elects the newest
 ///   value of all and then reads it through the type (B answers
 ///   nothing); the deduced read reads every value through the type and
 ///   elects the newest of those, as a read through a typed variable
 ///   does (B answers `2`).
-/// - A pick: the stored read drops what the type does not read, keeps
-///   the newest of the rest and picks among that one (`max` answers
-///   `2`); the deduced read picks among every value the type reads
-///   (`max` answers `3`).
+/// - A pick: the stored read picks among every value of the cell as it
+///   is stored and then reads the one it picked through the type, so a
+///   value the type does not read can win and leave nothing (`last` in
+///   A picks `2.5`, which `text:` does not read); the deduced read
+///   picks among the values the type reads (`last` answers `hello`).
 #[dialog_common::test]
 async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types()
 -> anyhow::Result<()> {
@@ -847,11 +849,11 @@ async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types(
     let table = [
         (
             ("natural:", Some("max")),
-            [natural(2), natural(3), natural(2), natural(3)],
+            [natural(3), natural(3), natural(3), natural(3)],
         ),
         (
             ("float:", Some("max")),
-            [float(2.5), float(3.0), float(2.5), float(3.0)],
+            [float(3.0), float(3.0), float(3.0), float(3.0)],
         ),
         (
             ("natural:", None),
