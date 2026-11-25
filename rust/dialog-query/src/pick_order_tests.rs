@@ -14,7 +14,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Conclusion as _;
 use crate::attribute::{AttributeStatement, Relation};
 use crate::corpus::CorpusRelation;
-use crate::query::Application as _;
+use crate::query::Application;
 use crate::query::Output as _;
 use crate::reduce::{Aggregator, Reduce, ReduceEntry};
 use crate::rule::DeductiveRuleDescriptor;
@@ -222,7 +222,7 @@ async fn folded<Q>(
     inputs: Q,
 ) -> anyhow::Result<Vec<(String, String)>>
 where
-    Q: crate::query::Application + Clone,
+    Q: Application + Clone,
 {
     let groups = AttributeQuery::new(
         Term::from(Relation::from(the.parse::<CorpusRelation>()?)),
