@@ -4165,3 +4165,45 @@ async fn it_pins_a_rule_written_by_hand() -> Result<()> {
     );
     Ok(())
 }
+
+/// A typed read of a derived attribute reads it as a typed read of a
+/// stored attribute does (#866): with `list/label` derived from a text,
+/// a read of it as an integer or an entity answers nothing, as text it
+/// answers, and a join through a typed read of it answers as the same
+/// join through the stored attribute.
+#[dialog_common::test]
+async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (list ?l name: ?n)
+                 (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+               (rule (list/label ?l ?n) (list ?l name: ?n))
+               (assert (list list:home name: "Home"))"#,
+        )
+        .await?;
+    for (read, answers) in [
+        ("(select (list/label ?l (:integer ?n)))", vec![]),
+        ("(select (list/label ?l (:entity ?n)))", vec![]),
+        (
+            "(select (list/label ?l (:text ?n)))",
+            vec![r#"(list/label list:home is: "Home")"#],
+        ),
+    ] {
+        assert_eq!(report(&mut notebook, read).await?, answers, "{read}");
+    }
+    for kind in [":integer", ":entity", ":text"] {
+        let derived = report(
+            &mut notebook,
+            &format!("(select (xyz.out ?l v: ?n) (list/label ?l ({kind} ?n)))"),
+        )
+        .await?;
+        let stored = report(
+            &mut notebook,
+            &format!("(select (xyz.out ?l v: ?n) (xyz.list ?l name: ({kind} ?n)))"),
+        )
+        .await?;
+        assert_eq!(derived, stored, "{kind}");
+    }
+    Ok(())
+}
