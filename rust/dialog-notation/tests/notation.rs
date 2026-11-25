@@ -3993,3 +3993,100 @@ async fn it_writes_a_cardinality_one_field_by_the_engines_succession() -> Result
     }
     Ok(())
 }
+
+/// The attributes under `dialog.` the notation refuses to write are the
+/// ones Dialog-DB refuses to commit, on a real branch, in both
+/// directions: each attribute is written once through the notation and
+/// once as a fact committed past it, and the two refuse alike. The
+/// notation's list is a copy of the engine's (`writes_into_dialog` in
+/// `compile.rs`, from dialog-corpus `tree.rs`), and this is what fails
+/// when the engine's list moves.
+#[dialog_common::test]
+async fn it_refuses_the_writes_into_dialog_that_dialog_db_refuses() -> Result<()> {
+    use dialog_corpus::{Cardinality, Changes, Fact, Instruction};
+    for (domain, field) in [
+        ("dialog.rule", "x"),
+        ("dialog.concept", "x"),
+        ("dialog.layer", "x"),
+        ("dialog.command", "x"),
+        ("dialog.provider", "x"),
+        ("dialog.branch", "revision"),
+        ("dialog.branch", "tree"),
+        ("dialog.meta", "x"),
+        ("dialog.anything", "v"),
+        ("dialog.branch", "other"),
+        ("dialog.rulex", "y"),
+        ("dialog.db", "revision"),
+    ] {
+        let attribute = format!("{domain}/{field}");
+        let notebook = Notebook::open().await?;
+        let fact = Fact {
+            the: attribute.parse()?,
+            of: "x:1".parse()?,
+            is: Value::String("v".into()),
+            cause: None,
+        };
+        let committed = notebook
+            .branch
+            .transaction()
+            .integrate(
+                [Instruction::Assert(fact, Cardinality::Many)]
+                    .into_iter()
+                    .collect::<Changes>(),
+            )
+            .commit()
+            .publish()
+            .perform(&notebook.operator)
+            .await;
+        let engine =
+            matches!(&committed, Err(error) if format!("{error:?}").contains("ReservedRelation"));
+        let checked = dialog_notation::check(
+            &mut dialog_notation::Analyzer::new()?,
+            &format!(r#"(assert ({domain} x:1 {field}: "v"))"#),
+        );
+        let refusals: Vec<_> = checked
+            .refusals()
+            .map(|said| said.message.clone())
+            .collect();
+        assert_eq!(
+            !refusals.is_empty(),
+            engine,
+            "{attribute}: {refusals:?} against {committed:?}"
+        );
+        if engine {
+            assert_eq!(refusals.len(), 1, "{attribute}: {refusals:?}");
+            assert!(
+                refusals[0].contains(&format!("`{attribute}`"))
+                    && refusals[0].contains("Dialog-DB's own"),
+                "{attribute}: {refusals:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A write into the namespace Dialog-DB keeps is refused in a rule's
+/// head and by a retract as by an assert, and a read of one is taken:
+/// an embedder reads `dialog.rule/invalid`.
+#[dialog_common::test]
+fn it_refuses_a_rule_that_writes_into_dialog_and_reads_from_it() -> Result<()> {
+    for text in [
+        r#"(rule (assert (dialog.meta ?t description: ?n)) (xyz.t ?t n: ?n))"#,
+        r#"(retract (dialog.anything x:1 v: 1))"#,
+        r#"(rule (dialog.meta ?t description: (:control ?n)) (xyz.t ?t n: ?n))"#,
+    ] {
+        let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, text);
+        assert_eq!(
+            checked.refusals().count(),
+            1,
+            "{text}: {:?}",
+            checked.diagnostics
+        );
+    }
+    let read = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        "(select (dialog.rule ?r invalid: ?why))",
+    );
+    assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics);
+    Ok(())
+}

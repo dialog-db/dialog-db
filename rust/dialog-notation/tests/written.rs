@@ -311,6 +311,8 @@ fn it_refuses_in_check_forms_every_forgery_compile_refuses() -> Result<()> {
         ruled(Some("assert"), "xyz.a", "dialog.n/x"),
         ruled(None, "xyz.a", "b/c"),
         ruled(Some("assert"), "xyz.a", "b/c"),
+        ruled(Some("assert"), "dialog.meta", "description"),
+        ruled(Some("retract"), "dialog.anything", "v"),
         ruled(
             Some("assert"),
             "xyz.a",
