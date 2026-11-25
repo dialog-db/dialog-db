@@ -256,8 +256,9 @@ fn reads(lens: Option<&Kind>, row: &FactView) -> bool {
         }
     }
     // A value that does not decode contends as it does with no type:
-    // the election ranks it (see [`elect`]), and a corrupt winner leaves
-    // its cell empty (see [`admitted`]). Setting it aside here would
+    // the election ranks it (see [`elect`]), so an older one loses to the
+    // newest claim, and a newest one wins the cell and fails the read when
+    // its value is read, as it does on main. Setting it aside here would
     // answer an older claim the newest one superseded.
     match row.value() {
         Ok(value) => kind.reads(&value),
