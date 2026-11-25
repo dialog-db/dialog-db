@@ -1781,4 +1781,26 @@ mod tests {
         );
         Ok(())
     }
+
+    /// What the compiler refuses is said once per form, whole or form by
+    /// form, however many rules the form expands to: a select of a
+    /// concept whose lines are in two domains is two rules, and one
+    /// refusal.
+    #[test]
+    fn it_says_a_compile_refusal_once_per_form() -> Result<(), Error> {
+        let text = "(concept (b ?t n: ?n m: ?m) \
+                    (xyz.b/Name of: ?t is: ?n as: :text cardinality: :one) \
+                    (xyz.c/Mm of: ?t is: ?m as: :text cardinality: :one)) \
+                    (select (b ?t n: ?n m: ?m))";
+        for checked in [
+            check(&mut Analyzer::new()?, text),
+            check_forms(&mut Analyzer::new()?, text),
+        ] {
+            let mut paths: Vec<_> = checked.refusals().map(|said| said.path.clone()).collect();
+            let all = paths.len();
+            paths.dedup();
+            assert_eq!(paths.len(), all, "{:?}", checked.diagnostics);
+        }
+        Ok(())
+    }
 }
