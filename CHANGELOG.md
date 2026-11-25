@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### Two numbers of one value are equal whatever types they were read as
 
+[#881](https://github.com/dialog-db/dialog-db/pull/881)
+
 A rule's `==` compared two values by type first, so two numbers of one
 value read through different number types were not equal and the row
 was dropped, with no error: `3` read as `natural:` was not `3` read as
@@ -23,9 +25,8 @@ was dropped, with no error: `3` read as `natural:` was not `3` read as
 representation of its type. `==` now holds between two numbers of one
 value whatever types they were read as, as the band keys them (`3`,
 `+3` and `3.0` are one number). The same holds where a computed value is
-checked against a constant (a formula's output, a row of the tree's
-inspection relations) and where a recursive relation tells a derived
-value from the values of its cell it displaces.
+checked against a constant: a formula's output, and a row of the tree's
+inspection relations.
 
 What this changes for you:
 

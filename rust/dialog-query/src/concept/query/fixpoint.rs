@@ -315,7 +315,6 @@ fn displaced_by(member: &Member, split: &SplitRule, matched: &Match) -> BTreeSet
         }
         if let Some(found) = read(ConceptDescriptor::VALUE)
             && found != value
-            && !found.same_number(value)
         {
             displaced.insert(found.identity_key());
         }

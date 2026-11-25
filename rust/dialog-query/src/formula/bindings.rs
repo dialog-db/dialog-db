@@ -156,6 +156,26 @@ mod tests {
         assert_eq!(value, 42);
     }
 
+    /// A formula's output checked against a constant agrees when it is
+    /// that number in another type, and conflicts when it is another
+    /// number.
+    #[dialog_common::test]
+    fn it_writes_an_output_equal_to_its_constant_by_number_value() {
+        let mut terms = Parameters::new();
+        terms.insert("is".to_string(), Term::Constant(Value::UnsignedInt(6)));
+        let formula = test_formula();
+        let mut bindings = Bindings::new(Arc::new(formula), Match::new(), terms);
+        assert!(bindings.write("is", &Value::Float(6.0)).is_ok(), "6.0 is 6");
+        assert!(
+            bindings.write("is", &Value::UnsignedInt(6)).is_ok(),
+            "6 is 6"
+        );
+        assert!(matches!(
+            bindings.write("is", &Value::Float(6.5)),
+            Err(EvaluationError::Conflict { .. })
+        ));
+    }
+
     #[dialog_common::test]
     fn it_errors_on_missing_parameter() {
         let terms = Parameters::new();
