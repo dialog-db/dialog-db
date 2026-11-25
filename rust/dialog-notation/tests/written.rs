@@ -207,3 +207,73 @@ fn relabelled_relation(
         other => other,
     }
 }
+
+/// What a document may not write, a hand-built tree may not either:
+/// for each write the analyzer refuses, the same kernel rule built by
+/// hand is refused by `compile`, as the same kind of refusal. The
+/// notation's own record of descriptions, `syntax.meta`, is written by
+/// nothing but the notation, as a head, an assert, a retract or a field;
+/// a head's `this:` is the entity, and no field.
+#[test]
+fn it_compiles_no_write_a_document_is_refused() -> Result<()> {
+    use dialog_notation::{Analyzer, Error, check};
+    let kind = |error: &Error| std::mem::discriminant(error);
+    for (word, relation, label, document) in [
+        (
+            None,
+            "syntax.meta",
+            "description",
+            "(rule (syntax.meta ?l description: ?n) (xyz.list ?l name: ?n))",
+        ),
+        (
+            Some("assert"),
+            "syntax.meta",
+            "description",
+            "(rule (assert (syntax.meta ?l description: ?n)) (xyz.list ?l name: ?n))",
+        ),
+        (
+            Some("retract"),
+            "syntax.meta",
+            "description",
+            "(rule (retract (syntax.meta ?l description: ?n)) (xyz.list ?l name: ?n))",
+        ),
+        (
+            None,
+            "xyz.out",
+            "this",
+            "(rule (xyz.out ?l this: ?n) (xyz.list ?l name: ?n))",
+        ),
+        (
+            Some("assert"),
+            "xyz.out",
+            "this",
+            "(rule (assert (xyz.out ?l this: ?n)) (xyz.list ?l name: ?n))",
+        ),
+        (
+            None,
+            "dialog.n.anything",
+            "v",
+            "(rule (dialog.n.anything ?l v: ?n) (xyz.list ?l name: ?n))",
+        ),
+    ] {
+        let checked = check(&mut Analyzer::new()?, document);
+        let refused = checked
+            .refusals()
+            .find_map(|refused| refused.refusal.clone())
+            .ok_or_else(|| anyhow::anyhow!("{document} was not refused"))?;
+        let tree = ruled(word, relation, label);
+        let compiled = compile(&tree);
+        assert!(
+            matches!(&compiled, Err(error) if kind(error) == kind(&refused)),
+            "{tree}: {:?} where the document is refused as {refused:?}",
+            compiled.map(|steps| steps.len())
+        );
+    }
+    // A field of the record, written by its label from another head,
+    // is refused too.
+    for word in [None, Some("assert")] {
+        let tree = ruled(word, "xyz.out", "syntax.meta/description");
+        assert!(matches!(compile(&tree), Err(Error::Reserved(_))), "{tree}");
+    }
+    Ok(())
+}
