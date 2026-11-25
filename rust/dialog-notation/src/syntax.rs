@@ -628,10 +628,17 @@ pub(crate) fn number(text: &str) -> Result<Value, Error> {
     }
 }
 
+/// The entity a word with a `:` is. One that is no entity is refused in
+/// the author's terms: a word with a `:` is read as an entity and as
+/// nothing else, so a keyword or a name holds none.
 pub(crate) fn entity(uri: &str) -> Result<Value, Error> {
-    Entity::from_str(uri)
-        .map(Value::Entity)
-        .map_err(|error| refused("not an entity", error))
+    Entity::from_str(uri).map(Value::Entity).map_err(|_| {
+        Error::Refused(format!(
+            "`{uri}` holds a `:`, so it is read as an entity, and it is none: an entity is a \
+             word, a `:` and what it names, `todo:1`, `list:home`; a keyword, a label or a name \
+             holds no `:`"
+        ))
+    })
 }
 
 /// The nodes a run of forms is, each in its place: the first is the
