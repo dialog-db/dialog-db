@@ -2022,4 +2022,6 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Asked.** The maintainer, today, of count and collect: "Wait I thought we had no collect and copied Datomic here. So count is on distinct entries correct?"
 
-**Decided.** By the coordinating session, on that reading, under the maintainer's instruction to proceed without blocking on him, pending his confirmation: the marker is `(distinct ?x)`, and `(collect ?x)` is refused as a former word, saying to write `(distinct ?x)`. The analyzed tree still names the gathering `collect`, a word of the notation's own. Reversing it is one step: `select::DISTINCT` back to the marker `collect` in `collects_in` and `collected`, `collected_as_before` in `src/expand.rs` removed, and the documents' `(distinct ?x)` written `(collect ?x)` again.
+**Decided.** By the coordinating session, on that reading, under the maintainer's instruction to proceed without blocking on him: the marker is `(distinct ?x)`, and `(collect ?x)` is refused as a former word, saying to write `(distinct ?x)`. The analyzed tree still names the gathering `collect`, a word of the notation's own. Reversing it is one step: `select::DISTINCT` back to the marker `collect` in `collects_in` and `collected`, `collected_as_before` in `src/expand.rs` removed, and the documents' `(distinct ?x)` written `(collect ?x)` again.
+
+**Confirmed.** By the maintainer, 2026-11-25: "We should also use distinct not collect, walkthrough even did that". The marker is `(distinct ?x)`, and the one-step reversal above is not taken.
