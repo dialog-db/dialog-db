@@ -100,7 +100,9 @@ impl Bindings {
         // For constant parameters, verify the computed value matches the constant.
         // Match::bind treats constants as no-ops, so we must check here.
         if let Term::Constant(expected) = param {
-            if expected != value {
+            if expected != value
+                && (expected.data_type() == value.data_type() || !expected.same_number(value))
+            {
                 return Err(EvaluationError::Conflict {
                     parameter: key.into(),
                     actual: Box::new(Term::Constant(value.clone())),
@@ -152,6 +154,26 @@ mod tests {
 
         let value = bindings.read::<u32>("value").expect("Failed to read value");
         assert_eq!(value, 42);
+    }
+
+    /// A formula's output checked against a constant agrees when it is
+    /// that number in another type, and conflicts when it is another
+    /// number.
+    #[dialog_common::test]
+    fn it_writes_an_output_equal_to_its_constant_by_number_value() {
+        let mut terms = Parameters::new();
+        terms.insert("is".to_string(), Term::Constant(Value::UnsignedInt(6)));
+        let formula = test_formula();
+        let mut bindings = Bindings::new(Arc::new(formula), Match::new(), terms);
+        assert!(bindings.write("is", &Value::Float(6.0)).is_ok(), "6.0 is 6");
+        assert!(
+            bindings.write("is", &Value::UnsignedInt(6)).is_ok(),
+            "6 is 6"
+        );
+        assert!(matches!(
+            bindings.write("is", &Value::Float(6.5)),
+            Err(EvaluationError::Conflict { .. })
+        ));
     }
 
     #[dialog_common::test]
