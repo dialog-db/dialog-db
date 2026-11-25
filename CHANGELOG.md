@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### Writes through one replica on the filesystem take turns instead of failing with a lock error
 
+[#870](https://github.com/dialog-db/dialog-db/pull/870)
+
 The filesystem provider writes a cell under a lock file and refused a
 second writer at once, to keep two processes from writing one cell. It
 refused a second writer of the same process the same way, so two
@@ -44,6 +46,71 @@ What this changes for you:
 
 Why: a replica that writes while it syncs, or runs two writes at once,
 must not lose one of them to its own other write.
+### A typed read bound to a constant its type does not read answers nothing
+
+A field that declares a type reads only the values of that type, so a
+value of another type is no fact of the field. A cardinality-one read
+whose entity was unbound and whose value was bound to a constant found
+the facts holding that constant by the constant alone, and answered one
+whatever its type: a field declared `text:` bound to the integer `-3`
+answered the stored `-3`, and a field that picks `max` over `natural:`
+bound to `"hello"` answered the stored `"hello"`. Each fact such a read
+finds is now read through the field's type, as the read with its value
+unbound reads it.
+
+What this changes for you:
+
+- A read through a typed field whose value is bound to a constant the
+  type does not read answers nothing, under every cardinality and
+  through a pick, with the entity bound or unbound. Under cardinality
+  one with the entity unbound it answered the facts holding the
+  constant.
+- A constant of another number type than the stored number still finds
+  it: a `float:` field bound to the natural `3` finds a stored `3`.
+- A read whose value is unbound, and a read through a field that
+  declares no type, answer as before.
+
+Why: a field's type is part of which attribute it reads, so binding the
+value must not widen what the read answers.
+
+### A typed read of a relation a rule deduces reads it as it reads a stored one
+
+[#866](https://github.com/dialog-db/dialog-db/pull/866)
+
+A field that declares a type reads a stored attribute through that
+type: a value of another type is no fact of the field, and a number is
+read as the field's number type. A rule concludes its relation whatever
+type its head declares, and the values it concluded reached a typed read
+unread: a field declared `integer:` over a relation a rule fills with
+text answered the text. Every value a rule concludes is now read through
+the field's declared type, as the stored scan reads a stored one, when
+one rule answers the read, when stored and deduced values meet, and
+through the fixpoint of a recursive relation. The type is applied before
+the cardinality-one election on deduced reads, as the caller-variable
+lens does; the stored scan elects first.
+
+What this changes for you:
+
+- A read of a deduced relation through a field of a type answers
+  nothing for a deduced value of another type. It answered the value.
+- A deduced number read through a field of another number type comes
+  back as that type, as a stored one does: a natural read as `float:` is
+  a float, a fraction read as `natural:` is floored, and a negative is
+  not a natural. It came back as the rule concluded it.
+- A read of a deduced relation whose value is bound to a number finds a
+  value of another number type that is the same number, as a stored read
+  does: a `float:` field bound to the natural `3` finds a deduced `3`,
+  and a `natural:` field bound to `3.0` finds it too. It missed it. A
+  number constant still finds no value that is not a number.
+- A cardinality-one read of a deduced relation whose newest value is of
+  a type the field does not read answers the newest value it does read.
+  The same read of a stored relation answers nothing, as before.
+- A read through a field that declares no type, and a read of a concept
+  of several fields, answer as before.
+
+Why: a field's type is part of which attribute it reads, so a read must
+not answer differently because a rule rather than a write put the value
+there.
 
 ### A replica reads the revision records it wrote from the buffers above the leaves
 

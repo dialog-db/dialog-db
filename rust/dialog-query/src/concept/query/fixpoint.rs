@@ -426,6 +426,16 @@ pub fn rank_successions(rows: &mut [Answer], field: &str) {
     }
 }
 
+/// Whether `expected`, a constant or a value the caller bound, and
+/// `actual`, a value a rule derived, are one value: equal, or a number
+/// either reads as the other, as two bindings of a variable agree
+/// ([`Match::bind`]). A constant of another number type than the value
+/// finds it, as a stored scan for the constant does; a value that is
+/// not a number agrees only with an equal one.
+pub(crate) fn agree(expected: &Value, actual: &Value) -> bool {
+    expected == actual || actual.reads_as(expected) || expected.reads_as(actual)
+}
+
 /// Join one caller row against one derived row: bind the caller's
 /// terms to the row's operand values, treating conflicts (a term
 /// already bound to a different value, or a constant that doesn't
@@ -446,7 +456,7 @@ pub fn join(
                 }
             }
             (Some(value), Term::Constant(expected)) => {
-                if expected != value {
+                if !agree(expected, value) {
                     return Ok(None);
                 }
             }
