@@ -32,7 +32,9 @@ pub struct OpenCredential {
 
 impl OpenCredential {
     /// Open the credential named `name`: load it, or generate and
-    /// persist one if none is there.
+    /// persist one if none is there. When another opener creates it
+    /// between this one's load and its create, the one it created is
+    /// loaded: two opens of one name racing end with one key.
     pub fn open(name: impl Into<String>) -> Self {
         Self::new(name.into(), OpenMode::OpenOrCreate)
     }
@@ -96,12 +98,22 @@ impl OpenCredential {
                 })?,
             OpenMode::OpenOrCreate => match self.location().load().perform(env).await {
                 Ok(credential) => credential,
-                Err(storage_fx::StorageError::NotFound(_)) => self
-                    .location()
-                    .create(generate().await?)
-                    .perform(env)
-                    .await
-                    .map_err(|e| IdentityError::Storage(e.to_string()))?,
+                Err(storage_fx::StorageError::NotFound(_)) => {
+                    match self.location().create(generate().await?).perform(env).await {
+                        Ok(credential) => credential,
+                        // Another opener created it between this one's
+                        // load and its create: that is the credential, so
+                        // it is loaded, once. Two opens of one name racing
+                        // end with one key rather than a failure.
+                        Err(storage_fx::StorageError::AlreadyExists(_)) => self
+                            .location()
+                            .load()
+                            .perform(env)
+                            .await
+                            .map_err(|e| IdentityError::Storage(e.to_string()))?,
+                        Err(error) => return Err(IdentityError::Storage(error.to_string())),
+                    }
+                }
                 Err(error) => return Err(IdentityError::Storage(error.to_string())),
             },
         };
@@ -204,6 +216,57 @@ mod tests {
             self.create_called.store(true, Ordering::SeqCst);
             Err(StorageError::AlreadyExists("Profile/tonk".into()))
         }
+    }
+
+    /// A store whose first load misses: what an opener sees when it reads
+    /// just before another opener's create lands.
+    struct StaleFirstLoad {
+        inner: CredentialStore<VolatileSpace>,
+        missed: AtomicBool,
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Load> for StaleFirstLoad {
+        async fn execute(&self, input: Capability<Load>) -> Result<Credential, StorageError> {
+            if !self.missed.swap(true, Ordering::SeqCst) {
+                return Err(StorageError::NotFound("not there yet".into()));
+            }
+            input.perform(&self.inner).await
+        }
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Create> for StaleFirstLoad {
+        async fn execute(&self, input: Capability<Create>) -> Result<Credential, StorageError> {
+            input.perform(&self.inner).await
+        }
+    }
+
+    /// Opening a credential that another opener creates between this
+    /// opener's load and its create opens the one the other created:
+    /// two opens of one name racing end with one key, not a failure.
+    ///
+    /// The store here misses on the first load, as a load that ran just
+    /// before the other opener's create does, and holds the credential by
+    /// the time this opener creates it, so the create is refused as
+    /// already there.
+    #[dialog_common::test]
+    async fn it_opens_the_credential_another_opener_created_first() -> Result<(), IdentityError> {
+        let inner = CredentialStore::<VolatileSpace>::new();
+        let created = OpenCredential::create("raced").perform(&inner).await?;
+        let storage = StaleFirstLoad {
+            inner,
+            missed: AtomicBool::new(false),
+        };
+
+        let opened = OpenCredential::open("raced").perform(&storage).await?;
+
+        assert_eq!(
+            opened.did(),
+            created.did(),
+            "the open takes the credential the other opener created"
+        );
+        Ok(())
     }
 
     #[dialog_common::test]
