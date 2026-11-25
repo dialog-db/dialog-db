@@ -131,7 +131,9 @@ impl Uri {
     }
 
     /// Adopts a stored string [`Self::check_stored`] already accepted,
-    /// without checking it again.
+    /// without checking it again. For a value already checked only: a
+    /// write refuses an entity holding a string that check would refuse.
+    #[doc(hidden)]
     pub fn stored_unchecked(s: &str) -> Self {
         Self(s.into())
     }

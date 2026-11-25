@@ -1282,6 +1282,25 @@ fn reconstruct(
     Ok(Some(fact))
 }
 
+/// Checks `entity` is one this dialog reads back as stored: a URI in its
+/// canonical rendering, holding no whitespace or control character
+/// (which a canonical rendering can still hold in an opaque path, as
+/// `user:a b`). Anything else is refused as an invalid entity.
+fn check_written_entity(entity: &crate::Entity) -> Result<(), DialogCorpusError> {
+    let uri = entity.as_str();
+    if uri
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || c.is_control())
+    {
+        return Err(DialogCorpusError::InvalidEntity(format!(
+            "an entity holds whitespace or a control character: {uri:?}"
+        )));
+    }
+    dialog_capability::identity::Uri::check_stored(uri).map_err(|_| {
+        DialogCorpusError::InvalidEntity(format!("an entity is not a canonical URI: {uri:?}"))
+    })
+}
+
 /// The inclusive key range a selector's scan reads.
 ///
 /// Index choice: exact fields take priority (entity / value /
@@ -1527,6 +1546,18 @@ where
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {
+        // An entity this dialog would not read back as stored is refused
+        // where it would enter the store, as the entity of a claim or as
+        // its value, asserted or retracted. Every way of building an
+        // entity checks its rendering save `Uri::stored_unchecked`, so
+        // this is the one check a write needs.
+        {
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
+            check_written_entity(&fact.of)?;
+            if let Value::Entity(entity) = &fact.is {
+                check_written_entity(entity)?;
+            }
+        }
         // The `dialog.` namespace is reserved for machinery (revision
         // records — see `history::RevisionRecord` — and delegation
         // records), written through [`CorpusExt::record`] or a
