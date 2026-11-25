@@ -89,8 +89,10 @@ pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 /// For tests only: how many characters of a site's reference name the
 /// report relations compiled on this thread from now on, so a test can
 /// make two sites meet. Twelve by default. It changes naming for every
-/// compile on the thread; its worst outcome is a refusal of two sites
-/// named alike. Only with the `inspect` feature.
+/// compile on the thread until it is set again, and on wasm every test
+/// runs on one thread, so a test that sets it sets it back, `12`, however
+/// it ends; its worst outcome is a refusal of two sites named alike.
+/// Only with the `inspect` feature.
 #[cfg(feature = "inspect")]
 pub fn name_sites_with(length: usize) {
     compile::SITE_LENGTH.with(|held| held.set(length));

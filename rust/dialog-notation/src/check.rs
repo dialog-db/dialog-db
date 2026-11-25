@@ -519,14 +519,14 @@ mod tests {
     /// a test shortens it until two sites of one document meet.
     #[test]
     fn it_refuses_two_sites_named_alike() -> Result<(), Error> {
-        crate::compile::SITE_LENGTH.with(|length| length.set(0));
+        let short = crate::compile::sites_named_with(0);
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
             "(select (xyz.out ?a with: ?b total: ?n) (xyz.a ?a n: ?n) (xyz.b ?b n: ?n))
              (select (xyz.out ?a with: ?b other: ?n) (xyz.c ?a n: ?n) (xyz.d ?b n: ?n))",
         );
-        crate::compile::SITE_LENGTH.with(|length| length.set(crate::compile::SITE));
+        drop(short);
         let refusals: Vec<&Diagnostic> = checked.refusals().collect();
         assert!(
             refusals
@@ -1599,7 +1599,11 @@ mod tests {
 
     /// A test that shortens site names gives them back when it ends,
     /// however it ends: tests share a thread on wasm, and every later one
-    /// would name its sites short and see two meet.
+    /// would name its sites short and see two meet. A panic is caught
+    /// only natively: on wasm it aborts, so this runs natively only, and
+    /// the guard it tests is the same code there, held by
+    /// `it_refuses_two_sites_named_alike`, which runs on both.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn it_names_sites_in_full_after_a_test_that_shortened_them_fails() {
         let failed = std::panic::catch_unwind(|| {

@@ -504,15 +504,23 @@ std::thread_local! {
 
 /// Site names of `length` characters on this thread while what this
 /// gives is held: a test shortens them to make two sites meet.
-#[cfg(any(test, feature = "inspect"))]
+#[cfg(test)]
 pub(crate) fn sites_named_with(length: usize) -> SitesNamed {
-    SITE_LENGTH.with(|held| held.set(length));
-    SitesNamed
+    SitesNamed(SITE_LENGTH.with(|held| held.replace(length)))
 }
 
-/// While held, site names are as [`sites_named_with`] made them.
-#[cfg(any(test, feature = "inspect"))]
-pub(crate) struct SitesNamed;
+/// While held, site names are as [`sites_named_with`] made them; let go,
+/// they are as they were, though the test that held it panicked.
+#[cfg(test)]
+#[must_use = "site names are given back when this is dropped"]
+pub(crate) struct SitesNamed(usize);
+
+#[cfg(test)]
+impl Drop for SitesNamed {
+    fn drop(&mut self) {
+        SITE_LENGTH.with(|held| held.set(self.0));
+    }
+}
 
 /// How many characters of a site's reference name its report relation.
 fn site_length() -> usize {
