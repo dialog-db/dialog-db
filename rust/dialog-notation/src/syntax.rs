@@ -365,6 +365,10 @@ pub enum Named {
     /// gives, `dialog.n.c/list/count-open`, its parts well formed
     /// ([`derived_parts`]). A document never writes one.
     Derived,
+    /// No name: empty, with space in it or a variable's `?`, beginning
+    /// or ending with a `/` or with two together, `a/`, `a//b`, or an
+    /// attribute whose name holds a `/`, `a.b/c/d`.
+    Malformed,
 }
 
 /// What `name` names. See [`Named`].
@@ -382,6 +386,22 @@ pub fn named(name: &str) -> Named {
     match Kind::of(name) {
         Kind::Operator => Named::Operator,
         Kind::Entity => Named::Entity,
+        _ if name.is_empty()
+            || name.starts_with('?')
+            || name.chars().any(char::is_whitespace)
+            || name.starts_with('/')
+            || name.ends_with('/')
+            || name.contains("//") =>
+        {
+            Named::Malformed
+        }
+        _ if name.contains('.')
+            && name
+                .split_once('/')
+                .is_some_and(|(_, field)| field.contains('/')) =>
+        {
+            Named::Malformed
+        }
         _ if !name.contains('.') => Named::Declarable,
         _ if name.contains('/') => Named::Attribute,
         _ => Named::Domain,
@@ -391,9 +411,9 @@ pub fn named(name: &str) -> Named {
 /// Whether `name` may be declared: the name of a concept, a query or a
 /// command, `todo` or `notebook/blocks`. One with a `.` anywhere is a
 /// domain, `xyz.todo`, or an attribute in one, `xyz.todo/text`, read
-/// directly; that is how the two are told apart (the maintainer,
-/// 2026-11-24). Every place that decides whether a name is declared or
-/// stored asks this.
+/// directly; that is how the two are told apart. A name that is no name,
+/// [`Named::Malformed`], is neither. Every place that decides whether a
+/// name is declared or stored asks this.
 pub fn declarable(name: &str) -> bool {
     named(name) == Named::Declarable
 }

@@ -447,6 +447,20 @@ fn field(domain: &str, label: &str, node: &Syntax) -> Result<Field, Error> {
 pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     let (Some(domain), Some(operand), true) = (node.applies(), node.operand(), node.is_read())
     else {
+        // A line of no domain, `memo/note` with no concept `memo/note`
+        // declared, comes here as `(memo ?t note: …)`: it is said as it
+        // was written.
+        if let (Some(domain), Some(operand)) = (node.applies(), node.operand())
+            && syntax::named(domain) == syntax::Named::Declarable
+            && !domain.contains('/')
+            && let Some(label) = operand.terms.keys().next()
+        {
+            return Err(Error::Refused(format!(
+                "`{domain}/{label}` names no attribute of a domain, which holds a `.`, \
+                 `xyz.{domain}/{label}`, and no concept or derived attribute `{domain}/{label}` \
+                 is declared above what reads it"
+            )));
+        }
         return Err(Error::Refused(format!("{node} applies no relation")));
     };
     // A trailing `...` says the other fields are left out on purpose. A

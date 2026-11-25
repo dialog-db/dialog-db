@@ -243,6 +243,43 @@ fn concepts_in_order(pending: &mut Vec<usize>, trees: &[Syntax]) {
     pending.splice(at..at, placed);
 }
 
+/// The first application in `tree` as written that applies, or labels
+/// a part with, what is no name, [`syntax::Named::Malformed`], and the
+/// name. A reference that stands as a value, a symbol `/todo` or a set's
+/// empty key, names nothing applied. What is quoted is not a form.
+fn malformed(tree: &Syntax) -> Option<(&Syntax, String)> {
+    let bad = |name: &str| syntax::named(name) == syntax::Named::Malformed;
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            Syntax::Application(operator, operand) => {
+                if let Syntax::Reference(name) = &**operator
+                    && bad(name)
+                {
+                    return Some((part, name.clone()));
+                }
+                // The empty label, `:`, is the label of what has none.
+                if let Some(label) = operand
+                    .terms
+                    .keys()
+                    .find(|label| !label.is_empty() && bad(label))
+                {
+                    return Some((part, label.clone()));
+                }
+                open.extend(operand.terms.values().rev());
+                open.extend(operand.items.iter().rev());
+            }
+            Syntax::Map(entries) => entries.iter().rev().for_each(|(_, value)| {
+                open.push(value);
+            }),
+            Syntax::Tuple(items) => open.extend(items.iter().rev()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The first application in `tree` as written with a label that holds a
 /// `/`, and the label. Only the notation writes one, where it joins the
 /// reads of one entity under `unless` into one read: a document that
@@ -1456,6 +1493,15 @@ impl Expander {
         if let Some((part, name)) = reserved(tree) {
             let part = part.clone();
             return self.about(&part, |_| Err(Error::Reserved(name)));
+        }
+        if let Some((part, name)) = malformed(tree) {
+            let part = part.clone();
+            let message = format!(
+                "{part} names `{name}`, which is no name: a name is a word, or words joined by \
+                 one `/`, `todo` or `notebook/blocks`, and an attribute a domain and a word, \
+                 `xyz.todo/text`"
+            );
+            return self.about(&part, |_| Err(Error::Refused(message)));
         }
         if let Some((part, label)) = slashed(tree) {
             let part = part.clone();

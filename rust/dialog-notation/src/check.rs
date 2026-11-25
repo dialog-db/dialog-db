@@ -265,6 +265,10 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
 /// written as the name it is written by, `names` holding Dialog-DB's
 /// name for each the document's trees wrote, never the hash of it.
 fn spell(diagnostic: &mut Diagnostic, names: &BTreeMap<String, String>) {
+    // A reserved name is said as the document wrote it.
+    if matches!(diagnostic.refusal, Some(Error::Reserved(_))) {
+        return;
+    }
     diagnostic.message = crate::syntax::told_with(&diagnostic.message, names);
     diagnostic.refusal = diagnostic
         .refusal
