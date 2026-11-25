@@ -1596,4 +1596,20 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A test that shortens site names gives them back when it ends,
+    /// however it ends: tests share a thread on wasm, and every later one
+    /// would name its sites short and see two meet.
+    #[test]
+    fn it_names_sites_in_full_after_a_test_that_shortened_them_fails() {
+        let failed = std::panic::catch_unwind(|| {
+            let _short = crate::compile::sites_named_with(0);
+            panic!("a test that shortened site names fails");
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            crate::compile::SITE_LENGTH.with(std::cell::Cell::get),
+            crate::compile::SITE
+        );
+    }
 }

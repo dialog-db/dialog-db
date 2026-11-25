@@ -502,6 +502,18 @@ std::thread_local! {
     pub(crate) static SITE_LENGTH: std::cell::Cell<usize> = const { std::cell::Cell::new(SITE) };
 }
 
+/// Site names of `length` characters on this thread while what this
+/// gives is held: a test shortens them to make two sites meet.
+#[cfg(any(test, feature = "inspect"))]
+pub(crate) fn sites_named_with(length: usize) -> SitesNamed {
+    SITE_LENGTH.with(|held| held.set(length));
+    SitesNamed
+}
+
+/// While held, site names are as [`sites_named_with`] made them.
+#[cfg(any(test, feature = "inspect"))]
+pub(crate) struct SitesNamed;
+
 /// How many characters of a site's reference name its report relation.
 fn site_length() -> usize {
     #[cfg(any(test, feature = "inspect"))]
