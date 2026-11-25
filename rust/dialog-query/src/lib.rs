@@ -132,6 +132,10 @@ mod succession_tests;
 #[cfg(test)]
 mod pick_order_tests;
 
+/// The range predicates over numbers of several types, pinned as tests.
+#[cfg(test)]
+mod range_order_tests;
+
 /// A read of a deduced relation whose value is bound to a number
 /// constant, pinned as tests.
 #[cfg(test)]

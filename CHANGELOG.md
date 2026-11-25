@@ -47,6 +47,68 @@ What this changes for you:
 Why: an attribute's type is part of which relation a claim belongs to,
 so a write must not remove a claim of a relation it does not write.
 
+### A range predicate orders two numbers of different types by value
+
+[#880](https://github.com/dialog-db/dialog-db/pull/880)
+
+A rule's `<`, `<=`, `>` and `>=` compared two numbers of data only when
+both were of one type, and a pair of different types was a non-match:
+the row was dropped, with no error. A read of the number band yields
+each number as its narrowest type (`3` a natural, `-5` an integer, `2.5`
+a float), whatever type wrote it, so the types two compared numbers
+arrive in depend on the data, and a rule that compiled answered wrongly
+on the data it met: `3 > -5` and `3 > 2.5` did not hold over an untyped
+or a `number:` read, nor `3 > -5` over a `natural:` and an `integer:`
+read. Two numbers of data now order by value, as the band's keys sort
+them, so a bound pushed into the scan and the same bound compared row
+by row keep the same numbers.
+
+What this changes for you:
+
+- A range predicate between two numbers of data holds or not by their
+  value, whatever types they were read as. Rows that were silently
+  dropped now match.
+- A numeric constant no type of the data takes orders against it by
+  value: `?x > 1.5` holds for the natural `3`, and `?x >= -1` for the
+  natural `0`. Both were non-matches, by a pushed range and by the
+  filter alike.
+- A number against a value of another type, and a NaN, are still a
+  non-match.
+
+Why: a rule that passes analysis must not answer wrongly because of the
+type a number happened to be read as.
+
+### One number held as two types elects its narrowest type
+
+[#879](https://github.com/dialog-db/dialog-db/pull/879)
+
+A cardinality-one election between claims that stand equal is broken by
+the hash of the value, which hashes the number and not its type, so it
+could not tell one number held as two types (`5` and `5.0`, `3` and the
+integer `3`, or the two zeros) apart and kept whichever it met first.
+Such a tie now goes to the narrowest type: the natural over the integer
+over the float, and `0.0` over `-0.0`. That is the type a read of the
+number band yields, so a deduced election answers what a stored read of
+the same claims would. It is reachable only for one number in two
+representations: any two values that are not the same number hash
+apart.
+
+What this changes for you:
+
+- A deduced cardinality-one read, and a `last`, `max` or `min` pick,
+  over candidates holding one number as two types at equal standing
+  answers the narrowest type, whatever order the candidates arrive in.
+  It answered whichever came first, or, for a pick, the float for `max`.
+- `Cardinality::newer` and `Cardinality::elect` take the narrowest of
+  such a pair; neither was newer than the other.
+- No stored answer changes. A tree a release before 0.3.0 keyed in
+  per-type bands can hold such a pair in one cell, and every stored read
+  of it met the natural first in key order and kept it; it still
+  answers the natural, as it does once migrated into the band.
+
+Why: an election must not depend on the order it meets its candidates
+in, and the narrowest type is what the band itself reads the number as.
+
 ### Two opens of one credential racing both open it
 
 [#878](https://github.com/dialog-db/dialog-db/pull/878)
@@ -165,9 +227,11 @@ What this changes for you:
 - `Value::cmp_number` is new: the order of two numbers by value, total
   and deterministic, NaN least, `-0.0` equal to 0, a float past `2^53`
   read as the decimal it prints as, as the band keys it.
-- Two numbers of one value held as two types, such as 3 and 3.0, pick
-  the same one whatever order they arrive in: `max` the float, `min`
-  the natural.
+- Two numbers of one value held as two types, such as 3 and 3.0, are
+  one value to a pick: the newer claim wins, and between claims that
+  stand equal the narrowest type, whatever order they arrive in, for
+  `max` and `min` alike (see "One number held as two types elects its
+  narrowest type").
 - A text, an entity or a listed type picks as before, and a pick over a
   field of no type holding values of several types that are not numbers
   still orders them by type first.
@@ -1079,19 +1143,12 @@ dropping that scope.
 
 #### Compatibility and migration
 
-- A cardinality-one write succeeds only its own type's claims: nothing
-  stored changes shape, no identity moves and nothing is rewritten on
-  upgrade. Every replica already holds at most one live claim per cell,
-  which is one per stratum. What a write retracts differs: an older
-  release retracts the newest claim of any type, this one only of its
-  own. An older release reads what this one writes; its cardinality-one
-  read elects the newest claim of any type and answers nothing when that
-  claim is of another type than its field. A mixed fleet differs in
-  what a cell holds until every writer upgrades: an older writer's
-  write still retracts the claim of another type, and that retraction
-  reaches every replica on sync. Concurrent writes converge on pull
-  whichever replica merges, before and after this change and in a mixed
-  fleet. Upgrade every writer; an embedder runs nothing.
+- A range predicate between numbers of different types: nothing stored
+  or synced changes, no identity moves and nothing is rewritten. A rule
+  stored before keeps its identity and now keeps the rows its range
+  predicate dropped between numbers of different types; an older
+  release still drops them, so a mixed fleet differs in what such a
+  rule derives until every replica upgrades.
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a
   pattern is written in format 5. Only the reader changed: a body that
@@ -1499,6 +1556,19 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A cardinality-one write succeeds only its own type's claims: nothing
+  stored changes shape, no identity moves and nothing is rewritten on
+  upgrade. Every replica already holds at most one live claim per cell,
+  which is one per stratum. What a write retracts differs: an older
+  release retracts the newest claim of any type, this one only of its
+  own. An older release reads what this one writes; its cardinality-one
+  read elects the newest claim of any type and answers nothing when that
+  claim is of another type than its field. A mixed fleet differs in
+  what a cell holds until every writer upgrades: an older writer's
+  write still retracts the claim of another type, and that retraction
+  reaches every replica on sync. Concurrent writes converge on pull
+  whichever replica merges, before and after this change and in a mixed
+  fleet. Upgrade every writer; an embedder runs nothing.
 - A rule's write under cardinality one after the same commit's write
   of the cell: nothing stored changes shape, no identity moves and
   nothing is rewritten on upgrade. What a commit writes differs: one
