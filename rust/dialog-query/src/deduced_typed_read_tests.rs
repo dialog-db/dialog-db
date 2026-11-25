@@ -440,10 +440,8 @@ fn plain() -> Vec<(Option<&'static str>, Option<&'static str>)> {
 /// nothing: no fact of the field holds a value of another type (the
 /// stored read answers there, which
 /// [`known_divergence_a_stored_read_answers_a_constant_its_type_does_not_read`]
-/// pins). A read whose value is bound to a number may miss rows the
-/// stored read finds, and never answers one it does not:
-/// [`known_divergence_a_deduced_read_misses_a_number_constant_of_another_type`]
-/// pins what each side answers there.
+/// pins). A number constant finds a number of another number type,
+/// stored or deduced alike.
 async fn differences(
     source: &TestEnv<'_>,
     entities: &[Entity],
@@ -495,9 +493,7 @@ async fn differences(
                 };
                 let deduced =
                     answers(source, read("twin/deduced")?, this.clone(), value.clone()).await?;
-                let missed = matches!(value, Term::Constant(constant) if constant.data_type().is_number())
-                    && deduced.iter().all(|row| expected.contains(row));
-                if expected != deduced && !missed {
+                if expected != deduced {
                     wrong.push(format!(
                         "{case}, {declared} under {cardinality:?} {pick:?}, {how}: expected {expected:?}, deduced {deduced:?}"
                     ));
@@ -626,7 +622,7 @@ async fn a_typed_read_reads_a_formula_output_a_rule_concludes_as_a_stored_one() 
 /// the engine answers with a selecting rule that folds them, reads
 /// through the field's type as over a stored relation. Each entity
 /// holds one value here: what a pick elects among several of them is
-/// [`known_divergence_a_stored_pick_elects_before_it_reads_through_the_type`].
+/// [`known_divergence_how_a_typed_read_elects_among_values_of_several_types`].
 #[dialog_common::test]
 async fn a_typed_pick_reads_a_deduced_relation_as_a_stored_one() -> anyhow::Result<()> {
     let (statements, entities) = twinned(
@@ -735,17 +731,15 @@ fn row(of: &Entity, value: &Value) -> String {
     format!("{:?} {value:?}", Value::Entity(of.clone()))
 }
 
-/// A known divergence, pinned as it is today. A read whose value is
-/// bound to a number of another number type than the value the
-/// relation holds (a `float:` field bound to the natural `3`, a
-/// `natural:` or `number:` field bound to the float `3.0`, over a
-/// natural `3`) finds the stored fact holding that number, as a stored
-/// scan matches a number across its types, and finds nothing in a
-/// deduced relation holding the same number, under every cardinality.
-/// A fix makes the deduced read find it, and flips this pin.
+/// A read whose value is bound to a number of another number type than
+/// the value the relation holds (a `float:` field bound to the natural
+/// `3`, a `natural:` or `number:` field bound to the float `3.0`, over a
+/// natural `3`) finds the fact holding that number, stored or deduced,
+/// under every cardinality: a number is one value whatever type holds
+/// it.
 #[dialog_common::test]
-async fn known_divergence_a_deduced_read_misses_a_number_constant_of_another_type()
--> anyhow::Result<()> {
+async fn a_read_bound_to_a_number_of_another_type_finds_it_stored_or_deduced() -> anyhow::Result<()>
+{
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -774,8 +768,8 @@ async fn known_divergence_a_deduced_read_misses_a_number_constant_of_another_typ
             );
             assert_eq!(
                 bound(&source, "twin/deduced", declared, cardinality, &constant).await?,
-                Vec::<String>::new(),
-                "the deduced {declared} read under {cardinality:?} misses {constant:?}"
+                found,
+                "the deduced {declared} read under {cardinality:?} finds {constant:?}"
             );
         }
     }
@@ -818,71 +812,128 @@ async fn known_divergence_a_stored_read_answers_a_constant_its_type_does_not_rea
     Ok(())
 }
 
-/// A known divergence, pinned as it is today. One entity holds, written
-/// under cardinality many in this order, the text `hello`, the natural
-/// `3`, the integer `-3` and the float `2.5`, stored and deduced. A
-/// `natural:` field that picks `max` answers `2` of the stored relation:
-/// the read elects the cell's newest claim, `2.5`, then reads it
-/// through the type. Of the deduced relation it answers `3`: the read
-/// reads every claim through the type, then picks among them. A `float:`
-/// field that picks `max` answers `2.5` and `3.0` the same way. Which
-/// of the two the engine means is the maintainer's to decide; the
-/// decision flips one side of this pin.
+/// A known divergence, pinned as it is today: how a typed read elects
+/// among the values of one cell when they are of several types. One
+/// entity holds four values, written under cardinality many one commit
+/// each, stored and deduced alike, in one of two orders:
+///
+/// - A: `hello`, `3`, `-3`, `2.5` (the newest is `2.5`)
+/// - B: `3`, `-3`, `2.5`, `hello` (the newest is `hello`)
+///
+/// | read                     | A stored | A deduced | B stored | B deduced |
+/// |--------------------------|----------|-----------|----------|-----------|
+/// | `natural:`, `pick: max`  | 2        | 3         | 2        | 3         |
+/// | `float:`, `pick: max`    | 2.5      | 3.0       | 2.5      | 3.0       |
+/// | `natural:`, no pick      | 2        | 2         | nothing  | 2         |
+/// | `text:`, `pick: last`    | nothing  | hello     | hello    | hello     |
+///
+/// Two questions are open, and their answers flip named assertions:
+///
+/// - A plain cardinality-one read: the stored read elects the newest
+///   value of all and then reads it through the type (B answers
+///   nothing); the deduced read reads every value through the type and
+///   elects the newest of those, as a read through a typed variable
+///   does (B answers `2`).
+/// - A pick: the stored read drops what the type does not read, keeps
+///   the newest of the rest and picks among that one (`max` answers
+///   `2`); the deduced read picks among every value the type reads
+///   (`max` answers `3`).
 #[dialog_common::test]
-async fn known_divergence_a_stored_pick_elects_before_it_reads_through_the_type()
+async fn known_divergence_how_a_typed_read_elects_among_values_of_several_types()
 -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    let of = Entity::new()?;
-    for value in [
-        text("hello"),
-        Value::UnsignedInt(3),
-        Value::SignedInt(-3),
-        Value::Float(2.5),
-    ] {
-        commit(
-            &branch,
-            &operator,
-            vec![
-                (the!("twin/stored"), of.clone(), value.clone()),
-                (the!("twin/source"), of.clone(), value),
+    let nothing = None;
+    let natural = |n: u128| Some(Value::UnsignedInt(n));
+    let float = |n: f64| Some(Value::Float(n));
+    let hello = Some(text("hello"));
+    // The read, then what each of A stored, A deduced, B stored and B
+    // deduced answers.
+    let table = [
+        (
+            ("natural:", Some("max")),
+            [natural(2), natural(3), natural(2), natural(3)],
+        ),
+        (
+            ("float:", Some("max")),
+            [float(2.5), float(3.0), float(2.5), float(3.0)],
+        ),
+        (
+            ("natural:", None),
+            [natural(2), natural(2), nothing.clone(), natural(2)],
+        ),
+        (
+            ("text:", Some("last")),
+            [nothing, hello.clone(), hello.clone(), hello],
+        ),
+    ];
+    let orders = [
+        (
+            "A",
+            [
+                text("hello"),
+                Value::UnsignedInt(3),
+                Value::SignedInt(-3),
+                Value::Float(2.5),
             ],
-        )
-        .await?;
-    }
-    let mut registry = RuleRegistry::new();
-    copy(
-        &mut registry,
-        field("twin/deduced", None, Some("many")),
-        "twin/source",
-    )?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    let picked = async |the: &str, declared: &str| {
-        let mut field = field(the, Some(declared), None);
-        field["pick"] = "max".into();
-        answers(
-            &source,
-            concept(field)?,
-            Term::var("who"),
-            Term::var("value"),
-        )
-        .await
-    };
-    for (declared, stored, deduced) in [
-        ("natural:", Value::UnsignedInt(2), Value::UnsignedInt(3)),
-        ("float:", Value::Float(2.5), Value::Float(3.0)),
-    ] {
-        assert_eq!(
-            picked("twin/stored", declared).await?,
-            vec![row(&of, &stored)],
-            "the stored {declared} max"
-        );
-        assert_eq!(
-            picked("twin/deduced", declared).await?,
-            vec![row(&of, &deduced)],
-            "the deduced {declared} max"
-        );
+        ),
+        (
+            "B",
+            [
+                Value::UnsignedInt(3),
+                Value::SignedInt(-3),
+                Value::Float(2.5),
+                text("hello"),
+            ],
+        ),
+    ];
+    for (index, (order, values)) in orders.into_iter().enumerate() {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let of = Entity::new()?;
+        for value in values {
+            commit(
+                &branch,
+                &operator,
+                vec![
+                    (the!("twin/stored"), of.clone(), value.clone()),
+                    (the!("twin/source"), of.clone(), value),
+                ],
+            )
+            .await?;
+        }
+        let mut registry = RuleRegistry::new();
+        copy(
+            &mut registry,
+            field("twin/deduced", None, Some("many")),
+            "twin/source",
+        )?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        for ((declared, pick), answers_of) in &table {
+            for (side, the) in ["stored", "deduced"]
+                .into_iter()
+                .zip(["twin/stored", "twin/deduced"])
+            {
+                let mut field = field(the, Some(declared), None);
+                if let Some(pick) = pick {
+                    field["pick"] = (*pick).into();
+                }
+                let expected: Vec<String> = answers_of[index * 2 + usize::from(side == "deduced")]
+                    .iter()
+                    .map(|value| row(&of, value))
+                    .collect();
+                assert_eq!(
+                    answers(
+                        &source,
+                        concept(field)?,
+                        Term::var("who"),
+                        Term::var("value")
+                    )
+                    .await?,
+                    expected,
+                    "order {order}, {side}, {declared} pick {pick:?}"
+                );
+            }
+        }
     }
     Ok(())
 }
