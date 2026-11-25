@@ -418,14 +418,67 @@ pub fn declarable(name: &str) -> bool {
     named(name) == Named::Declarable
 }
 
+/// The notation's own words: its forms, the formula of a position, and
+/// the folds. A concept, a command or a query declared under one would
+/// shadow what the notation means by it, so none may be.
+pub const FORMS: [&str; 25] = [
+    "concept",
+    "select",
+    "query",
+    "rule",
+    "assert",
+    "retract",
+    "report",
+    "unless",
+    "once",
+    "is",
+    "this",
+    "all",
+    "when",
+    "view",
+    "rows",
+    "expand",
+    "syntax",
+    "warning",
+    "dialog/position",
+    "count",
+    "count-distinct",
+    "sum",
+    "min",
+    "max",
+    "avg",
+];
+
+/// Whether a document may declare a concept, a command or a query under
+/// `name`: one that [`declarable`] and none of the notation's own words,
+/// [`FORMS`]. Every place a document declares a name asks this.
+pub fn declares(name: &str) -> bool {
+    declarable(name) && !FORMS.contains(&name)
+}
+
 /// The refusal of `form`, which declares `name` as `what` though it
-/// cannot be declared.
+/// cannot be declared, saying why in the author's terms.
 pub fn undeclarable(form: &dyn std::fmt::Display, what: &str, name: &str) -> Error {
-    Error::Refused(format!(
-        "{form} declares a {what} named `{name}`, which is a stored name: a name with a `.` is a \
-         domain or an attribute in one, read directly, and the name of a concept, a query or a \
-         command has none, `todo` or `notebook/blocks`; that is how the two are told apart"
-    ))
+    let why = match named(name) {
+        Named::Entity => "which is an entity: a name with a `:` names a thing, not a concept, a \
+                          query or a command, `todo` or `notebook/blocks`"
+            .to_string(),
+        Named::Declarable => format!(
+            "which is one of the notation's own words: declared, it would shadow what \
+             `({name} …)` means; declare it under another name"
+        ),
+        Named::Domain | Named::Attribute => "which is a stored name: a name with a `.` is a \
+                                             domain or an attribute in one, read directly, and \
+                                             the name of a concept, a query or a command has \
+                                             none, `todo` or `notebook/blocks`; that is how the \
+                                             two are told apart"
+            .to_string(),
+        _ => "which is no name a document may declare: the name of a concept, a query or a \
+              command is a word, or words joined by `/`, with no `.`, `todo` or \
+              `notebook/blocks`"
+            .to_string(),
+    };
+    Error::Refused(format!("{form} declares a {what} named `{name}`, {why}"))
 }
 
 /// The variable the notation names `name` with `tag`: `x[3]`.

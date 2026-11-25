@@ -254,12 +254,28 @@ impl Expander {
         if body.is_empty() {
             return Err(asks(tree));
         }
+        // A query's name is a name: one applied as an entity, `(a:b ?x
+        // is: ?v)`, names none.
+        if let Syntax::Application(operator, operand) = head
+            && let Syntax::Constant(_) = &**operator
+            && operand.terms.contains_key("is")
+        {
+            return Err(crate::syntax::undeclarable(
+                head,
+                "query",
+                &operator.to_string(),
+            ));
+        }
         let (Some(name), Some(operand)) = (head.applies(), head.operand()) else {
             return Err(asks(tree));
         };
         // A domain or a stored attribute is read, not defined.
         match crate::syntax::named(name) {
-            crate::syntax::Named::Declarable if operand.terms.contains_key("is") => {}
+            crate::syntax::Named::Declarable
+                if operand.terms.contains_key("is") && crate::syntax::declares(name) => {}
+            crate::syntax::Named::Declarable if operand.terms.contains_key("is") => {
+                return Err(crate::syntax::undeclarable(head, "query", name));
+            }
             crate::syntax::Named::Domain | crate::syntax::Named::Attribute => {
                 return Err(crate::syntax::undeclarable(head, "query", name));
             }

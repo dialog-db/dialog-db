@@ -73,6 +73,14 @@ What this changes for you:
 - No concept, query, command or derived attribute is named with a `.`
   anywhere: `xyz.memo/note`, `a.b/c`, `a/b.c` and `my/list.count` are
   refused as `xyz.memo` was. A name with a `.` is stored, read directly.
+- No concept, command or query is declared under an entity, `(concept
+  (a:b ?x …) …)`, which was kept as a rule about syntax nothing read, or
+  under one of the notation's own words, `concept`, `select`, `query`,
+  `rule`, `assert`, `retract`, `report`, `unless`, `once`, `is`, `this`,
+  `all`, `when`, `view`, `rows`, `expand`, `syntax`, `warning`,
+  `dialog/position` and the folds `count`, `count-distinct`, `sum`,
+  `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
+  refusal names the name and why.
 - A label under the notation's namespace, `dialog.n.c.<hash>/is:` or
   `dialog.n/x:`, is `Error::Reserved` wherever it is written, so no
   document concludes or reads a derived attribute by its hash. A label

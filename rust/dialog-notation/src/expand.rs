@@ -1633,9 +1633,9 @@ impl Expander {
         // A definition under a signature replaces the one before it
         // under the same: the last write wins. Under another signature
         // it stands beside it.
-        let signature = match &answer {
-            Answer::Syntax(template)
-                if position.is_none()
+        let shaped = match &answer {
+            Answer::Syntax(template) => {
+                position.is_none()
                     && when.is_empty()
                     && clauses.unless.is_empty()
                     && members(template.clone()).iter().all(|member| {
@@ -1645,16 +1645,29 @@ impl Expander {
                             || member
                                 .applies()
                                 .is_some_and(|name| self.concepts.contains(name))
-                    }) =>
-            {
-                Signature::of(&pattern, "concept")
+                    })
             }
-            _ => None,
+            _ => false,
         };
+        // A concept's or a command's name is a name: one applied as an
+        // entity, `(a:b ?x …)`, has no signature, and is refused rather
+        // than kept as a rule about syntax no read reaches.
+        if shaped
+            && let Syntax::Application(operator, _) = &pattern
+            && let Syntax::Constant(_) = &**operator
+        {
+            let what = match items(&pattern).is_empty() {
+                true => "command",
+                false => "concept",
+            };
+            return Err(syntax::undeclarable(&pattern, what, &operator.to_string()));
+        }
+        let signature = shaped.then(|| Signature::of(&pattern, "concept")).flatten();
         if let Some(declared) = &signature {
             // A name with a `.` is stored, read directly, and a
-            // concept's or a command's name has none.
-            if !syntax::declarable(&declared.name) {
+            // concept's or a command's name has none; one of the
+            // notation's own words would shadow it.
+            if !syntax::declares(&declared.name) {
                 let what = match items(&pattern).is_empty() {
                     true => "command",
                     false => "concept",
