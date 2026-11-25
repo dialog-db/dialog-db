@@ -91,6 +91,61 @@ fn lens(terms: &Parameters) -> Option<Kind> {
     }
 }
 
+/// The type the field of an attribute concept declares, when it
+/// declares one. A rule concludes a relation whatever type its head
+/// declares, so what the read's own type does not read is no fact of
+/// the attribute it asks for, as it is no fact of a stored one: the
+/// stored scan reads through the type, and every derived candidate is
+/// read through it here ([`read_as`]).
+fn declared(predicate: &ConceptDescriptor) -> Option<Kind> {
+    predicate
+        .attribute_field()?
+        .1
+        .content_type()
+        .map(Kind::from)
+}
+
+/// `value` as `kind` reads it, in place, as a scan reads a stored
+/// fact ([`Kind::view`]): `false` when `kind` does not read it at all.
+/// A value that already inhabits a primitive kind is left as it is.
+fn read_as(kind: &Kind, value: &mut Value) -> bool {
+    if matches!(kind, Kind::Primitive(_)) && kind.admits(value) {
+        return true;
+    }
+    match kind.view(mem::replace(value, Value::Boolean(false))) {
+        Some(viewed) => {
+            *value = viewed;
+            true
+        }
+        None => false,
+    }
+}
+
+/// [`read_as`] for the value `row` binds to the concept's field:
+/// `false` when `kind` does not read it. A row that binds no value, or
+/// binds it absent, is left to the caller's terms. The value is read
+/// in place, and copied only when `kind` has to view it.
+fn read_bound_as(kind: &Kind, row: &mut Match) -> Result<bool, EvaluationError> {
+    match row.view(ConceptDescriptor::VALUE) {
+        None | Some(None) => return Ok(true),
+        Some(Some(view)) => {
+            if let Kind::Primitive(primitive) = kind
+                && primitive.contains(view.data_type())
+            {
+                return Ok(true);
+            }
+        }
+    }
+    let mut value = row
+        .lookup(&Term::<Any>::var(ConceptDescriptor::VALUE))?
+        .content()?;
+    if !read_as(kind, &mut value) {
+        return Ok(false);
+    }
+    row.rebind(ConceptDescriptor::VALUE, value);
+    Ok(true)
+}
+
 /// Whether a bind took. A value the term's type does not read, and one
 /// that disagrees with what the term is already bound to, make the row
 /// one the caller's terms do not match: it is passed over, as a scan
@@ -708,6 +763,12 @@ impl ConceptQuery {
                 // not been recursive.
                 let mut table: Vec<fixpoint::Answer> = table.to_vec();
                 if let Some((name, field)) = app.predicate.attribute_field() {
+                    if let Some(kind) = field.content_type().map(Kind::from) {
+                        table.retain_mut(|answer| match answer.row.get_mut(name) {
+                            Some(value) => read_as(&kind, value),
+                            None => true,
+                        });
+                    }
                     let election = Election::of(field);
                     if election.elects() {
                         fixpoint::rank_successions(&mut table, name);
@@ -763,8 +824,9 @@ impl ConceptQuery {
                     rules.plan_exact(&app.seeds(app.election(&rules).is_some()), &first)
             {
                 let elect = app.election(&rules);
+                let declared = declared(&app.predicate);
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await merged in app.through(&plan, rows, env, elect, widen) {
+                for await merged in app.through(&plan, rows, env, elect, widen, declared) {
                     yield merged?;
                 }
                 return;
@@ -786,7 +848,7 @@ impl ConceptQuery {
             let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
-                for await merged in app.through(&plan, rows, env, elect, widen) {
+                for await merged in app.through(&plan, rows, env, elect, widen, None) {
                     yield merged?;
                 }
             } else if widen {
@@ -804,7 +866,7 @@ impl ConceptQuery {
                     }
                     let copy = input.clone();
                     let single = stream::once(async move { Ok(copy) });
-                    for await merged in app.through(&plan, single, env, elect.clone(), false) {
+                    for await merged in app.through(&plan, single, env, elect.clone(), false, None) {
                         matched = true;
                         yield merged?;
                     }
@@ -823,7 +885,7 @@ impl ConceptQuery {
                     stream::iter(rows)
                 })
                 .try_flatten();
-                let planned = app.through(&plan, planned, env, elect, widen);
+                let planned = app.through(&plan, planned, env, elect, widen, None);
                 for await merged in stream_select!(Box::pin(joined), planned) {
                     yield merged?;
                 }
@@ -833,7 +895,10 @@ impl ConceptQuery {
 
     /// Evaluate `plan` once for every row of `rows`: each row is renamed
     /// into this concept's parameters in a scope nested in it, and each
-    /// result is merged back into the row it came from.
+    /// result is merged back into the row it came from. A plan whose rows
+    /// a rule derives reads each value through `declared`, the type the
+    /// field declares ([`read_as`]); a plan of the stored scan alone
+    /// passes `None`, as the scan already reads through it.
     fn through<'a, Env, M: Selection + 'a>(
         &self,
         plan: &Disjunction,
@@ -841,12 +906,13 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
+        declared: Option<Kind>,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
         // Erased at the entry; see `evaluate`.
-        self.through_erased(plan, Box::pin(rows), env, elect, widen)
+        self.through_erased(plan, Box::pin(rows), env, elect, widen, declared)
     }
 
     fn through_erased<'a, Env>(
@@ -856,6 +922,7 @@ impl ConceptQuery {
         env: &'a Env,
         elect: Option<Election>,
         widen: bool,
+        declared: Option<Kind>,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
@@ -889,6 +956,11 @@ impl ConceptQuery {
                             "a concept's result lost the row it was evaluated for".to_string(),
                         )
                     })?;
+                    if let Some(kind) = &declared
+                        && !read_bound_as(kind, &mut result)?
+                    {
+                        return Ok(None);
+                    }
                     merge_parameters(&caller, &result, &back)
                         .map_err(|e| EvaluationError::Store(e.to_string()))
                 });
@@ -913,6 +985,11 @@ impl ConceptQuery {
                     )
                 })?;
                 let caller_id = Arc::as_ptr(&caller) as usize;
+                if let Some(kind) = &declared
+                    && !read_bound_as(kind, &mut result)?
+                {
+                    continue;
+                }
                 // A value the caller's variable does not read is no fact
                 // of the attribute it asks for: it is not elected among,
                 // and the entity is not one a set-widened read matched.
@@ -1023,6 +1100,7 @@ impl ConceptQuery {
             let plan = rules.plan(&app.seeds(true), &first);
             let widen = app.widens();
             let lens = lens(&app.terms);
+            let declared = declared(&app.predicate);
             let election = match app.predicate.attribute_field() {
                 Some((_, field)) => Election::of(field),
                 None => Election::plain(Cardinality::One),
@@ -1146,6 +1224,9 @@ impl ConceptQuery {
                         standing: folded.standing.clone(),
                         source: Source::Folded,
                     });
+                }
+                if let Some(kind) = &declared {
+                    candidates.retain_mut(|candidate| read_as(kind, &mut candidate.value));
                 }
                 if let Some(kind) = &lens {
                     candidates.retain(|candidate| kind.reads(&candidate.value));
@@ -1578,7 +1659,7 @@ fn agrees(
             },
             _ => None,
         };
-        if expected.is_some_and(|expected| expected != *actual) {
+        if expected.is_some_and(|expected| !fixpoint::agree(&expected, actual)) {
             return Ok(false);
         }
     }
