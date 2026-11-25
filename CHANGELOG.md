@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A typed read bound to a constant its type does not read answers nothing
+
+A field that declares a type reads only the values of that type, so a
+value of another type is no fact of the field. A cardinality-one read
+whose entity was unbound and whose value was bound to a constant found
+the facts holding that constant by the constant alone, and answered one
+whatever its type: a field declared `text:` bound to the integer `-3`
+answered the stored `-3`, and a field that picks `max` over `natural:`
+bound to `"hello"` answered the stored `"hello"`. Each fact such a read
+finds is now read through the field's type, as the read with its value
+unbound reads it.
+
+What this changes for you:
+
+- A read through a typed field whose value is bound to a constant the
+  type does not read answers nothing, under every cardinality and
+  through a pick, with the entity bound or unbound. Under cardinality
+  one with the entity unbound it answered the facts holding the
+  constant.
+- A constant of another number type than the stored number still finds
+  it: a `float:` field bound to the natural `3` finds a stored `3`.
+- A read whose value is unbound, and a read through a field that
+  declares no type, answer as before.
+
+Why: a field's type is part of which attribute it reads, so binding the
+value must not widen what the read answers.
+
 ### A typed read of a relation a rule deduces reads it as it reads a stored one
 
 [#866](https://github.com/dialog-db/dialog-db/pull/866)

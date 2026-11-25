@@ -314,6 +314,16 @@ where
         // so term lookups cannot recover the fact.
         let claim = candidate.prove(selector.source())?;
         let value = claim.is().clone();
+        // The scan that found the candidate was bound to the variable's
+        // value, a constant, which carries none of the variable's type:
+        // a value the type does not read is no fact of the field, as
+        // the scan's own `admit` passes it over when the value is not
+        // bound (see `AttributeQueryAll::admit`).
+        if let Some(kind) = selector.is().kind()
+            && !kind.reads(&value)
+        {
+            return;
+        }
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
             None
