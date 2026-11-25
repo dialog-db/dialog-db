@@ -5,6 +5,7 @@
 //! type information and serialization utilities.
 
 use std::{
+    cmp::Ordering,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -227,8 +228,7 @@ impl Value {
     /// in size, compare without allocating; beyond that they compare
     /// through the band's [`Number`], which reads a float as the decimal
     /// it prints as.
-    pub fn cmp_number(&self, other: &Value) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering;
+    pub fn cmp_number(&self, other: &Value) -> Option<Ordering> {
         /// The largest size a whole number has that every float near it
         /// tells apart from its neighbours.
         const EXACT: u128 = 1 << 53;
