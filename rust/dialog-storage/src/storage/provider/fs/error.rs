@@ -19,6 +19,12 @@ pub enum FileSystemError {
     #[error("Lock error: {0}")]
     Lock(String),
 
+    /// The lock is held by another writer: another process, on native,
+    /// since a process's own writers take turns before the lock. Nothing
+    /// was written; the write can be tried again.
+    #[error("Lock held: {0}")]
+    Held(String),
+
     /// Path containment violation (attempted to escape base directory).
     #[error("Containment violation: {0}")]
     Containment(String),

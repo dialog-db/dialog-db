@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### Writes through one replica on the filesystem take turns instead of failing with a lock error
+
+[#870](https://github.com/dialog-db/dialog-db/pull/870)
+
+The filesystem provider writes a cell under a lock file and refused a
+second writer at once, to keep two processes from writing one cell. It
+refused a second writer of the same process the same way, so two
+writes through one replica that met at a cell (two writes into a stack,
+say) failed with "Concurrent write in progress" instead of one losing
+the compare-and-swap and running again, as it does on the volatile
+provider and on IndexedDB. The writers of one process now take turns at
+a cell before its lock file, and the second compares against what the
+first wrote. Only a holder in another process still refuses the write at
+once.
+
+What this changes for you:
+
+- Concurrent writes through one replica on the native filesystem land:
+  the loser of a race at a cell gets `MemoryError::VersionMismatch`,
+  which the stack and a commit already run again, instead of a lock
+  error that ended the write.
+- A cell whose lock another process holds refuses a write as
+  `MemoryError::Rejected(Rejection::Unavailable { .. })`, retryable
+  as-is, with nothing written. Before, it was a `MemoryError::Storage`
+  whose only sign was its message.
+- `dialog_storage::provider::FileSystemError::Held` is new: the lock
+  is held by another writer. A `match` over `FileSystemError` without a
+  wildcard arm needs the new arm. `FileSystemError::Lock` now means only
+  that the lock file could not be read or written.
+
+Why: a replica that writes while it syncs, or runs two writes at once,
+must not lose one of them to its own other write.
 ### A rule's write under cardinality one succeeds a claim the same commit wrote
 
 [#872](https://github.com/dialog-db/dialog-db/pull/872)
