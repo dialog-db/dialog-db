@@ -53,8 +53,8 @@ What this changes for you:
 - A command a form issues, and what the rules it fires write, land at
   commit: a later `when` reads the command through its relations, but
   not what a rule makes of it. Under `cardinality: :one` a claim a rule
-  writes stands beside one a form of the same document wrote, as two
-  writes of one commit do.
+  writes succeeds the newest, one a form of the same document wrote too
+  (#872).
 - The document is built again over the head that won when another
   writer moves the branch first (`Branch::transact`), its `when`s read
   again.

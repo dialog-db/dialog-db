@@ -14,10 +14,9 @@
 //!   write, land at commit, after every form has run: a later `when` in
 //!   the same document reads the command itself, through the relations
 //!   of the layer commands are on, but not what rules make of it. What
-//!   a rule writes lands in the commit the forms' writes do, so under
-//!   `cardinality: :one` a claim a rule writes stands beside one a form
-//!   of the same document wrote, as two writes of one commit do, where
-//!   in a later document it would succeed it.
+//!   a rule writes lands in the commit the forms' writes do, and under
+//!   `cardinality: :one` succeeds the newest claim, one a form of the
+//!   same document wrote too.
 //! - The document commits once. A refusal or an error on the way writes
 //!   nothing. When another writer moves the branch first, the document
 //!   is run again over the head that won, its `when`s read again.

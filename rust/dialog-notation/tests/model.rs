@@ -198,17 +198,8 @@ fn together(sequence: &[(usize, Op)]) -> State {
     let mut state = staged(&made);
     // The round the commands fire in: each rule reads what the forms
     // left, and a claim one rule retracts and another asserts is held.
-    // The round's writes land in the commit the forms' writes do, at
-    // one edition: under `:one` a claim a rule asserts beside one a form
-    // asserted stands beside it, and succeeds only a claim stored
-    // before the document.
-    let written: Vec<(Cell, &'static str)> = made
-        .iter()
-        .filter_map(|(cell, change)| match change {
-            Change::Assert(value, _) => Some((*cell, *value)),
-            Change::Retract(_) => None,
-        })
-        .collect();
+    // Under `:one` a rule's write succeeds the cell's newest claim, one
+    // a form of the same document wrote too (#872).
     let mut round = Vec::new();
     for which in 0..2 {
         let issued = |command: Op| sequence.contains(&(which, command));
@@ -226,20 +217,7 @@ fn together(sequence: &[(usize, Op)]) -> State {
                 })
             });
             round.extend(retracted);
-            round.extend(set.into_iter().map(|(cell, change)| {
-                match change {
-                    Change::Assert(value, true)
-                        if state
-                            .0
-                            .get(&cell)
-                            .and_then(|claims| claims.last())
-                            .is_some_and(|newest| written.contains(&(cell, newest))) =>
-                    {
-                        (cell, Change::Assert(value, false))
-                    }
-                    other => (cell, other),
-                }
-            }));
+            round.extend(set);
         } else {
             round.extend(retracted);
         }
