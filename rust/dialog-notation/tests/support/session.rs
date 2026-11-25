@@ -175,11 +175,11 @@ impl Notebook {
 /// refusal reads as it does when nothing is driven.
 fn unwrapped(error: ApplyError) -> anyhow::Error {
     match error {
-        ApplyError::Notation(error)
-        | ApplyError::Unanswered {
-            error: LiveError::Notation(error),
-            ..
-        } => anyhow::Error::new(error),
+        ApplyError::Notation(error) => anyhow::Error::new(error),
+        ApplyError::Unanswered(unanswered) => match unanswered.error {
+            LiveError::Notation(error) => anyhow::Error::new(error),
+            other => anyhow::Error::new(other),
+        },
         other => anyhow::Error::new(other),
     }
 }

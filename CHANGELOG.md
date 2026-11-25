@@ -42,7 +42,8 @@ What this changes for you:
   form refuses every form (`check`) or its own alone (`check_forms`). `ApplyError` is `Refused` (the first
   refusal; nothing applied), `Notation` and `Evaluation` (a write's
   `when` failed as it ran; nothing applied), `Commit`, and `Unanswered`
-  (the document committed and a query, select or view of it failed).
+  (the document committed and a query, select or view of it failed,
+  with the revision and the error, boxed).
 - A write's `when` reads the forms before it in its document: an assert
   and then a retract by the entity alone retracts what the assert wrote,
   and a `when` matches a claim an earlier form asserted. It read the

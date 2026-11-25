@@ -121,13 +121,17 @@ pub enum ApplyError {
     Commit(#[from] CommitError),
     /// The document was applied, and a query, a select or a view of it
     /// could not be answered after the commit.
-    #[error("the document was applied, and then {error}")]
-    Unanswered {
-        /// The revision the document left the branch at.
-        revision: Option<Revision>,
-        /// Why it was not answered.
-        error: LiveError,
-    },
+    #[error("the document was applied, and then {}", .0.error)]
+    Unanswered(Box<Unanswered>),
+}
+
+/// A document applied and then not answered: [`ApplyError::Unanswered`].
+#[derive(Debug)]
+pub struct Unanswered {
+    /// The revision the document left the branch at.
+    pub revision: Option<Revision>,
+    /// Why it was not answered.
+    pub error: LiveError,
 }
 
 mod sealed {
@@ -453,12 +457,12 @@ pub async fn apply<E: Writer>(
         .await?;
     branch.refresh(env).await.map_err(CommitError::from)?;
     let revision = branch.revision();
-    let answered = answer(branch, checked, env)
-        .await
-        .map_err(|error| ApplyError::Unanswered {
+    let answered = answer(branch, checked, env).await.map_err(|error| {
+        ApplyError::Unanswered(Box::new(Unanswered {
             revision: revision.clone(),
             error,
-        })?;
+        }))
+    })?;
     Ok(Applied {
         revision,
         answers: answered.answers,
