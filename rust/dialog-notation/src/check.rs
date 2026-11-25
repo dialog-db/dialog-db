@@ -1616,4 +1616,46 @@ mod tests {
             crate::compile::SITE
         );
     }
+
+    /// A line is a line however it says what it is: by `cardinality:`,
+    /// by `of:`, `as:`, `in:` or `by:`, or by the cardinality its value is
+    /// wrapped in, `is: (:one (:text ?v))`. One that names a derived
+    /// attribute is refused at the declaration in each form, in a concept
+    /// and a command, and never at a use that quotes what it expanded to.
+    #[test]
+    fn it_refuses_a_line_naming_a_derived_attribute_in_every_form() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one)) \
+                 (rule (a/x ?t ?n) (a ?t n: ?n))";
+        for declaration in [
+            "(concept (k ?t v: ?v) (a/x ?t is: (:one (:text ?v))))",
+            "(concept (k ?t v: ?v) (a/x of: ?t is: ?v))",
+            "(concept (k ?t v: ?v) (a/x ?t is: ?v as: :text))",
+            "(concept (k/go v: ?v) (a/x ?c is: (:one (:text ?v)) in: :control))",
+            "(concept (k/go v: ?v) (a/x ?c is: (:many ?v) in: :control))",
+        ] {
+            let text = format!("{a} {declaration} (assert (xyz.a x:2 n: \"w\"))");
+            let checked = check(&mut Analyzer::new()?, &text);
+            let refused: Vec<_> = checked
+                .refusals()
+                .map(|said| (said.path.clone(), said.message.clone()))
+                .collect();
+            assert!(
+                !refused.is_empty()
+                    && refused.iter().all(|(path, message)| {
+                        path.first() == Some(&Segment::Item(2))
+                            && message.contains("derived attribute of the concept `a`")
+                            && message
+                                .contains("a line of a concept or a command is a stored attribute")
+                    }),
+                "{declaration}: {refused:?}"
+            );
+        }
+        // A macro over a read of the derived attribute is not a line.
+        let read = check(
+            &mut Analyzer::new()?,
+            &format!("{a} (concept (k ?t v: ?v) (a/x ?t is: ?v)) (select (k ?t v: ?v))"),
+        );
+        assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics);
+        Ok(())
+    }
 }
