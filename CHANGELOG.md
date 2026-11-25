@@ -35,9 +35,12 @@ What this changes for you:
 - A range predicate between two numbers of data holds or not by their
   value, whatever types they were read as. Rows that were silently
   dropped now match.
+- A numeric constant no type of the data takes orders against it by
+  value: `?x > 1.5` holds for the natural `3`, and `?x >= -1` for the
+  natural `0`. Both were non-matches, by a pushed range and by the
+  filter alike.
 - A number against a value of another type, and a NaN, are still a
-  non-match. A numeric constant still adapts to the data's type and is
-  a non-match where it cannot (`1.5` against integer data).
+  non-match.
 
 Why: a rule that passes analysis must not answer wrongly because of the
 type a number happened to be read as.

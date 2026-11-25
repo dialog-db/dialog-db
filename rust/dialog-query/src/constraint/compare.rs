@@ -10,9 +10,9 @@
 //! compared numbers arrive in depend on the data, not on what was
 //! written, and the band's keys sort numbers by value. A *constant*
 //! NUMERIC side is a polymorphic literal that adapts losslessly to the
-//! data's type per row (`1` compares against floats as `1.0`; `1.5`
-//! against integer data is a non-match because no integer is `1.5`),
-//! and non-numeric literals never adapt (a string literal orders only
+//! data's type per row (`1` compares against floats as `1.0`), and one
+//! no type of the data takes (`1.5` against integer data) orders by
+//! value; non-numeric literals never adapt (a string literal orders only
 //! against string rows).
 //!
 //! Non-numeric comparables order within one type by their
@@ -45,10 +45,10 @@ const COMPARE_COST: usize = 1;
 
 /// Order two values for comparison, adapting numeric literal sides.
 ///
-/// `None` is a non-match: a non-comparable value, a NaN, a pair of a
-/// number and a value of another type, or a numeric literal that adapts
-/// losslessly to no type of the data it is compared with. Two numbers of
-/// data order by value, whatever types they were read as.
+/// `None` is a non-match: a non-comparable value, a NaN, or a pair of a
+/// number and a value of another type. Two numbers order by value,
+/// whatever types they were read as, a literal adapted to the data's
+/// type where it can be and by value where it cannot.
 fn ordering(
     of: &Value,
     of_is_literal: bool,
@@ -69,20 +69,18 @@ fn ordering(
         if of_is_literal && let Some(adapted) = of.instantiate(with.value_type()) {
             return adapted.compare(with);
         }
-        // Two numbers of data order by value whatever types they were
-        // read as: a read of the band yields each number as its
-        // narrowest type, so the types two compared numbers arrive in
-        // depend on the data, and the band's keys sort numbers by value,
+        // Two numbers of different types order by value: a read of the
+        // band yields each number as its narrowest type, so the types two
+        // compared numbers arrive in depend on the data, and a literal no
+        // type of the data takes (a fraction against whole data) still
+        // has a place among them. The band's keys sort numbers by value,
         // as a pushed range does.
-        if !of_is_literal && !with_is_literal {
-            let (of, with) = (Value::from(of), Value::from(with));
-            let nan = |value: &Value| matches!(value, Value::Float(float) if float.is_nan());
-            if nan(&of) || nan(&with) {
-                return None;
-            }
-            return of.cmp_number(&with);
+        let (of, with) = (Value::from(of), Value::from(with));
+        let nan = |value: &Value| matches!(value, Value::Float(float) if float.is_nan());
+        if nan(&of) || nan(&with) {
+            return None;
         }
-        return None;
+        return of.cmp_number(&with);
     }
     // Non-numeric comparables order within one type by their
     // order-preserving encoding: exactly the byte order the value
