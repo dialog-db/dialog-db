@@ -69,8 +69,8 @@ use dialog_search_tree::nodes;
 
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
-use crate::{RemoteSite, Staged};
-use dialog_corpus::Changes;
+use crate::{Ephemeral, RemoteSite, Staged};
+use dialog_corpus::{Changes, Statement as _};
 use dialog_query::DeductiveRule;
 use std::slice::from_ref;
 
@@ -129,8 +129,8 @@ impl<'a> TransactionQuery<'a> {
     /// needs a rule of its own, a query of several premises, made in the
     /// middle of a transaction, as [`QueryLayer::with`](crate::QueryLayer::with)
     /// lays one over a branch.
-    pub fn with_rule(self, rule: DeductiveRule) -> Self {
-        let _ = rule;
+    pub fn with_rule(mut self, rule: DeductiveRule) -> Self {
+        rule.assert(&mut self.rules);
         self
     }
 
@@ -205,8 +205,17 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // in (Session, SessionBranch, per-branch BranchMetadata),
             // shared rather than rebuilt, beside the transaction's
             // staged layers.
-            let overlay = shared_metadata(from_ref(&view), &operator);
-            let _ = rules;
+            let metadata = shared_metadata(from_ref(&view), &operator);
+            // The rules laid over this query join the metadata in the
+            // query's own overlay, as a branch query's do: read beside
+            // the transaction's layers, never staged in them.
+            let overlay = if rules.is_empty() {
+                metadata
+            } else {
+                let mut overlay = rules;
+                metadata.export().assert(&mut overlay);
+                Ephemeral::holding(overlay)
+            };
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
