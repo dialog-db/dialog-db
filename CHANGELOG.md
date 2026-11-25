@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A push that loses to its own head at a remote that does not say what it holds has landed
 
+[#876](https://github.com/dialog-db/dialog-db/pull/876)
+
 A push writes the remote's head conditioned on the head it last read. A
 remote reached on S3 answers a failed condition with 412 and nothing
 else, so the push learned only that it lost, not to what, and failed
