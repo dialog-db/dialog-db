@@ -1659,7 +1659,7 @@ fn agrees(
             },
             _ => None,
         };
-        if expected.is_some_and(|expected| expected != *actual) {
+        if expected.is_some_and(|expected| !fixpoint::agree(&expected, actual)) {
             return Ok(false);
         }
     }
