@@ -4477,3 +4477,77 @@ async fn it_refuses_a_pick_on_a_concept_read() -> Result<()> {
     );
     Ok(())
 }
+
+/// A pin, not a decision (the maintainer's rule that a document which
+/// passes analysis does not fail at evaluation on the types of the values
+/// it meets): what `max` answers today over values of several types.
+/// The notation writes `max` and `min` as electors only, on a concept's
+/// field or a line's value; a fold `(max ?v)`, `(count ?v)` or `(sum ?v)`
+/// in a select's head or a writing rule's head is refused when it is
+/// compiled, so no document reaches the engine's `reduce` folds, which
+/// refuse numbers of several types ("cannot order"). An elector over 3,
+/// -5 and 2.5 under no type answers 3, under `:integer` 3, under `:float`
+/// 3.0, and over a text and an entity under no type answers the text.
+#[dialog_common::test]
+async fn it_pins_what_max_answers_over_values_of_several_types_today() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.c/v of: c:1 is: 3 cardinality: :many))
+               (assert (xyz.c/v of: c:1 is: -5 cardinality: :many))
+               (assert (xyz.c/v of: c:1 is: 2.5 cardinality: :many))
+               (assert (xyz.d/v of: d:1 is: "a" cardinality: :many))
+               (assert (xyz.d/v of: d:1 is: :x cardinality: :many))"#,
+        )
+        .await?;
+    for (text, answers) in [
+        (
+            "(concept (c ?t v: (max ?v)) (xyz.c/v of: ?t is: ?v cardinality: :many))
+             (select (c ?t v: ?v))",
+            "(xyz.c c:1 v: 3)",
+        ),
+        (
+            "(concept (ci ?t v: (max ?v))
+               (xyz.c/v of: ?t is: ?v as: :integer cardinality: :many))
+             (select (ci ?t v: ?v))",
+            "(xyz.c c:1 v: 3)",
+        ),
+        (
+            "(concept (cf ?t v: (max ?v))
+               (xyz.c/v of: ?t is: ?v as: :float cardinality: :many))
+             (select (cf ?t v: ?v))",
+            "(xyz.c c:1 v: 3.0)",
+        ),
+        ("(select (xyz.c/v of: ?t is: (max ?v)))", "(xyz.c c:1 v: 3)"),
+        (
+            "(concept (d ?t v: (max ?v)) (xyz.d/v of: ?t is: ?v cardinality: :many))
+             (select (d ?t v: ?v))",
+            r#"(xyz.d d:1 v: "a")"#,
+        ),
+        (
+            "(select (xyz.d/v of: ?t is: (max ?v)))",
+            r#"(xyz.d d:1 v: "a")"#,
+        ),
+    ] {
+        assert_eq!(report(&mut notebook, text).await?, vec![answers], "{text}");
+    }
+    for text in [
+        "(select (xyz.out ?t m: (max ?v)) (xyz.c/v of: ?t is: ?v cardinality: :many))",
+        "(select (xyz.out ?t n: (sum ?v)) (xyz.c/v of: ?t is: ?v cardinality: :many))",
+        "(rule (assert (xyz.out ?t m: (max ?v))) (xyz.c/v of: ?t is: ?v cardinality: :many))",
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("is a fold")),
+            "{text}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.out ?t m: ?m))").await?,
+        Vec::<String>::new()
+    );
+    Ok(())
+}
