@@ -1299,6 +1299,38 @@ mod tests {
     use super::*;
     use crate::form::read;
 
+    /// What a name names, told in one place from its spelling alone.
+    #[test]
+    fn it_tells_what_a_name_names() {
+        for (name, kind) in [
+            ("todo", Named::Declarable),
+            ("notebook/blocks", Named::Declarable),
+            ("nb/blocks/count", Named::Declarable),
+            ("xyz.todo", Named::Domain),
+            ("xyz.todo/text", Named::Attribute),
+            ("a/b.c", Named::Attribute),
+            ("dialog.node.x", Named::Domain),
+            ("dialog.n", Named::Reserved),
+            ("dialog.n.query.row", Named::Reserved),
+            ("dialog.n/x", Named::Reserved),
+            ("dialog.n.c.abc", Named::Reserved),
+            ("dialog.n.c/list/label", Named::Derived),
+            ("dialog.n.c/nb/blocks/count", Named::Derived),
+            ("dialog.n.c/x", Named::Reserved),
+            ("dialog.n.c//f", Named::Reserved),
+            ("dialog.n.c/a/", Named::Reserved),
+            ("dialog.n.c/a.b/f", Named::Reserved),
+            ("list:home", Named::Entity),
+            ("<=", Named::Operator),
+        ] {
+            assert_eq!(named(name), kind, "{name}");
+        }
+        assert_eq!(
+            derived_parts("dialog.n.c/nb/blocks/count"),
+            Some(("nb/blocks", "count"))
+        );
+    }
+
     /// A variable the notation tagged in front, `?[q1]x`, is the
     /// author's `?x`, as one tagged behind, `?x[1]`, is; one tagged with
     /// no name of the author's after it, `?[2]`, is `_`. A name of any
