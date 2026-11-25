@@ -1,34 +1,40 @@
-//! A claim whose stored value no reader can read, read by a
-//! cardinality-one read of its cell.
+//! A claim whose stored value this dialog cannot read, beside readable
+//! claims of its cell.
 //!
-//! Such a claim can only come from another writer: a typed write cannot
-//! produce it. Only the value can be bad without moving the claim out of
-//! the cell, since a cell is keyed by the entity's and the attribute's
-//! bytes, so a bad value is the one kind that stands beside readable
-//! claims. Three are pinned here: text that is not UTF-8, an entity value
-//! that is not a URI, and an entity value that is a URI but not in its
-//! canonical rendering, which reading would have to rewrite.
+//! Such a claim can only come from another writer, such as another
+//! implementation this replica syncs with: a typed write cannot produce
+//! it. Only the value can be bad without moving the claim out of the
+//! cell, since a cell is keyed by the entity's and the attribute's bytes,
+//! so a bad value is the one kind that stands beside readable claims.
+//! Three are pinned here: text that is not UTF-8, an entity value that is
+//! not a URI, and an entity value that is a URI but not in its canonical
+//! rendering, which reading would have to rewrite.
 //!
-//! A cell holding such a claim and a readable one answers what it would
-//! answer if the bad claim could not be read at all: the readable claim
-//! when it is the newer, and nothing when the bad claim is. It never
-//! answers the readable claim the bad one stands over, never answers a
-//! value other than the one stored, and never fails the read.
+//! Every read and write treats such a claim as if it did not exist: it
+//! takes no part in a cell's election or in any query, a write to its
+//! cell lands as it would without it, and a cardinality-one write evicts
+//! it, as it replaces any claim of the cell it reads.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::{Context as _, Result};
+use dialog_capability::Subject;
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_corpus::history::Version;
 use dialog_corpus::{
-    AttributeKey, Cardinality, Datum, EntityKey, Fact, Instruction, Key, State, ValueKey,
+    AttributeKey, Cardinality, Datum, EntityKey, EntityKeyPart, Fact, Instruction, Key,
+    KeyViewConstruct, KeyViewMut as _, State, ValueKey,
 };
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_effects::storage::Location;
+use dialog_peer::helpers::{open_peer, test_storage, unique_name};
+use dialog_peer::{Peer, PeerSpace, Session};
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::types::Any;
 use dialog_query::{AttributeQuery, Claim, Entity, Term, Value};
-use futures_util::stream;
+use dialog_storage::provider::storage::Storage;
+use futures_util::{StreamExt as _, stream};
 
 use crate::{Branch, RepositoryExt as _};
 
@@ -87,8 +93,14 @@ pub(super) fn claim(the: &str, is: Value) -> Result<Fact> {
     })
 }
 
-/// What a cardinality-one read of `the` of [`ITEM`] answers on `branch`.
-pub(super) async fn read_one<Env>(branch: &Branch, the: &str, env: &Env) -> Result<Vec<Value>>
+/// What a read of `the` of [`ITEM`] answers on `branch`: the cell's one
+/// elected claim under `Cardinality::One`, every claim under `None`.
+async fn read<Env>(
+    branch: &Branch,
+    the: &str,
+    cardinality: Option<Cardinality>,
+    env: &Env,
+) -> Result<Vec<Value>>
 where
     Env: crate::ResolveEnv,
 {
@@ -99,7 +111,7 @@ where
             Term::from(ITEM.parse::<Entity>()?),
             Term::<Any>::var("is"),
             Term::var("cause"),
-            Some(Cardinality::One),
+            cardinality,
         ))
         .perform(env)
         .try_vec()
@@ -107,30 +119,114 @@ where
     Ok(rows.into_iter().map(|row| row.is().clone()).collect())
 }
 
-/// Which of a cell's two claims a commit wrote last.
-#[derive(Clone, Copy)]
-enum Last {
-    /// The readable claim, as a cardinality-one assertion, then the bad
-    /// one: the bad claim is the newer.
-    Bad,
-    /// The bad claim, then the readable one, as a cardinality-many
-    /// assertion, which reads no claim of the cell: the readable claim is
-    /// the newer.
-    Readable,
+/// What a cardinality-one read of `the` of [`ITEM`] answers on `branch`.
+pub(super) async fn read_one<Env>(branch: &Branch, the: &str, env: &Env) -> Result<Vec<Value>>
+where
+    Env: crate::ResolveEnv,
+{
+    read(branch, the, Some(Cardinality::One), env).await
 }
 
-/// A cell of `the` holding the readable claim `readable` and a claim of
-/// `bad` with `marker` replaced, written in the order `last` says. What a
-/// cardinality-one read of the cell answers.
-async fn cell_of(
+/// How many claims of `the` of [`ITEM`] `branch`'s head stores, readable
+/// or not: read off the head's tree, as no query sees an unreadable one.
+pub(super) async fn stored<S: PeerSpace>(
+    branch: &Branch,
+    the: &str,
+    operator: &Peer<S, Session>,
+) -> Result<usize> {
+    let head = branch.revision().context("the branch has a head")?;
+    let tree = crate::Index::at(branch.subject(), NodeHash::from(*head.tree.hash()));
+    let the: dialog_corpus::Relation = the.parse()?;
+    let of: dialog_corpus::Entity = ITEM.parse()?;
+    let range = <EntityKey<Key> as KeyViewConstruct>::min()
+        .set_entity(EntityKeyPart::from(&of))
+        .set_attribute(dialog_corpus::AttributeKeyPart::from(&the))
+        .into_key()
+        ..=<EntityKey<Key> as KeyViewConstruct>::max()
+            .set_entity(EntityKeyPart::from(&of))
+            .set_attribute(dialog_corpus::AttributeKeyPart::from(&the))
+            .into_key();
+    let entries = tree.stream_range(range, operator);
+    futures_util::pin_mut!(entries);
+    let mut count = 0;
+    while let Some(entry) = entries.next().await {
+        if let State::Added(_) = entry?.value {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// A claim no reader can read: `value`, its bytes `marker` replaced by
+/// `replacement`.
+#[derive(Clone)]
+struct Bad {
+    value: Value,
+    marker: &'static [u8],
+    replacement: &'static [u8],
+}
+
+/// Text whose bytes are not UTF-8.
+fn not_utf8() -> Bad {
+    Bad {
+        value: Value::String("QZ".into()),
+        marker: b"QZ",
+        replacement: b"\xff\xfe",
+    }
+}
+
+/// An entity value that is not a URI.
+fn not_a_uri() -> Result<Bad> {
+    Ok(Bad {
+        value: entity("ref:qq")?,
+        marker: b"ref:qq",
+        replacement: b"r f:qq",
+    })
+}
+
+/// An entity value stored as `Ref:qq`, a URI whose canonical rendering
+/// is `ref:qq`.
+fn not_canonical() -> Result<Bad> {
+    Ok(Bad {
+        value: entity("ref:qq")?,
+        marker: b"ref:qq",
+        replacement: b"Ref:qq",
+    })
+}
+
+fn entity(uri: &str) -> Result<Value> {
+    Ok(Value::Entity(uri.parse()?))
+}
+
+/// Which claims a cell holds, and which one a commit wrote last.
+#[derive(Clone, Copy)]
+enum Holds {
+    /// The readable claim, as a cardinality-one assertion, then the bad
+    /// one: the bad claim is the newer.
+    BadNewer,
+    /// The bad claim, then the readable one, as a cardinality-many
+    /// assertion, which reads no claim of the cell: the readable claim
+    /// is the newer.
+    BadOlder,
+    /// The bad claim alone.
+    BadAlone,
+}
+
+/// A branch on `storage` whose cell of `the` holds `readable` and `bad`
+/// as `holds` says, and the operator it was written through.
+async fn cell<S: PeerSpace>(
+    storage: Storage<S>,
     the: &str,
     readable: Value,
-    bad: Value,
-    marker: &[u8],
-    replacement: &[u8],
-    last: Last,
-) -> Result<Vec<Value>> {
-    let (operator, profile) = test_session_with_peer().await;
+    bad: Bad,
+    holds: Holds,
+) -> Result<(Branch, Peer<S, Session>)> {
+    let profile = open_peer(storage, Location::profile(unique_name("undecodable"))).await?;
+    let operator = profile
+        .session(b"test")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
     let repository = profile
         .space(unique_name("undecodable"))
         .open()
@@ -151,7 +247,7 @@ async fn cell_of(
             cardinality,
         ))
     };
-    if let Last::Bad = last {
+    if let Holds::BadNewer = holds {
         branch
             .commit(stream::iter(vec![readable(Cardinality::One)?]))
             .perform(&operator)
@@ -160,114 +256,249 @@ async fn cell_of(
     branch
         .commit(stream::iter(Vec::<Instruction>::new()))
         .with_entries(undecodable(
-            &claim(the, bad)?,
-            marker,
-            replacement,
+            &claim(the, bad.value)?,
+            bad.marker,
+            bad.replacement,
             &next_version(&branch)?,
         )?)
         .perform(&operator)
         .await?;
-    if let Last::Readable = last {
+    if let Holds::BadOlder = holds {
         branch
             .commit(stream::iter(vec![readable(Cardinality::Many)?]))
             .perform(&operator)
             .await?;
     }
+    Ok((branch, operator))
+}
+
+/// What a cardinality-one read of a volatile cell of `the`, holding
+/// `readable` and `bad` as `holds` says, answers.
+async fn answer_of(the: &str, readable: Value, bad: Bad, holds: Holds) -> Result<Vec<Value>> {
+    let (branch, operator) = cell(test_storage().await, the, readable, bad, holds).await?;
     read_one(&branch, the, &operator).await
 }
 
-fn entity(uri: &str) -> Result<Value> {
-    Ok(Value::Entity(uri.parse()?))
-}
-
-/// An entity value that is not a URI, newer than the readable one: the
-/// cell answers nothing, not the readable value the bad one stands over.
+/// An entity value that is not a URI, newer than the readable one, takes
+/// no part in the election: the cell answers the readable value.
 #[dialog_common::test]
-async fn a_newer_entity_value_that_is_not_a_uri_leaves_its_cell_answering_nothing() -> Result<()> {
-    let answer = cell_of(
+async fn a_newer_entity_value_that_is_not_a_uri_is_passed_over() -> Result<()> {
+    let answer = answer_of(
         "item/owner",
         entity("user:alice")?,
-        entity("ref:qq")?,
-        b"ref:qq",
-        b"r f:qq",
-        Last::Bad,
-    )
-    .await?;
-    assert_eq!(answer, Vec::<Value>::new());
-    Ok(())
-}
-
-/// An entity value that is not a URI, older than the readable one: the
-/// cell answers the readable value.
-#[dialog_common::test]
-async fn an_older_entity_value_that_is_not_a_uri_leaves_its_cell_answering_the_newer() -> Result<()>
-{
-    let answer = cell_of(
-        "item/owner",
-        entity("user:alice")?,
-        entity("ref:qq")?,
-        b"ref:qq",
-        b"r f:qq",
-        Last::Readable,
+        not_a_uri()?,
+        Holds::BadNewer,
     )
     .await?;
     assert_eq!(answer, vec![entity("user:alice")?]);
     Ok(())
 }
 
-/// An entity value stored as `Ref:qq`, a URI whose canonical rendering is
-/// `ref:qq`, newer than the readable one: the cell answers nothing. It
-/// does not answer `ref:qq`, which no claim of the cell stores: a
-/// retraction of `ref:qq` would not reach the stored claim, and a claim
-/// of `ref:qq` written beside it would be a second claim reading as the
-/// same value.
+/// An entity value that is not a URI, older than the readable one: the
+/// cell answers the readable value.
 #[dialog_common::test]
-async fn a_newer_entity_value_not_in_canonical_rendering_leaves_its_cell_answering_nothing()
--> Result<()> {
-    let answer = cell_of(
+async fn an_older_entity_value_that_is_not_a_uri_is_passed_over() -> Result<()> {
+    let answer = answer_of(
         "item/owner",
         entity("user:alice")?,
-        entity("ref:qq")?,
-        b"ref:qq",
-        b"Ref:qq",
-        Last::Bad,
+        not_a_uri()?,
+        Holds::BadOlder,
     )
     .await?;
-    assert_eq!(answer, Vec::<Value>::new());
+    assert_eq!(answer, vec![entity("user:alice")?]);
     Ok(())
 }
 
-/// Text that is not UTF-8, newer than the readable text: the cell answers
-/// nothing, not the readable text the bad one stands over, and the read
-/// does not fail.
+/// An entity value stored as `Ref:qq`, newer than the readable one, is
+/// passed over: the cell answers the readable value, not `ref:qq`, which
+/// no claim of the cell stores (a retraction of `ref:qq` would not reach
+/// the stored claim, and a claim of `ref:qq` written beside it would be a
+/// second claim reading as the same value).
 #[dialog_common::test]
-async fn a_newer_text_that_is_not_utf8_leaves_its_cell_answering_nothing() -> Result<()> {
-    let answer = cell_of(
-        "item/size",
-        Value::String("large".into()),
-        Value::String("QZ".into()),
-        b"QZ",
-        b"\xff\xfe",
-        Last::Bad,
+async fn a_newer_entity_value_not_in_canonical_rendering_is_passed_over() -> Result<()> {
+    let answer = answer_of(
+        "item/owner",
+        entity("user:alice")?,
+        not_canonical()?,
+        Holds::BadNewer,
     )
     .await?;
-    assert_eq!(answer, Vec::<Value>::new());
+    assert_eq!(answer, vec![entity("user:alice")?]);
+    Ok(())
+}
+
+/// Text that is not UTF-8, newer than the readable text, is passed over:
+/// the cell answers the readable text, and the read does not fail.
+#[dialog_common::test]
+async fn a_newer_text_that_is_not_utf8_is_passed_over() -> Result<()> {
+    let answer = answer_of(
+        "item/size",
+        Value::String("large".into()),
+        not_utf8(),
+        Holds::BadNewer,
+    )
+    .await?;
+    assert_eq!(answer, vec![Value::String("large".into())]);
     Ok(())
 }
 
 /// Text that is not UTF-8, older than the readable text: the cell answers
 /// the readable text.
 #[dialog_common::test]
-async fn an_older_text_that_is_not_utf8_leaves_its_cell_answering_the_newer() -> Result<()> {
-    let answer = cell_of(
+async fn an_older_text_that_is_not_utf8_is_passed_over() -> Result<()> {
+    let answer = answer_of(
         "item/size",
         Value::String("large".into()),
-        Value::String("QZ".into()),
-        b"QZ",
-        b"\xff\xfe",
-        Last::Readable,
+        not_utf8(),
+        Holds::BadOlder,
     )
     .await?;
     assert_eq!(answer, vec![Value::String("large".into())]);
+    Ok(())
+}
+
+/// A cell holding only a claim no reader can read answers nothing, and
+/// the read does not fail.
+#[dialog_common::test]
+async fn a_cell_holding_only_an_unreadable_claim_answers_nothing() -> Result<()> {
+    for bad in [not_utf8(), not_a_uri()?, not_canonical()?] {
+        let the = match bad.value {
+            Value::String(_) => "item/size",
+            _ => "item/owner",
+        };
+        let answer = answer_of(the, Value::String("unused".into()), bad, Holds::BadAlone).await?;
+        assert_eq!(answer, Vec::<Value>::new(), "{the}");
+    }
+    Ok(())
+}
+
+/// A read of every claim of a cell passes over the one no reader can
+/// read, and answers the rest.
+#[dialog_common::test]
+async fn a_read_of_every_claim_passes_over_an_unreadable_one() -> Result<()> {
+    for bad in [not_utf8(), not_a_uri()?, not_canonical()?] {
+        let (the, readable) = match bad.value {
+            Value::String(_) => ("item/size", Value::String("large".into())),
+            _ => ("item/owner", entity("user:alice")?),
+        };
+        let (branch, operator) = cell(
+            test_storage().await,
+            the,
+            readable.clone(),
+            bad,
+            Holds::BadNewer,
+        )
+        .await?;
+        assert_eq!(read(&branch, the, None, &operator).await?, vec![readable]);
+    }
+    Ok(())
+}
+
+/// A cardinality-one write to a cell on `storage` holding a readable
+/// claim and a newer one no reader can read lands, reads back, and
+/// evicts the unreadable claim with the readable one it replaces: the
+/// head stores the written claim alone.
+async fn a_cardinality_one_write_evicts_an_unreadable_claim_on<S: PeerSpace>(
+    storage: Storage<S>,
+) -> Result<()> {
+    let (branch, operator) = cell(
+        storage,
+        "item/size",
+        Value::String("large".into()),
+        not_utf8(),
+        Holds::BadNewer,
+    )
+    .await?;
+    assert_eq!(stored(&branch, "item/size", &operator).await?, 2);
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            claim("item/size", Value::String("fine".into()))?,
+            Cardinality::One,
+        )]))
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read_one(&branch, "item/size", &operator).await?,
+        vec![Value::String("fine".into())]
+    );
+    assert_eq!(
+        stored(&branch, "item/size", &operator).await?,
+        1,
+        "the write evicts the unreadable claim"
+    );
+    Ok(())
+}
+
+/// [`a_cardinality_one_write_evicts_an_unreadable_claim_on`] the volatile
+/// provider, on every target.
+#[dialog_common::test]
+async fn a_cardinality_one_write_evicts_an_unreadable_claim() -> Result<()> {
+    a_cardinality_one_write_evicts_an_unreadable_claim_on(test_storage().await).await
+}
+
+/// [`a_cardinality_one_write_evicts_an_unreadable_claim_on`] the
+/// filesystem provider. Native only: `Storage::temp()` is a directory on
+/// disk. On wasm the volatile provider runs it, in
+/// [`a_cardinality_one_write_evicts_an_unreadable_claim`].
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn a_cardinality_one_write_evicts_an_unreadable_claim_on_the_filesystem() -> Result<()> {
+    let storage = dialog_peer::helpers::test_owned(Storage::temp()).await;
+    a_cardinality_one_write_evicts_an_unreadable_claim_on(storage).await
+}
+
+/// A cardinality-many write beside a claim no reader can read lands and
+/// reads back, and leaves the claim in place: a cardinality-many write
+/// reads no claim of its cell, so it replaces none.
+#[dialog_common::test]
+async fn a_cardinality_many_write_beside_an_unreadable_claim_lands() -> Result<()> {
+    let (branch, operator) = cell(
+        test_storage().await,
+        "item/size",
+        Value::String("large".into()),
+        not_utf8(),
+        Holds::BadNewer,
+    )
+    .await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            claim("item/size", Value::String("more".into()))?,
+            Cardinality::Many,
+        )]))
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read_one(&branch, "item/size", &operator).await?,
+        vec![Value::String("more".into())]
+    );
+    assert_eq!(stored(&branch, "item/size", &operator).await?, 3);
+    Ok(())
+}
+
+/// A retraction of a readable claim beside one no reader can read lands:
+/// the cell then answers nothing, and still stores the unreadable claim,
+/// which the retraction does not name.
+#[dialog_common::test]
+async fn a_retraction_beside_an_unreadable_claim_lands() -> Result<()> {
+    let (branch, operator) = cell(
+        test_storage().await,
+        "item/size",
+        Value::String("large".into()),
+        not_utf8(),
+        Holds::BadNewer,
+    )
+    .await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Retract(claim(
+            "item/size",
+            Value::String("large".into()),
+        )?)]))
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read_one(&branch, "item/size", &operator).await?,
+        Vec::<Value>::new()
+    );
+    assert_eq!(stored(&branch, "item/size", &operator).await?, 1);
     Ok(())
 }

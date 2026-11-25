@@ -854,16 +854,12 @@ mod tests {
         Ok(Some(extension.lookup(&is)?.content()?))
     }
 
-    /// A known divergence, pinned as main has it: a cell whose newest
-    /// claim does not decode fails the read, whatever the read's type,
-    /// with or without a pick, in either scan order. The claim contends
-    /// as any claim does and wins the cell, as it does on main, but it is
-    /// not passed over as a corrupt row is (`CorruptEntry`): reading the
-    /// answer fails with the decode error. The older readable claim is
-    /// not answered: the newest superseded it.
+    /// A cell whose newest claim does not decode answers the older,
+    /// readable one, whatever the read's type, with or without a pick,
+    /// in either scan order: a claim this dialog cannot read takes no
+    /// part in the election, so the cell answers as if it were absent.
     #[dialog_common::test]
-    fn known_divergence_a_cell_whose_newest_claim_does_not_decode_fails_the_read()
-    -> anyhow::Result<()> {
+    fn a_cell_whose_newest_claim_does_not_decode_answers_the_older() -> anyhow::Result<()> {
         let the: CorpusRelation = "item/size".parse()?;
         let of = Entity::new()?;
         let cases = [
@@ -877,11 +873,31 @@ mod tests {
                 for rows in [vec![readable(), corrupt()], vec![corrupt(), readable()]] {
                     let answer = answers(rows, kind, aggregate);
                     assert!(
-                        matches!(answer, Err(EvaluationError::Store(_))),
-                        "{kind:?} {aggregate:?}: expected the decode error, got {answer:?}"
+                        matches!(&answer, Ok(Some(answered)) if *answered == value),
+                        "{kind:?} {aggregate:?}: expected {value:?}, got {answer:?}"
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A cell holding only a claim that does not decode answers nothing,
+    /// with or without a pick, and the read does not fail.
+    #[dialog_common::test]
+    fn a_cell_whose_only_claim_does_not_decode_answers_nothing() -> anyhow::Result<()> {
+        let the: CorpusRelation = "item/size".parse()?;
+        let of = Entity::new()?;
+        for aggregate in [None, Some(Selective::Max)] {
+            let answer = answers(
+                vec![undecodable(&the, &of, 1)],
+                ValueDataType::String,
+                aggregate,
+            );
+            assert!(
+                matches!(answer, Ok(None)),
+                "{aggregate:?}: expected no answer, got {answer:?}"
+            );
         }
         Ok(())
     }

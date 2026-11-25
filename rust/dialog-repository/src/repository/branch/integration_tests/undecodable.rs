@@ -1,14 +1,14 @@
-//! A claim whose stored value no reader can decode, arriving by a pull.
+//! A claim whose stored value this dialog cannot read, arriving by a
+//! pull.
 //!
-//! A typed write cannot produce such a claim, and nothing checks a
-//! claim's value when a replica pulls it, so a replica takes it from
-//! another writer. Once it holds the claim, its cell must stay readable
-//! and writable: a cardinality-one read answers what it would if the bad
-//! claim could not be read at all (see `undecodable_tests`), and a
-//! cardinality-one write to the cell replaces the bad claim, as it
-//! replaces any claim it reads, on every replica that pulls the write.
+//! A typed write cannot produce such a claim, and a pull takes claims
+//! from writers this replica does not control, such as another
+//! implementation, so a replica can hold one. Every read and write treats
+//! it as if it did not exist (see `undecodable_tests`): the cell answers
+//! its readable claims, and a cardinality-one write to the cell evicts
+//! it, on every replica that pulls the write.
 
-use super::super::undecodable_tests::{claim, next_version, read_one, undecodable};
+use super::super::undecodable_tests::{claim, next_version, read_one, stored, undecodable};
 use super::*;
 use dialog_corpus::Cardinality;
 
@@ -61,29 +61,34 @@ async fn pulled(s3: &S3Address, name: &str) -> Result<Followed> {
     Ok(devices)
 }
 
-/// A replica that pulled an undecodable claim newer than its cell's
-/// readable one answers nothing for the cell, not the readable claim the
-/// bad one stands over, and the read does not fail.
+/// A replica that pulled a claim no reader can read, newer than its
+/// cell's readable one, answers the readable one, as the replica it came
+/// from does, and neither read fails.
 #[dialog_common::test]
-async fn a_pulled_undecodable_claim_leaves_its_cell_readable(s3: S3Address) -> Result<()> {
+async fn a_pulled_undecodable_claim_is_passed_over(s3: S3Address) -> Result<()> {
     let devices = pulled(&s3, "undecodable-read").await?;
     assert_eq!(
         read_one(&devices.bob, "item/size", &devices.env).await?,
-        Vec::<Value>::new()
+        vec![Value::String("first".into())]
     );
     assert_eq!(
         read_one(&devices.alice, "item/size", &devices.operator).await?,
-        Vec::<Value>::new()
+        vec![Value::String("first".into())]
     );
     Ok(())
 }
 
-/// A cardinality-one write to a cell holding an undecodable claim lands,
-/// and replaces the claim: the writer reads the written value, and so
-/// does the replica the claim came from once it pulls the write.
+/// A cardinality-one write to a cell holding a pulled claim no reader can
+/// read lands and evicts it: the writer reads the written value and its
+/// head stores that claim alone, and so does the replica the claim came
+/// from once it pulls the write.
 #[dialog_common::test]
-async fn a_cardinality_one_write_replaces_a_pulled_undecodable_claim(s3: S3Address) -> Result<()> {
+async fn a_cardinality_one_write_evicts_a_pulled_undecodable_claim(s3: S3Address) -> Result<()> {
     let devices = pulled(&s3, "undecodable-write").await?;
+    assert_eq!(
+        stored(&devices.alice, "item/size", &devices.operator).await?,
+        2
+    );
     devices
         .bob
         .commit(stream::iter(vec![size("fine", Cardinality::One)?]))
@@ -92,6 +97,11 @@ async fn a_cardinality_one_write_replaces_a_pulled_undecodable_claim(s3: S3Addre
     assert_eq!(
         read_one(&devices.bob, "item/size", &devices.env).await?,
         vec![Value::String("fine".into())]
+    );
+    assert_eq!(
+        stored(&devices.bob, "item/size", devices.env.inner()).await?,
+        1,
+        "the write evicts the undecodable claim"
     );
 
     assert!(
@@ -105,8 +115,12 @@ async fn a_cardinality_one_write_replaces_a_pulled_undecodable_claim(s3: S3Addre
         .await?;
     assert_eq!(
         read_one(&devices.alice, "item/size", &devices.operator).await?,
-        vec![Value::String("fine".into())],
-        "the write replaces the undecodable claim on the replica it came from"
+        vec![Value::String("fine".into())]
+    );
+    assert_eq!(
+        stored(&devices.alice, "item/size", &devices.operator).await?,
+        1,
+        "the eviction reaches the replica the undecodable claim came from"
     );
     Ok(())
 }
