@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule's write under cardinality one succeeds a claim the same commit wrote
 
-Pull request: to be linked when it opens.
+[#872](https://github.com/dialog-db/dialog-db/pull/872)
 
 A round of induction settles a head written under cardinality one
 against what the round reads: the write succeeds the newest claim of the
