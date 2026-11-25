@@ -36,6 +36,34 @@ What this changes for you:
 - A variable joined across two reads of different number types is still
   refused when the rule compiles.
 
+### A range predicate orders two numbers of different types by value
+
+[#880](https://github.com/dialog-db/dialog-db/pull/880)
+
+A rule's `<`, `<=`, `>` and `>=` compared two numbers of data only when
+both were of one type, and a pair of different types was a non-match:
+the row was dropped, with no error. A read of the number band yields
+each number as its narrowest type (`3` a natural, `-5` an integer, `2.5`
+a float), whatever type wrote it, so the types two compared numbers
+arrive in depend on the data, and a rule that compiled answered wrongly
+on the data it met: `3 > -5` and `3 > 2.5` did not hold over an untyped
+or a `number:` read, nor `3 > -5` over a `natural:` and an `integer:`
+read. Two numbers of data now order by value, as the band's keys sort
+them, so a bound pushed into the scan and the same bound compared row
+by row keep the same numbers.
+
+What this changes for you:
+
+- A range predicate between two numbers of data holds or not by their
+  value, whatever types they were read as. Rows that were silently
+  dropped now match.
+- A numeric constant no type of the data takes orders against it by
+  value: `?x > 1.5` holds for the natural `3`, and `?x >= -1` for the
+  natural `0`. Both were non-matches, by a pushed range and by the
+  filter alike.
+- A number against a value of another type, and a NaN, are still a
+  non-match.
+
 Why: a rule that passes analysis must not answer wrongly because of the
 type a number happened to be read as.
 
@@ -1104,12 +1132,6 @@ dropping that scope.
 
 #### Compatibility and migration
 
-- Two numbers of one value equal whatever types read them: nothing
-  stored or synced changes, no identity moves and nothing is rewritten.
-  A stored rule keeps its identity and now keeps the rows its `==`
-  dropped between numbers of different types; an older release still
-  drops them, so a mixed fleet differs in what such a rule derives until
-  every replica upgrades.
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a
   pattern is written in format 5. Only the reader changed: a body that
@@ -1517,6 +1539,18 @@ and names the rule.
 
 ### Compatibility and migration
 
+- Two numbers of one value equal whatever types read them: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A stored rule keeps its identity and now keeps the rows its `==`
+  dropped between numbers of different types; an older release still
+  drops them, so a mixed fleet differs in what such a rule derives until
+  every replica upgrades.
+- A range predicate between numbers of different types: nothing stored
+  or synced changes, no identity moves and nothing is rewritten. A rule
+  stored before keeps its identity and now keeps the rows its range
+  predicate dropped between numbers of different types; an older
+  release still drops them, so a mixed fleet differs in what such a
+  rule derives until every replica upgrades.
 - A rule's write under cardinality one after the same commit's write
   of the cell: nothing stored changes shape, no identity moves and
   nothing is rewritten on upgrade. What a commit writes differs: one
