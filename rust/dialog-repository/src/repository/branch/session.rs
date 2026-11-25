@@ -880,6 +880,13 @@ impl<'a> QueryEnv<'a> {
         self
     }
 
+    /// The staged layers holding writes bound for the primary: the
+    /// transaction's own writes, its earlier rounds of induction among
+    /// them, as opposed to a layer's share or the loopback.
+    pub(crate) fn primary_writes(&self) -> impl Iterator<Item = &Staged> {
+        self.layers.iter().filter(|layer| layer.layer().is_none())
+    }
+
     /// What a read settlement observes of this environment: the lines'
     /// heads, then the revision of every overlay read with them (see
     /// [`overlays`](Self::overlays)).
