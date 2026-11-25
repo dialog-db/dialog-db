@@ -281,6 +281,14 @@ impl Expander {
             }
             _ => return Err(asks(tree)),
         }
+        // A field it declares is a declared name too.
+        if let Some(refused) = operand
+            .terms
+            .keys()
+            .find_map(|label| crate::syntax::unspelled_field(head, label))
+        {
+            return Err(refused);
+        }
         let name = name.to_string();
         // A concept another form of the document defines under this name
         // is refused naming both, whichever comes first.

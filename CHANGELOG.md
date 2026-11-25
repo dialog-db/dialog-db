@@ -89,7 +89,11 @@ What this changes for you:
   command, document macro or derived attribute named otherwise, `café`,
   `Todo`, `to_do`, `a#b`, a name with a zero-width space, is refused naming
   the part and the character, where it was declared and read under
-  exactly what was written.
+  exactly what was written. So is a field a declaration declares: a
+  concept's, a command's or a query's head label, and a derived
+  attribute's head label, which Dialog-DB refused at compile in its own
+  terms. A select head's labels, a value's map keys and variables are
+  free.
 - A write under `dialog.` that Dialog-DB refuses to commit, `(assert
   (dialog.meta x:1 description: "z"))`, is refused when it is checked, in
   the author's terms, once per form, where it was accepted and the commit

@@ -1850,6 +1850,14 @@ impl Expander {
                 };
                 return Err(syntax::undeclarable(&pattern, what, &declared.name));
             }
+            // A field it declares is a declared name too.
+            if let Some(refused) = declared
+                .parameters
+                .iter()
+                .find_map(|label| syntax::unspelled_field(&pattern, label))
+            {
+                return Err(refused);
+            }
             // A name rules of an earlier document read or concluded as
             // a derived attribute stays one: those rules are installed,
             // and would read another relation than the concept.
@@ -2574,6 +2582,17 @@ impl Expander {
                     .or_default();
                 if !uses.contains(&used) {
                     uses.push(used);
+                }
+                // A derived attribute's head declares its fields.
+                if position == Position::Head
+                    && let Some(refused) = tree.operand().and_then(|operand| {
+                        operand
+                            .terms
+                            .keys()
+                            .find_map(|label| syntax::unspelled_field(&tree, label))
+                    })
+                {
+                    return self.about(&tree, |_| Err(refused));
                 }
                 // A derived attribute's name is spelled as a declared one.
                 if let Some(why) = syntax::unspelled(name) {

@@ -555,6 +555,17 @@ pub fn unspelled(name: &str) -> Option<String> {
     })
 }
 
+/// The refusal of `form`, which declares the field `label:` though it
+/// is spelled as no stored name's part is, or `None`: a field a
+/// declaration declares is a declared name.
+pub fn unspelled_field(form: &dyn std::fmt::Display, label: &str) -> Option<Error> {
+    unspelled(label).map(|why| {
+        Error::Refused(format!(
+            "{form} declares the field `{label}:`, which is spelled as no stored name is: {why}"
+        ))
+    })
+}
+
 /// Whether a document may declare a concept, a command or a query under
 /// `name`: one that [`declarable`], none of the notation's own words,
 /// [`FORMS`], and no longer than it is kept in, [`limit`]. Every place a
