@@ -3889,3 +3889,42 @@ async fn it_runs_a_document_at_the_limits_of_a_name() -> Result<()> {
     );
     Ok(())
 }
+
+/// A retract through a concept by its entity alone retracts every claim
+/// of the concept's fields on that entity, not only the one a read under
+/// `cardinality: :one` elects: two claims of one field, as two documents
+/// or two replicas make them, are both gone, at the top level and in a
+/// rule a command fires.
+#[dialog_common::test]
+async fn it_retracts_every_claim_of_a_field_by_its_entity() -> Result<()> {
+    let concept = r#"(concept (p ?t n: ?n)
+          (xyz.p/n of: ?t is: ?n as: :text cardinality: :one))
+        (concept (p/drop subject: ?t)
+          (xyz.p.drop/subject of: ?c is: ?t as: :entity in: :control cardinality: :many))
+        (rule (retract (p ?t)) (p/drop subject: ?t))"#;
+    for retract in ["(retract (p x:1))", "(assert (p/drop subject: x:1))"] {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(concept).await?;
+        notebook.submit(r#"(assert (xyz.p x:1 n: "a"))"#).await?;
+        notebook.submit(r#"(assert (xyz.p x:1 n: "b"))"#).await?;
+        notebook.submit(r#"(assert (xyz.p x:2 n: "kept"))"#).await?;
+        assert_eq!(
+            report(&mut notebook, "(select (xyz.p x:1 n: ?n))")
+                .await?
+                .len(),
+            2
+        );
+        notebook.submit(retract).await?;
+        assert_eq!(
+            report(&mut notebook, "(select (xyz.p ?t n: ?n))").await?,
+            vec![r#"(xyz.p x:2 n: "kept")"#],
+            "{retract}"
+        );
+        assert_eq!(
+            report(&mut notebook, "(select (p ?t n: ?n))").await?,
+            vec![r#"(xyz.p x:2 n: "kept")"#],
+            "{retract}"
+        );
+    }
+    Ok(())
+}
