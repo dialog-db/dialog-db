@@ -223,10 +223,10 @@ fn contend<R: Windowed>(
     let lens = is.kind();
     let lens = lens.as_ref();
     if lens.is_some() {
-        if !reads(lens, challenger.view())? {
+        if !reads(lens, challenger.view()) {
             return Ok(current);
         }
-        if !reads(lens, current.view())? {
+        if !reads(lens, current.view()) {
             return Ok(challenger);
         }
     }
@@ -239,22 +239,30 @@ fn contend<R: Windowed>(
 /// without decoding it, and a number is admitted without decoding it by
 /// a lens that reads every number (`float:`, `number:`). Any other row,
 /// a number under `natural:`, `integer:` or a sized type among them,
-/// decodes its value to ask the lens.
+/// decodes its value to ask the lens, and one whose value does not
+/// decode is admitted, to contend as it does with no type.
 #[inline(always)]
-fn reads(lens: Option<&Kind>, row: &FactView) -> Result<bool, DialogCorpusError> {
+fn reads(lens: Option<&Kind>, row: &FactView) -> bool {
     let Some(kind) = lens else {
-        return Ok(true);
+        return true;
     };
     if let (Kind::Primitive(primitive), Some(stored)) = (kind, row.stored_type()) {
         if stored.is_number() || stored == ValueDataType::Number {
             if primitive.contains(ValueDataType::Float) {
-                return Ok(true);
+                return true;
             }
         } else if primitive.contains(stored) {
-            return Ok(true);
+            return true;
         }
     }
-    Ok(kind.reads(&row.value()?))
+    // A value that does not decode contends as it does with no type:
+    // the election ranks it (see [`elect`]), and a corrupt winner leaves
+    // its cell empty (see [`admitted`]). Setting it aside here would
+    // answer an older claim the newest one superseded.
+    match row.value() {
+        Ok(value) => kind.reads(&value),
+        Err(_) => true,
+    }
 }
 
 /// `base` extended by `winner`, a cell's elected row read from `layer`
