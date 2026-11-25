@@ -4346,4 +4346,147 @@ mod tests {
             );
         }
     }
+
+    /// `syntax::FORMS` is written by hand, so it is checked against what
+    /// the notation defines: every word the sources apply as a form,
+    /// `applies() == Some("…")` and its kin, every word of the kernel's
+    /// tables and every macro the prelude defines is in it, and every
+    /// word in it is one of those. A match on a keyword, `:command` or
+    /// `:float`, is not on what is applied, and is not read. It reads the
+    /// crate's sources outside their tests, so it runs where there is
+    /// a file system: the list is the same on every target.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn it_lists_every_word_the_notation_defines_in_forms() {
+        use std::collections::BTreeSet;
+        let mut sources = String::new();
+        let mut open = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        while let Some(path) = open.pop() {
+            for entry in std::fs::read_dir(&path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    open.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    // A file's tests are not what it defines.
+                    let code = text.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+                    sources.push_str(code);
+                    sources.push('\n');
+                }
+            }
+        }
+        // Each quoted word in `Some("…")` and `Some("…" | "…")` on a line
+        // that asks what is applied, and in the arms of a `match` on it:
+        // the lines below the match, indented deeper.
+        let mut defined: BTreeSet<String> = BTreeSet::new();
+        let mut within: Option<usize> = None;
+        for line in sources.lines() {
+            let indent = line.len() - line.trim_start().len();
+            let line = line.trim();
+            if within.is_some_and(|depth| !line.is_empty() && indent <= depth) {
+                within = None;
+            }
+            if line.starts_with("match") && line.contains("applies()") {
+                within = Some(indent);
+            }
+            if line.starts_with("//") || !(line.contains("applies()") || within.is_some()) {
+                continue;
+            }
+            for part in line.split("Some(").skip(1) {
+                let inner = part.split(')').next().unwrap_or("");
+                for word in inner.split('|') {
+                    if let Some(word) = word
+                        .trim()
+                        .strip_prefix('"')
+                        .and_then(|w| w.strip_suffix('"'))
+                    {
+                        defined.insert(word.to_string());
+                    }
+                }
+            }
+        }
+        defined.extend(HEAD_WORDS.iter().map(|word| word.to_string()));
+        defined.extend(DIRECTIVES.iter().map(|word| word.to_string()));
+        defined.extend(crate::kernel::FOLDS.iter().map(|word| word.to_string()));
+        defined.extend(
+            [
+                ONCE,
+                THIS,
+                POSITION,
+                crate::kernel::QUOTE,
+                crate::select::COLLECT,
+                "site",
+            ]
+            .map(String::from),
+        );
+        defined.extend(Expander::new().unwrap().names.iter().cloned());
+        // The key a site is named apart by is the notation's own and never
+        // read: no document's use of `site` meets it.
+        defined.remove("site");
+        let forms: BTreeSet<String> = syntax::FORMS.iter().map(|word| word.to_string()).collect();
+        assert_eq!(
+            defined.difference(&forms).collect::<Vec<_>>(),
+            Vec::<&String>::new(),
+            "defined, and not in FORMS"
+        );
+        assert_eq!(
+            forms.difference(&defined).collect::<Vec<_>>(),
+            Vec::<&String>::new(),
+            "in FORMS, and defined nowhere"
+        );
+    }
+
+    /// A rule about syntax a document writes whose template is a read
+    /// is a concept under the signature its pattern is written with, so
+    /// a concept of the same name and other labels stands beside it, in
+    /// either order and across documents, and a use's labels say which
+    /// it is. Under the same labels the later replaces the earlier.
+    #[test]
+    fn it_keeps_a_macro_and_a_concept_of_one_name_beside_each_other() {
+        let made = "(rule (syntax (xyz.t ?x name: ?n)) (expand (m ?x ?n)))";
+        let concept = "(concept (m ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))";
+        let by_concept = "(rule (report (xyz.t ?x name: (:one ?n))) (xyz.t ?x name: (:one ?n)))";
+        let by_macro = "(rule (report (xyz.t ?x name: ?n)) (xyz.t ?x name: ?n))";
+        for (setup, text, answer) in [
+            (
+                "",
+                format!("{made} {concept} (select (m ?x name: ?n))"),
+                by_concept,
+            ),
+            ("", format!("{concept} {made} (select (m ?x ?n))"), by_macro),
+            (
+                made,
+                format!("{concept} (select (m ?x name: ?n))"),
+                by_concept,
+            ),
+            (made, format!("{concept} (select (m ?x ?n))"), by_macro),
+            (concept, format!("{made} (select (m ?x ?n))"), by_macro),
+            (
+                concept,
+                format!("{made} (select (m ?x name: ?n))"),
+                by_concept,
+            ),
+        ] {
+            assert_eq!(
+                expanded(setup, &text).unwrap(),
+                vec![answer],
+                "{setup} | {text}"
+            );
+        }
+        // A macro under a word of the notation is refused as a concept
+        // under it is.
+        let refused = expanded(
+            "",
+            "(rule (syntax (xyz.t ?x name: ?n)) (expand (select ?x ?n)))",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("one of the notation's own words"),
+            "{refused}"
+        );
+    }
 }
