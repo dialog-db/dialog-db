@@ -348,7 +348,10 @@ fn overlay_holds(composite: &Composite, the: &CorpusRelation, of: &Entity) -> bo
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a
-/// write can succeed, and the session overlay's rows, which it cannot.
+/// write can succeed, the commit's own writes bound for the primary
+/// among them (an earlier round of induction's included), and the rows
+/// it cannot: the session overlay's, a layer's share's and the
+/// loopback's.
 async fn claims_of(
     view: &QueryEnv<'_>,
     the: &CorpusRelation,
@@ -365,13 +368,25 @@ async fn claims_of(
     let mut claims = Vec::with_capacity(rows.len());
     for row in rows {
         let fact = row.to_owned().map_err(|error| failed(&error))?;
+        // A row the commit's own writes hold is a claim the commit
+        // makes: a later write under one succeeds it, as a transaction's
+        // later write succeeds its earlier one.
+        let written = || {
+            let selector = Selector::new()
+                .the(the.clone())
+                .of(of.clone())
+                .is(fact.is.clone());
+            view.primary_writes()
+                .any(|layer| !layer.scan(&selector).is_empty())
+        };
+        let claim = row.key().is_some() || written();
         claims.push(Candidate {
             standing: Some(Standing::new(
                 row.standing(),
                 Claim::from(fact.clone()).cause().clone(),
             )),
             value: fact.is,
-            claim: row.key().is_some(),
+            claim,
         });
     }
     Ok(claims)
@@ -671,6 +686,91 @@ mod tests {
     };
     use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::StreamExt as _;
+
+    /// What a round of induction may succeed among the rows its view
+    /// reads of a cell: a stored claim and the commit's own write bound
+    /// for the primary, an earlier round's included. A row a layer's
+    /// share holds, or the loopback (`control:`), a transient, is read
+    /// and is no claim a write succeeds.
+    #[dialog_common::test]
+    async fn it_succeeds_the_commits_own_writes_and_no_transient_or_share() -> Result<()> {
+        use crate::repository::branch::session::{QueryEnv, shared_metadata};
+        use crate::repository::source::Live;
+        use crate::{Staged, control_layer};
+        use dialog_corpus::Update as _;
+        use dialog_effects::authority::Identify;
+        use std::slice::from_ref;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let the: CorpusRelation = "xyz.r/o".parse()?;
+        let of: Entity = "x:1".parse()?;
+        let text = |value: &str| Value::String(value.into());
+        // Every write under many, so the view reads every row: a staged
+        // write under one would hide the stored claim it is to succeed.
+        let many = dialog_corpus::Cardinality::Many;
+
+        let mut stored = dialog_corpus::Changes::new();
+        stored.associate(the.clone(), of.clone(), text("stored"), many);
+        branch
+            .transaction()
+            .assert(stored)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let mut written = dialog_corpus::Changes::new();
+        written.associate(the.clone(), of.clone(), text("written"), many);
+        let mut transient = dialog_corpus::Changes::new();
+        transient.associate(the.clone(), of.clone(), text("transient"), many);
+        let mut shared = dialog_corpus::Changes::new();
+        shared.associate(the.clone(), of.clone(), text("shared"), many);
+
+        let view = Live::from(&branch).pin();
+        let identity = Identify.perform(&operator).await?;
+        let metadata = shared_metadata(from_ref(&view), &identity);
+        let round = QueryEnv::new(vec![view.into_source()], metadata, &operator).with_layers(vec![
+            Staged::from(written),
+            Staged::from(transient).in_layer(control_layer()),
+            Staged::from(shared).in_layer("session:state".parse()?),
+        ]);
+
+        let mut read: Vec<(String, bool)> = super::claims_of(&round, &the, &of)
+            .await?
+            .into_iter()
+            .map(|candidate| (format!("{:?}", candidate.value), candidate.claim))
+            .collect();
+        read.sort();
+        let transient_read = read.iter().find(|(value, _)| value.contains("transient"));
+        assert_eq!(
+            transient_read,
+            Some(&(format!("{:?}", text("transient")), false)),
+            "the transient is read and is no claim"
+        );
+        assert!(
+            read.iter()
+                .filter(|(value, _)| value.contains("shared"))
+                .all(|(_, claim)| !claim),
+            "a layer's share is no claim"
+        );
+        let claims: Vec<&String> = read
+            .iter()
+            .filter(|(_, claim)| *claim)
+            .map(|(value, _)| value)
+            .collect();
+        assert_eq!(
+            claims,
+            vec![
+                &format!("{:?}", text("stored")),
+                &format!("{:?}", text("written"))
+            ],
+            "the stored claim and the commit's own write are claims"
+        );
+        Ok(())
+    }
 
     /// Two `last` writes of one cell in one transaction settle to the
     /// later one alone: the second succeeds the first, and the squash

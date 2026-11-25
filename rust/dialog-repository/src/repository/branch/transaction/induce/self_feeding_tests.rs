@@ -14,6 +14,10 @@
 //! a bound of `MAX_ROUNDS - 1` is the largest a commit settles, and a
 //! bound of `MAX_ROUNDS` fails it with `InductionDivergence`.
 //!
+//! Under cardinality many the same rule keeps every value it writes:
+//! the cell accumulates `0` to the bound, and counting past the round
+//! limit fails the commit the same way.
+//!
 //! Run on the volatile and the filesystem providers.
 
 #[cfg(target_arch = "wasm32")]
@@ -36,9 +40,9 @@ fn var(name: &str) -> Json {
     json!({ "?": { "name": name } })
 }
 
-/// `xyz.n/v`, an integer of cardinality one.
-fn v() -> Json {
-    json!({ "the": "xyz.n/v", "as": "integer:", "cardinality": "one" })
+/// `xyz.n/v`, an integer of `cardinality`.
+fn v(cardinality: Cardinality) -> Json {
+    json!({ "the": "xyz.n/v", "as": "integer:", "cardinality": cardinality.name() })
 }
 
 fn relation() -> Relation {
@@ -50,13 +54,13 @@ fn entity() -> Entity {
 }
 
 /// `assert! xyz.n{v: ?prev + 1} when xyz.n{this: ?this, v: ?prev},
-/// ?prev < bound`.
-fn count_up(bound: i64) -> Result<InductiveRule> {
+/// ?prev < bound`, `v` of `cardinality`.
+fn count_up(bound: i64, cardinality: Cardinality) -> Result<InductiveRule> {
     Ok(serde_json::from_value(json!({
-        "assert!": { "with": { "v": v() } },
+        "assert!": { "with": { "v": v(cardinality) } },
         "when": [
             {
-                "assert": { "with": { "v": v() } },
+                "assert": { "with": { "v": v(cardinality) } },
                 "where": { "this": var("this"), "v": var("prev") }
             },
             { "assert": "<", "where": { "of": var("prev"), "with": bound } },
@@ -74,23 +78,36 @@ async fn claims<S: PeerSpace>(branch: &Branch, session: &Peer<S, Session>) -> Re
     let selector = Selector::new().the(relation()).of(entity());
     let stream = branch.claims().select(selector).perform(session).await?;
     let facts: Vec<_> = stream.collect().await;
-    facts
+    let mut values = facts
         .into_iter()
         .map(|item| Ok(item.and_then(|view| view.to_owned())?.is))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    values.sort_by_key(|value| match value {
+        Value::UnsignedInt(n) => *n,
+        _ => u128::MAX,
+    });
+    Ok(values)
 }
 
-/// Installs the rule counting up to `bound`, then commits `v = 0`.
+/// `n` as the claim of `v` it is stored as: a non-negative integer is
+/// stored as a natural.
+fn natural(n: i64) -> Result<Value> {
+    Ok(Value::UnsignedInt(u128::try_from(n)?))
+}
+
+/// Installs the rule counting up to `bound` under `cardinality`, then
+/// commits `v = 0`.
 async fn count<S: PeerSpace>(
     session: &Peer<S, Session>,
     peer: &Peer<S>,
     bound: i64,
+    cardinality: Cardinality,
 ) -> Result<(Branch, Result<(), CommitError>)> {
     let repo = test_repo(session, peer).await;
     let branch = repo.branch("main").open().perform(session).await?;
     branch
         .transaction()
-        .assert(count_up(bound)?)
+        .assert(count_up(bound, cardinality)?)
         .commit()
         .publish()
         .perform(session)
@@ -98,7 +115,7 @@ async fn count<S: PeerSpace>(
     branch.refresh(session).await?;
 
     let mut zero = Changes::new();
-    zero.associate(relation(), entity(), Value::SignedInt(0), Cardinality::One);
+    zero.associate(relation(), entity(), Value::SignedInt(0), cardinality);
     let committed = branch
         .transaction()
         .assert(zero)
@@ -117,28 +134,50 @@ async fn counts_to_the_bound<S: PeerSpace>(
 ) -> Result<()> {
     let largest = i64::from(MAX_ROUNDS) - 1;
     for bound in [3, 5, 8, largest] {
-        let (branch, committed) = count(session, peer, bound).await?;
+        let (branch, committed) = count(session, peer, bound, Cardinality::One).await?;
         committed?;
         assert_eq!(
             claims(&branch, session).await?,
-            // A non-negative integer is stored as a natural.
-            vec![Value::UnsignedInt(u128::try_from(bound)?)],
+            vec![natural(bound)?],
             "counting up to {bound} leaves one claim, {bound}"
         );
     }
     Ok(())
 }
 
-/// Counting past the round bound fails the commit, and writes nothing.
+/// Under cardinality many, counting up within the round bound keeps
+/// every value written: `0` to the bound.
+async fn accumulates_under_many<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    for bound in [3, 8, i64::from(MAX_ROUNDS) - 1] {
+        let (branch, committed) = count(session, peer, bound, Cardinality::Many).await?;
+        committed?;
+        assert_eq!(
+            claims(&branch, session).await?,
+            (0..=bound).map(natural).collect::<Result<Vec<_>>>()?,
+            "counting up to {bound} under many keeps every value"
+        );
+    }
+    Ok(())
+}
+
+/// Counting past the round bound fails the commit, and writes nothing,
+/// under either cardinality.
 async fn fails_past_the_round_bound<S: PeerSpace>(
     session: &Peer<S, Session>,
     peer: &Peer<S>,
 ) -> Result<()> {
-    for bound in [i64::from(MAX_ROUNDS), 20] {
-        let (branch, committed) = count(session, peer, bound).await?;
+    for (bound, cardinality) in [
+        (i64::from(MAX_ROUNDS), Cardinality::One),
+        (20, Cardinality::One),
+        (i64::from(MAX_ROUNDS), Cardinality::Many),
+    ] {
+        let (branch, committed) = count(session, peer, bound, cardinality).await?;
         assert!(
             matches!(committed, Err(CommitError::InductionDivergence(_))),
-            "counting up to {bound} fails with InductionDivergence, got {committed:?}"
+            "counting up to {bound} under {cardinality:?} fails with InductionDivergence, got {committed:?}"
         );
         assert_eq!(
             claims(&branch, session).await?,
@@ -153,6 +192,12 @@ async fn fails_past_the_round_bound<S: PeerSpace>(
 async fn it_counts_to_the_bound_under_cardinality_one_on_a_volatile_branch() -> Result<()> {
     let (session, peer) = test_session_with_peer().await;
     counts_to_the_bound(&session, &peer).await
+}
+
+#[dialog_common::test]
+async fn it_accumulates_under_cardinality_many_on_a_volatile_branch() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    accumulates_under_many(&session, &peer).await
 }
 
 #[dialog_common::test]
@@ -171,6 +216,17 @@ async fn it_counts_to_the_bound_under_cardinality_one_on_a_filesystem_branch() -
     let root = tempfile::tempdir()?;
     let (session, peer) = filesystem_session_with_peer(root.path()).await?;
     counts_to_the_bound(&session, &peer).await
+}
+
+/// Native only, as above; the web run of
+/// `it_accumulates_under_cardinality_many_on_a_volatile_branch` pins the
+/// same scenario there.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_accumulates_under_cardinality_many_on_a_filesystem_branch() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (session, peer) = filesystem_session_with_peer(root.path()).await?;
+    accumulates_under_many(&session, &peer).await
 }
 
 /// Native only, as above; the web run of

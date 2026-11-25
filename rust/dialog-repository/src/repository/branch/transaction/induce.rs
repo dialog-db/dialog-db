@@ -2259,8 +2259,11 @@ mod tests {
     /// A count asserted as a natural in the same commit as the increment
     /// seeds the rule's `integer:` premise. The seed is read through the
     /// variable's view, as a scan reads it: the natural 40 is the integer
-    /// 40, and the commit increments it rather than failing. The staged
-    /// 40 is not yet a claim the head can succeed, so 41 lands beside it.
+    /// 40, and the commit increments it rather than failing. The count is
+    /// of cardinality one, and the direct write of 40 and the rule's head
+    /// of 41 are two writes of that cell in one commit: the later succeeds
+    /// the earlier, as a transaction's later write does, and the cell
+    /// holds 41 alone.
     #[dialog_common::test]
     async fn it_seeds_an_integer_premise_from_a_natural_fact() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2298,8 +2301,8 @@ mod tests {
 
         assert_eq!(
             values(&branch, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(40), Value::UnsignedInt(41)],
-            "the seeded natural must read as the integer and be incremented"
+            vec![Value::UnsignedInt(41)],
+            "the seeded natural must read as the integer, be incremented, and be succeeded"
         );
         Ok(())
     }
