@@ -374,6 +374,82 @@ Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
 
+### A typed read elects and picks among the values its type reads
+
+[#875](https://github.com/dialog-db/dialog-db/pull/875)
+
+A value of another type under an attribute is a claim of another
+relation, yet a stored cardinality-one read elected among every value
+of the cell and only then read the winner through the field's type. When
+the newest value, or the one a pick chose, was of a type the field does
+not read, the read answered nothing, though the cell held a value of its
+type. A field declared `natural:` over `3`, `-3`, `2.5` and then `hello`
+answered nothing, and its `min` picked `-3` and answered nothing. The
+stored scan and its challenge now set such a value aside before
+electing, reading its type off the key and decoding only to ask a
+number type whether it reads the number, so the stored read answers
+what the deduced one already did.
+
+What this changes for you:
+
+- A stored cardinality-one read through a field of a type answers the
+  newest value its type reads. It answered nothing when the newest
+  value was of another type.
+- A pick over a stored field of a type (`max`, `min`, `last`, ...) picks
+  among the values its type reads, as the type reads them: `natural:`
+  `min` over `3`, `-3`, `2.5` answers `2`, and `text:` `last` answers
+  the newest text. It answered nothing when the value it picked was one
+  the type does not read.
+- A read of a deduced relation answers as before.
+- A read through a field that declares no type answers as before: it
+  elects among every value of the cell, whatever its type.
+- What a write stores, and how a cardinality-one write supersedes a
+  claim of another type, is unchanged.
+
+Why: a field's type is part of which attribute it reads, so a value of
+another type must not decide what the field answers, and a stored read
+must answer what a deduced one does.
+
+### A push that loses to its own head at a remote that does not say what it holds has landed
+
+[#876](https://github.com/dialog-db/dialog-db/pull/876)
+
+A push writes the remote's head conditioned on the head it last read. A
+remote reached on S3 answers a failed condition with 412 and nothing
+else, so the push learned only that it lost, not to what, and failed
+with the bare `VersionMismatch`. Two syncs of one replica racing both
+push the same head: the second lost to the first, to the very head it
+meant to publish, and failed. A push that loses at such a remote now
+reads the remote's head once. If it is exactly the revision the push
+published, signature and all, the push has landed and records its sync
+point; anything else is a head that moved, refused as it is at a
+remote that says where it stands.
+
+What this changes for you:
+
+- Two syncs or pushes of one replica racing to an S3 remote both
+  return. Before, the second failed with
+  `PushError::PublishRemoteBranch(Publish(VersionMismatch { current:
+  Current::Unknown, .. }))`.
+- A push that loses to another head at such a remote now fails with
+  `PushError::NonFastForward` naming that head, as at a remote that
+  says where it stands, instead of the bare `VersionMismatch`, and that
+  head is recorded for the pull that rebases onto it. A caller that
+  matched the `VersionMismatch` to detect a conflict matches
+  `NonFastForward` instead.
+- When the push cannot read the remote's head after losing, it fails
+  with that read's error, `PushError::FetchRemoteBranch`, and is not
+  taken for landed.
+
+Why: a replica that syncs from more than one place at once, a watch and
+a timer say, must not fail a sync because another sync of its own did
+the same work first. Taking a head that equals the one published as
+landed hides no lost write: every publish is conditioned on the head it
+read and is made only of a head that builds on it, so whatever came
+between is in the head. A writer that resets the remote without a
+fast-forward lost what it overwrote whatever this push does, and a
+forged head is never equal to the revision this push signed.
+
 ### A pick orders numbers by value
 
 [#874](https://github.com/dialog-db/dialog-db/pull/874)

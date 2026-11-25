@@ -247,6 +247,42 @@ impl From<Fact> for FactView {
 }
 
 impl FactView {
+    /// For tests only: a scanned row of `the` on `of` whose key carries
+    /// `value_type` and the value bytes `payload` as they are, with
+    /// `cause`. A test builds a row a tree may hold but no [`Fact`] can
+    /// stand for with it, such as one whose value does not decode.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn scanned(
+        the: &Relation,
+        of: &Entity,
+        value_type: ValueDataType,
+        payload: Vec<u8>,
+        cause: Option<Cause>,
+    ) -> Self {
+        let key = varkey::build_key(&varkey::KeyParts {
+            tag: ENTITY_KEY_TAG,
+            entity: of.to_string().into_bytes(),
+            attribute: the.as_str().as_bytes().to_vec(),
+            value_type,
+            value: varkey::ValuePayload::Inline(payload),
+            version: None,
+        });
+        let layout = varkey::parse_key_layout(&key).expect("a built key parses");
+        Self::new(
+            KeyHandle::Owned(key),
+            layout,
+            Datum {
+                cause,
+                blob: None,
+                version: None,
+                collapsed: vec![],
+                supersedes: vec![],
+                retraction: false,
+            },
+            None,
+        )
+    }
+
     /// Assembles a view from a scanned entry's key handle, the layout the
     /// scan read from it, its payload, and (for a spilled value) the
     /// fetched block bytes.

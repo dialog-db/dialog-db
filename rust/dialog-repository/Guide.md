@@ -162,6 +162,8 @@ let origin = bob_repo.remote("origin")
 
 When a branch has a remote upstream, queries automatically replicate missing blocks on demand.
 
+If you watch a remote branch yourself instead of using `Branch::replicate`, sync the branch on every `Observation::Advanced` and `Observation::Stale` alike: a stale head is one already recorded (a push the remote refused records where the remote stands), not one the branch has taken.
+
 ## Collaboration
 
 Access is shared through UCAN delegation: signed tokens forming a chain of trust.

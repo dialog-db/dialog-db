@@ -90,12 +90,12 @@ impl<'a> Push<'a> {
     /// - The novelty upload ships before the rejection. Those blocks are
     ///   content-addressed, so the target absorbs them idempotently and
     ///   nothing is corrupted, but the bandwidth is spent.
-    /// - The refusal arrives from the head write. A remote that says
-    ///   where it is (an access service does) gives
-    ///   [`PushError::NonFastForward`] naming its head, which is recorded
-    ///   for the pull that rebases onto it. One that does not gives
-    ///   [`PublishError::VersionMismatch`](crate::PublishError), so a
-    ///   caller that reports conflicts must recognize both.
+    /// - The refusal arrives from the head write, as
+    ///   [`PushError::NonFastForward`] naming the remote's head, which is
+    ///   recorded for the pull that rebases onto it. A remote that does
+    ///   not say where it is (S3 reached directly) costs one read of its
+    ///   head to learn it; when that head is the one this push published,
+    ///   another push of it came first, and this push has landed.
     pub fn assuming_upstream(mut self) -> Self {
         self.confirm_upstream = false;
         self
@@ -535,6 +535,46 @@ where
 
                     match upstream.publish(revision.clone()).perform(env).await {
                         Ok(_) => {}
+                        // The remote refused the condition without saying
+                        // what it holds: S3 answers a failed conditional
+                        // write with 412 and nothing else, so a remote
+                        // reached directly on S3 refuses this way, and so
+                        // does an access service of a release that answers
+                        // a conflict with no body. A current access
+                        // service, and the volatile, filesystem and
+                        // IndexedDB stores, say what they hold, and take
+                        // the arm below. The head is read once. If it is exactly
+                        // the revision this push published, signature and
+                        // all, the push landed: another publish of this
+                        // replica's own head (a second sync racing this
+                        // one) won the condition with the same head.
+                        // Anything else is a head that moved, as below.
+                        //
+                        // Taking an exact match as landed hides no lost
+                        // write. Every publish is conditioned on the head
+                        // it read, and is made only of a head that builds
+                        // on it, so the remote reached this head through
+                        // heads it builds on: whatever stood between this
+                        // push's base and the head is in the head. Two
+                        // cases fall outside that, and neither is hidden
+                        // by this: a writer that resets the remote without
+                        // a fast-forward (whatever it overwrote was lost
+                        // to it, and this push failing would not bring it
+                        // back), and a forged head (only the revision this
+                        // push signed is equal to it).
+                        Err(PublishRemoteBranchError::Publish(PublishError::VersionMismatch {
+                            current: Current::Unknown,
+                            ..
+                        })) => {
+                            let held = upstream.fetch().perform(env).await?;
+                            if held.as_ref() != Some(&revision) {
+                                return Err(PushError::NonFastForward {
+                                    branch: branch.name().to_string(),
+                                    expected: base,
+                                    actual: held.map(|head| head.tree),
+                                });
+                            }
+                        }
                         // The remote moved since it was read, and said
                         // where it is: that head is recorded, verified as
                         // a fetched one is, so the pull that rebases onto
