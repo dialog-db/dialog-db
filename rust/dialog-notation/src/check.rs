@@ -1384,18 +1384,17 @@ mod tests {
         assert_eq!(once[0].len(), "dialog.n.c.".len() + 26, "{once:?}");
         let long = "abcdefghijabcdefghijabcdefghijabcd";
         let cafe = "caf\u{e9}";
-        for text in [format!(
+        let text = format!(
             "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
                  (rule ({long}/abcdefghijabcdefghijabcdefghij ?l ?n) ({long} ?l name: ?n))"
-        )] {
-            let checked = check(&mut Analyzer::new()?, &text);
-            assert!(
-                checked.refusals().next().is_none(),
-                "{text}: {:?}",
-                checked.diagnostics
-            );
-            assert_eq!(derived_in(&checked).len(), 1, "{text}");
-        }
+        );
+        let checked = check(&mut Analyzer::new()?, &text);
+        assert!(
+            checked.refusals().next().is_none(),
+            "{text}: {:?}",
+            checked.diagnostics
+        );
+        assert_eq!(derived_in(&checked).len(), 1, "{text}");
         // A label past the room the relation leaves, and an attribute a
         // line names with a character a relation cannot hold.
         for (text, said) in [
