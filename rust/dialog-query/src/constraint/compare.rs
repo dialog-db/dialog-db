@@ -3,15 +3,16 @@
 //! Four constraints over the COMPARABLE kinds (numbers, strings,
 //! symbols, entities, bytes), sharing one comparison core. Like
 //! every scalar premise they *filter*: a row whose sides cannot be
-//! ordered — a non-comparable value, a mixed-type pair, a NaN — is
-//! a non-match, never an error and never a coercion. The same
-//! strict no-promotion semantics as formula arithmetic
-//! (`notes/formula-schemes.md`), with one release valve: a
-//! *constant* NUMERIC side is a polymorphic literal that adapts
-//! losslessly to the data's type per row (`1` compares against
-//! floats as `1.0`; `1.5` against integer data is a non-match
-//! because no integer is `1.5`). Data is never adapted, and
-//! non-numeric literals never adapt (a string literal orders only
+//! ordered — a non-comparable value, a number against a value of
+//! another type, a NaN — is a non-match, never an error. Two numbers
+//! of data order by value whatever types they were read as: a read of
+//! the band yields each number as its narrowest type, so the types two
+//! compared numbers arrive in depend on the data, not on what was
+//! written, and the band's keys sort numbers by value. A *constant*
+//! NUMERIC side is a polymorphic literal that adapts losslessly to the
+//! data's type per row (`1` compares against floats as `1.0`), and one
+//! no type of the data takes (`1.5` against integer data) orders by
+//! value; non-numeric literals never adapt (a string literal orders only
 //! against string rows).
 //!
 //! Non-numeric comparables order within one type by their
@@ -44,9 +45,10 @@ const COMPARE_COST: usize = 1;
 
 /// Order two values for comparison, adapting numeric literal sides.
 ///
-/// `None` is a non-match: a non-comparable value, a NaN, or a
-/// mixed-type pair neither side of which is a numeric literal that
-/// adapts losslessly to the other's type.
+/// `None` is a non-match: a non-comparable value, a NaN, or a pair of a
+/// number and a value of another type. Two numbers order by value,
+/// whatever types they were read as, a literal adapted to the data's
+/// type where it can be and by value where it cannot.
 fn ordering(
     of: &Value,
     of_is_literal: bool,
@@ -67,7 +69,18 @@ fn ordering(
         if of_is_literal && let Some(adapted) = of.instantiate(with.value_type()) {
             return adapted.compare(with);
         }
-        return None;
+        // Two numbers of different types order by value: a read of the
+        // band yields each number as its narrowest type, so the types two
+        // compared numbers arrive in depend on the data, and a literal no
+        // type of the data takes (a fraction against whole data) still
+        // has a place among them. The band's keys sort numbers by value,
+        // as a pushed range does.
+        let (of, with) = (Value::from(of), Value::from(with));
+        let nan = |value: &Value| matches!(value, Value::Float(float) if float.is_nan());
+        if nan(&of) || nan(&with) {
+            return None;
+        }
+        return of.cmp_number(&with);
     }
     // Non-numeric comparables order within one type by their
     // order-preserving encoding: exactly the byte order the value
@@ -320,39 +333,84 @@ mod tests {
         Ok(())
     }
 
-    /// A literal side adapts losslessly to the data's type; data is
-    /// never adapted, so an unadaptable literal is a non-match even
-    /// when the mathematical ordering is defined.
+    /// A literal side adapts losslessly to the data's type, and one that
+    /// cannot (a fraction against whole data, a negative against
+    /// naturals) orders against the data by value, from either side.
     #[dialog_common::test]
-    async fn it_adapts_literals_losslessly() -> Result<(), EvaluationError> {
+    async fn it_orders_literals_by_value() -> Result<(), EvaluationError> {
         assert_eq!(
             count(below(1u64), Value::Float(0.5)).await?,
             1,
             "integer literal compares against float data as 1.0"
         );
         assert_eq!(
-            count(below(1.5f64), Value::UnsignedInt(1)).await?,
-            0,
-            "no integer is 1.5: the literal cannot adapt, non-match"
-        );
-        assert_eq!(
             count(below(2u64), Value::SignedInt(-3)).await?,
             1,
             "unsigned literal adapts to signed data"
         );
+        assert_eq!(
+            count(below(1.5f64), Value::UnsignedInt(1)).await?,
+            1,
+            "1 < 1.5"
+        );
+        assert_eq!(
+            count(below(1.5f64), Value::UnsignedInt(2)).await?,
+            0,
+            "2 < 1.5"
+        );
+        assert_eq!(
+            count(below(1.5f64), Value::SignedInt(-3)).await?,
+            1,
+            "-3 < 1.5"
+        );
+        assert_eq!(
+            count(below(-1i64), Value::UnsignedInt(0)).await?,
+            0,
+            "0 < -1"
+        );
+        let above = |limit: f64, x: Value| async move {
+            let premise = LessThan::new(Term::constant(limit), Term::var("x"));
+            count(premise, x).await
+        };
+        assert_eq!(above(1.5, Value::UnsignedInt(2)).await?, 1, "1.5 < 2");
+        assert_eq!(above(1.5, Value::SignedInt(-3)).await?, 0, "1.5 < -3");
+        let at_least = AtLeast::new(Term::var("x"), Term::constant(-1i64));
+        let mut row = Match::new();
+        row.bind(&Term::var("x"), Value::UnsignedInt(0))?;
+        let results: Vec<Match> = at_least.evaluate(row.seed()).try_collect().await?;
+        assert_eq!(
+            results.len(),
+            1,
+            "0 >= -1, a negative literal against a natural"
+        );
         Ok(())
     }
 
-    /// Two data sides of different numeric types are a non-match —
-    /// strict no-promotion, like formula arithmetic.
+    /// Two data sides of different numeric types order by value: a read
+    /// of the band yields each number as its narrowest type, so `1 < 2.0`
+    /// holds over a natural and a float. A NaN side, and a number against
+    /// a text, stay non-matches.
     #[dialog_common::test]
-    async fn it_filters_mixed_data() -> Result<(), EvaluationError> {
-        let premise = LessThan::new(Term::var("x"), Term::var("y"));
-        let mut row = Match::new();
-        row.bind(&Term::var("x"), Value::UnsignedInt(1))?;
-        row.bind(&Term::var("y"), Value::Float(2.0))?;
-        let results: Vec<Match> = premise.evaluate(row.seed()).try_collect().await?;
-        assert_eq!(results.len(), 0, "neither side is a literal: no adaptation");
+    async fn it_orders_mixed_numeric_data_by_value() -> Result<(), EvaluationError> {
+        let count = |x: Value, y: Value| async move {
+            let premise = LessThan::new(Term::var("x"), Term::var("y"));
+            let mut row = Match::new();
+            row.bind(&Term::var("x"), x)?;
+            row.bind(&Term::var("y"), y)?;
+            let results: Vec<Match> = premise.evaluate(row.seed()).try_collect().await?;
+            Ok::<usize, EvaluationError>(results.len())
+        };
+        assert_eq!(count(Value::UnsignedInt(1), Value::Float(2.0)).await?, 1);
+        assert_eq!(count(Value::SignedInt(-5), Value::UnsignedInt(3)).await?, 1);
+        assert_eq!(count(Value::Float(2.5), Value::UnsignedInt(2)).await?, 0);
+        assert_eq!(
+            count(Value::UnsignedInt(1), Value::Float(f64::NAN)).await?,
+            0
+        );
+        assert_eq!(
+            count(Value::UnsignedInt(1), Value::String("2".into())).await?,
+            0
+        );
         Ok(())
     }
 
