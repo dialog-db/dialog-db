@@ -473,6 +473,9 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
                 predicate: query.predicate,
             })
         }
+        Proposition::Constraint(Constraint::Equality(equality)) => {
+            Proposition::Constraint(Constraint::Equality(equality.typed(types)))
+        }
         other => other,
     }
 }
