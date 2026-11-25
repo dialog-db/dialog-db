@@ -50,6 +50,21 @@
 //! # }
 //! ```
 //!
+//! ## Applying a document
+//!
+//! [`apply`](apply()), with the `repository` feature, takes what
+//! [`check`](check()) gave and runs it on a branch: every embedder runs
+//! a document with it, so a document means one thing wherever it runs.
+//! A document is one transaction, and its forms are a sequence for what
+//! they read as for what they write: a write's `when` reads what the
+//! forms before it wrote, through the transaction, and a form written
+//! twice runs twice. A command a form issues, and what the rules it
+//! fires write, land at commit, after every form: a later `when` does
+//! not see what a rule makes of it. Queries and selects are answered
+//! after the commit, from what the whole document left. A refusal or an
+//! error on the way writes nothing. The [`apply`](mod@apply) module says each of
+//! these in full.
+//!
 //! ## What a collection holds, and what is counted
 //!
 //! `(distinct ?x)` gathers the values a field takes across the rows into
@@ -63,14 +78,13 @@
 //! a record with the entity in it, and count that:
 //!
 //! ```
-//! # use dialog_notation::live::Live;
-//! # use dialog_notation::{Analyzer, Step, check};
+//! # use dialog_notation::{Analyzer, apply, check};
 //! # use dialog_peer::helpers::{test_repo, test_session_with_peer};
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> anyhow::Result<()> {
 //! # let (operator, profile) = test_session_with_peer().await;
 //! # let repo = test_repo(&operator, &profile).await;
-//! # let mut branch = repo.branch("main").open().perform(&operator).await?;
+//! # let branch = repo.branch("main").open().perform(&operator).await?;
 //! let document = r#"
 //!   (concept (item ?t title: ?x)
 //!     (xyz.item/title of: ?t is: ?x as: :text cardinality: :one))
@@ -92,24 +106,8 @@
 //!   (select (item/count is: ?s))"#;
 //! # let checked = check(&mut Analyzer::new()?, document);
 //! # assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
-//! # let mut transaction = branch.transaction();
-//! # let mut selections = Vec::new();
-//! # for step in checked.steps {
-//! #     match step {
-//! #         Step::Assert(statement) => transaction = transaction.assert(statement),
-//! #         Step::Select(selection) => selections.push(*selection),
-//! #         _ => {}
-//! #     }
-//! # }
-//! # transaction.commit().publish().perform(&operator).await?;
-//! # branch.refresh(&operator).await?;
-//! # let live = Live::new(branch.clone());
-//! # let mut answers = Vec::new();
-//! # for selection in &selections {
-//! #     for answer in live.select(selection, &operator).await? {
-//! #         answers.push(answer.to_string());
-//! #     }
-//! # }
+//! let applied = apply(&branch, &checked, &operator).await?;
+//! let answers: Vec<String> = applied.answers.iter().map(ToString::to_string).collect();
 //! assert_eq!(
 //!     answers,
 //!     [

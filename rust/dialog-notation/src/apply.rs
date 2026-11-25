@@ -1,20 +1,33 @@
 //! Applying a document to a branch: the one way its forms are run.
 //!
 //! [`apply`] takes what [`check`](crate::check) made of a document and
-//! runs it on a branch as one transaction:
+//! runs it on a branch as one transaction, its forms a sequence:
 //!
-//! - Each write is staged in the order written. A write with a `when`
-//!   reads the branch as it stood before the document: it does not see
-//!   what the forms before it wrote.
+//! - Each write is staged in the order written, and each write with a
+//!   `when` reads the branch as the forms before it left it, through
+//!   the transaction it is part of: what they asserted and retracted,
+//!   and what the rules they installed derive. A write under
+//!   `cardinality: :one` reads as the commit will leave its cell.
+//! - Every match of a `when` is read before any of them is written, so
+//!   a write does not see itself.
 //! - A command a form issues, and what the inductive rules it fires
-//!   write, land at commit, after every form has run.
+//!   write, land at commit, after every form has run: a later `when` in
+//!   the same document reads the command itself, through the relations
+//!   of the layer commands are on, but not what rules make of it. What
+//!   a rule writes lands in the commit the forms' writes do, so under
+//!   `cardinality: :one` a claim a rule writes stands beside one a form
+//!   of the same document wrote, as two writes of one commit do, where
+//!   in a later document it would succeed it.
 //! - The document commits once. A refusal or an error on the way writes
 //!   nothing. When another writer moves the branch first, the document
 //!   is run again over the head that won, its `when`s read again.
 //! - Queries, selects and views are answered after the commit, so each
 //!   reads what the whole document left, in the order written.
 //!
-//! An embedder that drives [`Step`]s itself takes these on itself.
+//! An embedder that drives [`Step`]s itself takes these on itself: each
+//! [`Write`](crate::Write) has to be read through the transaction the
+//! steps before it are staged in, and the answers read after the
+//! commit.
 
 use dialog_capability::Provider;
 use dialog_effects::archive::Import;
@@ -101,9 +114,9 @@ pub enum ApplyError {
 }
 
 /// Apply `checked`, what [`check`](crate::check) made of a document, to
-/// `branch`: its writes as one transaction, staged in the order written,
-/// and then its queries, selects and views, answered from what the
-/// commit left. See the [module docs](self).
+/// `branch`: its writes as one transaction, each form reading what the
+/// forms before it wrote, and then its queries, selects and views,
+/// answered from what the commit left. See the [module docs](self).
 ///
 /// A document [`check`](crate::check) refused is
 /// [`ApplyError::Refused`], with the first refusal, and nothing of it
@@ -118,7 +131,7 @@ pub async fn apply<E: Writer>(
     }
     let steps = &checked.steps;
     branch
-        .transact(|transaction| staged(transaction, branch, steps, env))
+        .transact(|transaction| staged(transaction, steps, env))
         .perform(env)
         .await?;
     branch.refresh(env).await.map_err(CommitError::from)?;
@@ -172,17 +185,17 @@ pub async fn apply<E: Writer>(
 }
 
 /// `transaction` with every write of `steps` staged, in order, each
-/// write with a `when` reading `branch` as it stood before the document.
+/// write with a `when` reading through `transaction` as the steps
+/// before it left it.
 async fn staged<'a, E: Writer>(
     mut transaction: Transaction<&'a Branch>,
-    branch: &Branch,
     steps: &[Step],
     env: &E,
 ) -> Result<Transaction<&'a Branch>, ApplyError> {
     for step in steps {
         transaction = match step {
             Step::Write(write) => {
-                let rows = matches(branch, write, env).await?;
+                let rows = matches(&transaction, write, env).await?;
                 for row in &rows {
                     let statement = write.statement(row)?;
                     transaction = if write.retract {
@@ -206,19 +219,19 @@ async fn staged<'a, E: Writer>(
     Ok(transaction)
 }
 
-/// Every match of `write`'s `when`, read from `branch` as it stood
-/// before the document, with the rule its `when` reads through, when it
-/// has more than one premise, laid over that read alone.
+/// Every match of `write`'s `when`, read through `transaction`, with
+/// the rule its `when` reads through, when it has more than one premise,
+/// laid over that read alone: never staged, never written.
 async fn matches<E: Writer>(
-    branch: &Branch,
+    transaction: &Transaction<&Branch>,
     write: &Write,
     env: &E,
 ) -> Result<Vec<ConceptConclusion>, ApplyError> {
-    let mut layer = branch.query();
+    let mut query = transaction.query();
     if let Some(rule) = &write.query.rule {
-        layer = layer.with(rule.clone());
+        query = query.with_rule(rule.clone());
     }
-    Ok(layer
+    Ok(query
         .select(write.query.select.clone())
         .perform(env)
         .try_vec()

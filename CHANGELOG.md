@@ -14,6 +14,46 @@ says how to cut a release.
 
 ## Unreleased
 
+### A document is applied by the notation's own driver, its forms a sequence
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). `dialog_notation::apply`
+takes what `check` gave and runs it on a branch as one transaction, its
+forms a sequence for what they read as for what they write: each write
+with a `when` reads what the forms before it wrote, through the
+transaction, and the document commits once. Commands land at commit,
+and queries and selects are answered after it.
+
+What this changes for you:
+
+- New: `apply(&branch, &checked, &env) -> Result<Applied, ApplyError>`,
+  with the `repository` feature, and the `Writer` bound it takes.
+  `Applied` holds the revision, the answers in document order, the
+  rendered views and the warnings. `ApplyError` is `Refused` (the first
+  refusal; nothing applied), `Notation` and `Evaluation` (a write's
+  `when` failed as it ran; nothing applied), `Commit`, and `Unanswered`
+  (the document committed and a query, select or view of it failed).
+- A write's `when` reads the forms before it in its document: an assert
+  and then a retract by the entity alone retracts what the assert wrote,
+  and a `when` matches a claim an earlier form asserted. It read the
+  branch as it stood before the document. A `when` of several premises
+  reads through a rule laid over that read alone
+  (`TransactionQuery::with_rule`).
+- A command a form issues, and what the rules it fires write, land at
+  commit: a later `when` reads the command through its relations, but
+  not what a rule makes of it. Under `cardinality: :one` a claim a rule
+  writes stands beside one a form of the same document wrote, as two
+  writes of one commit do.
+- The document is built again over the head that won when another
+  writer moves the branch first (`Branch::transact`), its `when`s read
+  again.
+- An embedder that drives `Step`s itself keeps none of this unless it
+  does what `apply` does. Call `apply` instead.
+
+Why: what a document means is the notation's, not each embedder's. A
+driver in the test support read each `when` from the branch before the
+document, so a document's forms were a sequence for writes and not for
+reads, and an embedder had to rediscover the rule to get it right.
+
 ### A concept read that leaves fields out says `...`
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773).

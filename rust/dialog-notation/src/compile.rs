@@ -41,6 +41,15 @@ use crate::pattern::REST;
 use crate::syntax::{self, Parameters, Syntax};
 
 /// One thing to do with a branch.
+///
+/// An embedder applies a document's steps with
+/// `apply`, the crate's one driver, which runs them as
+/// one transaction whose forms are a sequence. One that drives the steps
+/// itself keeps that only by doing what `apply` does: staging them in
+/// order, reading each [`Write`] through the transaction the steps
+/// before it are staged in, and answering queries and selects after the
+/// commit. Read from the branch instead, a write's `when` does not see
+/// what its document wrote before it.
 #[derive(Debug, Clone)]
 pub enum Step {
     /// Facts to assert.
@@ -70,7 +79,10 @@ pub enum Step {
 }
 
 /// A write at the top level with a `when`: what its `when` matches, and
-/// the write each match makes.
+/// the write each match makes. `apply` reads the
+/// matches through the transaction the document's earlier steps are
+/// staged in, with [`Query::rule`] laid over that read alone, and stages
+/// each match's [`statement`](Self::statement) in it.
 #[derive(Debug, Clone)]
 pub struct Write {
     /// What the `when` matches, as a query whose row is every variable
