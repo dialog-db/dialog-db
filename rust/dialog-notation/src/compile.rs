@@ -156,6 +156,34 @@ fn variables(term: &Term, into: &mut Vec<String>) {
     }
 }
 
+/// `term` with each formula that computes a value lifted out of it into
+/// a premise of `when`, `(+ ?v : 1 is: [once-0])`, and the variable it
+/// binds left in its place. A type, `(:integer …)`, and `(:id …)` stay:
+/// a write fills them from what its variables were bound to.
+fn computed(term: &Term, when: &mut Vec<Premise>, lifted: &mut usize) -> Term {
+    let Term::Formula(formula) = term else {
+        return term.clone();
+    };
+    let mut formula = formula.as_ref().clone();
+    formula.subject = formula
+        .subject
+        .as_ref()
+        .map(|subject| computed(subject, when, lifted));
+    for (_, part) in &mut formula.labelled {
+        *part = computed(part, when, lifted);
+    }
+    if !matches!(formula.name.as_str(), "+" | "-" | "*" | "/") {
+        return Term::Formula(Box::new(formula));
+    }
+    let name = format!("[once-{lifted}]");
+    *lifted += 1;
+    formula
+        .labelled
+        .push(("is".into(), Term::Variable(name.clone())));
+    when.push(Premise::Formula(formula));
+    Term::Variable(name)
+}
+
 /// A write at the top level with a `when`. It runs once: what the `when`
 /// matches is a query, and each match makes the write.
 fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
@@ -174,6 +202,18 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
             )));
         }
     };
+    // A formula the head computes is computed by the `when`, as a rule
+    // computes one among its premises: it is lifted out of the head into
+    // a premise whose `is:` is a variable of its own, which the head
+    // writes. The query binds it, so each match writes its value.
+    let mut rule = rule.clone();
+    let mut read = read.clone();
+    let mut lifted = 0;
+    for field in &mut read.fields {
+        field.term = computed(&field.term, &mut rule.when, &mut lifted);
+    }
+    let rule = &rule;
+    let read = &read;
     let bound = rule.bound();
     let mut held = Vec::new();
     variables(&read.entity, &mut held);

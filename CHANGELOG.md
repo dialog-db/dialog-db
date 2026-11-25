@@ -128,6 +128,10 @@ What this changes for you:
   compile refusal once per form. An element a view does not make,
   `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
   it would let a row's values reach script.
+- A formula in the head of a write with a `when`,
+  `(assert (n ?t v: (+ ?v : 1)) (when (n ?t v: ?v)))`, is computed from
+  each match, as the same head in a rule is, where it was refused saying
+  the write had no premise.
 - A case a listed type does not list, written as a constant, is
   refused naming the listing: `(assert (k x:1 lvl: :huge))` under
   `as: [:low :mid :high]`, the same in a write with a `when`, in a rule's

@@ -4370,7 +4370,7 @@ async fn it_refuses_a_case_the_listing_does_not_list() -> Result<()> {
 
 /// A formula in the head of a write with a `when` is computed from what
 /// the `when` matched, as the same head in a rule is: each match writes
-/// its value, also inside a type and in two fields at once.
+/// its value, also a formula inside another and in two fields at once.
 #[dialog_common::test]
 async fn it_computes_a_formula_in_the_head_of_a_write_with_a_when() -> Result<()> {
     let concept = r#"(concept (n ?t v: ?v w: ?w)
@@ -4383,8 +4383,8 @@ async fn it_computes_a_formula_in_the_head_of_a_write_with_a_when() -> Result<()
             ["(xyz.n x:1 v: 2 w: 10)", "(xyz.n x:2 v: 6 w: 20)"],
         ),
         (
-            "(assert (n ?t v: (:integer (* ?v : 3)) w: (- ?w : ?v)) (when (n ?t v: ?v w: ?w)))",
-            ["(xyz.n x:1 v: 3 w: 9)", "(xyz.n x:2 v: 15 w: 15)"],
+            "(assert (n ?t v: (* (+ ?v : 1) : 3) w: (- ?w : ?v)) (when (n ?t v: ?v w: ?w)))",
+            ["(xyz.n x:1 v: 6 w: 9)", "(xyz.n x:2 v: 18 w: 15)"],
         ),
     ] {
         let mut notebook = Notebook::open().await?;
