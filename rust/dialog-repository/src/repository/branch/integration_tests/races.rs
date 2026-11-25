@@ -296,11 +296,8 @@ async fn race_an_adoption<S: PeerSpace>(
 /// write of the replica's own note among them: a note here keeps every
 /// value asserted, not only the last.
 ///
-/// Its run on the filesystem fails on main: two stack writes racing
-/// there end in a lock error on the head's cell instead of a lost
-/// compare-and-swap. That is reproduced on its own, by
-/// `it_lands_durable_writes_racing_on_one_replica` on the branch that
-/// fixes it, and this race does not run on durable storage until then.
+/// The race of a write and a sync on durable storage is
+/// [`it_lands_a_durable_write_racing_a_sync`](super::it_lands_a_durable_write_racing_a_sync).
 #[dialog_common::test]
 async fn it_writes_a_durable_layer_while_it_syncs(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
@@ -544,6 +541,85 @@ async fn it_holds_the_route_to_a_record_it_read_from_a_buffer_and_not_its_leaf(
         on_parent.last(),
         on_written.last(),
         "the write left that leaf as it was: one leaf, unheld, in both trees"
+    );
+    Ok(())
+}
+
+/// Writers past the stack's rerun cap, racing through one replica on
+/// durable storage, either land or fail with `VersionMismatch`, and
+/// nothing between: what an embedder sees when it runs more writes at
+/// once than [`MAX_RERUNS`](crate::MAX_RERUNS) lets the stack run again.
+///
+/// A write through the stack that loses the head's compare-and-swap is
+/// run again on the new head, at most [`MAX_RERUNS`](crate::MAX_RERUNS)
+/// times, so it has `MAX_RERUNS + 1` attempts. Every publish round has a
+/// winner, so at least `MAX_RERUNS + 1` of the writers land. A write that
+/// loses every attempt fails with
+/// `CommitError::Publish(PublishError::VersionMismatch { .. })`, and
+/// nothing it wrote is in the layer: the embedder runs it again, or keeps
+/// fewer writes in flight. How many fail depends on how the writes
+/// interleave, so the test does not count them.
+///
+/// On durable storage because only there do the writes overlap: in
+/// memory a write never waits, so they run one after another and none
+/// loses.
+#[dialog_common::test]
+async fn it_lands_or_refuses_writers_past_the_stacks_rerun_cap(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    on_durable_storage!(&seed, &s3, race_past_the_rerun_cap)
+}
+
+/// [`it_lands_or_refuses_writers_past_the_stacks_rerun_cap`] over
+/// `layered`: a round of more writers than the stack can run again.
+async fn race_past_the_rerun_cap<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
+    use futures_util::future::join_all;
+
+    let attempts = usize::try_from(crate::MAX_RERUNS)? + 1;
+    let writers = attempts + 3;
+    let docs = (0..writers)
+        .map(|writer| format!("doc:capped-{writer}"))
+        .collect::<Vec<_>>();
+    let entities = docs
+        .iter()
+        .map(|doc| doc.parse::<Entity>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let written = join_all(entities.iter().map(|doc| {
+        layered
+            .follower
+            .assert(noted(doc, "capped", &layered.notes))
+            .perform(&layered.env)
+    }))
+    .await;
+
+    let mut landed = Vec::new();
+    let mut failed = 0;
+    for (doc, result) in docs.into_iter().zip(written) {
+        match result {
+            Ok(_) => landed.push((doc, "capped".to_string())),
+            Err(crate::CommitError::Publish(crate::PublishError::VersionMismatch { .. })) => {
+                failed += 1;
+            }
+            Err(other) => {
+                anyhow::bail!("{doc} failed other than by losing every attempt: {other:?}")
+            }
+        }
+    }
+    assert!(
+        landed.len() >= attempts,
+        "at least MAX_RERUNS + 1 = {attempts} of {writers} writers land, {} did",
+        landed.len()
+    );
+    assert_eq!(
+        landed.len() + failed,
+        writers,
+        "every writer lands or fails"
+    );
+    landed.sort();
+    assert_eq!(
+        notes_in(layered).await?,
+        landed,
+        "the layer holds the note of each writer that landed, and of none that failed"
     );
     Ok(())
 }
