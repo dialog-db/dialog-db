@@ -435,13 +435,11 @@ fn plain() -> Vec<(Option<&'static str>, Option<&'static str>)> {
 /// under each of [`TYPES`] and each of `reads` (a cardinality and a
 /// `pick`): with the entity unbound, bound to each of `entities`, and
 /// with the value bound to each of [`constants`]. A read answers what
-/// the identical read of `twin/stored` answers, except that a read
-/// whose value is bound to a constant its type does not read answers
-/// nothing: no fact of the field holds a value of another type (the
-/// stored read answers there, which
-/// [`known_divergence_a_stored_read_answers_a_constant_its_type_does_not_read`]
-/// pins). A number constant finds a number of another number type,
-/// stored or deduced alike.
+/// the identical read of `twin/stored` answers, and a read whose value
+/// is bound to a constant its type does not read answers nothing on
+/// either side: no fact of the field holds a value of another type. A
+/// number constant finds a number of another number type, stored or
+/// deduced alike.
 async fn differences(
     source: &TestEnv<'_>,
     entities: &[Entity],
@@ -486,11 +484,13 @@ async fn differences(
                     (Term::Constant(constant), Some(kind)) => !kind.reads(constant),
                     _ => false,
                 };
-                let expected = if unread {
-                    Vec::new()
-                } else {
-                    answers(source, read("twin/stored")?, this.clone(), value.clone()).await?
-                };
+                let expected =
+                    answers(source, read("twin/stored")?, this.clone(), value.clone()).await?;
+                if unread && !expected.is_empty() {
+                    wrong.push(format!(
+                        "{case}, {declared} under {cardinality:?} {pick:?}, {how}: the stored read answers {expected:?}"
+                    ));
+                }
                 let deduced =
                     answers(source, read("twin/deduced")?, this.clone(), value.clone()).await?;
                 if expected != deduced {
@@ -776,20 +776,17 @@ async fn a_read_bound_to_a_number_of_another_type_finds_it_stored_or_deduced() -
     Ok(())
 }
 
-/// A known divergence, pinned as it is today, and a wrong answer on the
-/// stored side: a read whose value is bound to a constant its type does
-/// not read (a `text:` field bound to the integer `-3`) answers the
-/// stored fact holding that constant, though no fact of the field holds
-/// a value of another type. The same read of a deduced relation holding
-/// it answers nothing. A fix makes the stored read answer nothing, and
-/// flips this pin.
+/// A read whose value is bound to a constant its type does not read (a
+/// `text:` field bound to the integer `-3`) answers nothing, of a
+/// stored relation holding that constant and of a deduced one alike: no
+/// fact of the field holds a value of another type.
 #[dialog_common::test]
-async fn known_divergence_a_stored_read_answers_a_constant_its_type_does_not_read()
+async fn a_read_bound_to_a_constant_its_type_does_not_read_answers_nothing_stored_or_deduced()
 -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let (_, negative) = numbers(&branch, &operator).await?;
+    numbers(&branch, &operator).await?;
     let mut registry = RuleRegistry::new();
     copy(
         &mut registry,
@@ -801,8 +798,8 @@ async fn known_divergence_a_stored_read_answers_a_constant_its_type_does_not_rea
     let constant = Value::SignedInt(-3);
     assert_eq!(
         bound(&source, "twin/stored", "text:", None, &constant).await?,
-        vec![row(&negative, &constant)],
-        "the stored text: read answers the integer it was bound to"
+        Vec::<String>::new(),
+        "the stored text: read answers nothing"
     );
     assert_eq!(
         bound(&source, "twin/deduced", "text:", None, &constant).await?,
