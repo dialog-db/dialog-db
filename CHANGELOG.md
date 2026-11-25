@@ -47,6 +47,28 @@ What this changes for you:
 Why: an attribute's type is part of which relation a claim belongs to,
 so a write must not remove a claim of a relation it does not write.
 
+### Two opens of one credential racing both open it
+
+[#878](https://github.com/dialog-db/dialog-db/pull/878)
+
+`OpenCredential::open` loads the credential named, and creates one when
+none is there. When another opener created it between this one's load
+and its create, the create was refused as already there and the open
+failed with `IdentityError::Storage("Space already exists: …")`. It now
+loads the credential the other opener created, once, so two opens of one
+name racing end with one key.
+
+What this changes for you:
+
+- Opening one credential from two tasks or processes at once no longer
+  fails for whichever lost: both get the same key.
+- The tests that open peers in parallel through the test helpers no
+  longer fail now and then with "Space already exists: Temp/custodian-…"
+  (dialog-perf's unit tests among them).
+
+Why: open is the "load it or make it" call. Losing a race to make it is
+not a failure to open it, since what it was asked to open is there.
+
 ### A typed read elects and picks among the values its type reads
 
 [#875](https://github.com/dialog-db/dialog-db/pull/875)
