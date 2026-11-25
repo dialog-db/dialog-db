@@ -1915,6 +1915,33 @@ async fn it_refuses_concepts_that_read_each_other_round_in_any_order() -> Result
     Ok(())
 }
 
+/// What a refused form read as a derived attribute was never installed:
+/// checked form by form, a form that reads `todo/tag` so and is refused
+/// leaves nothing behind, and a later document declares `todo/tag` a
+/// concept.
+#[dialog_common::test]
+async fn it_keeps_no_derived_use_of_a_form_that_was_refused() -> Result<()> {
+    let mut analyzer = dialog_notation::Analyzer::new()?;
+    let checked = dialog_notation::check_forms(
+        &mut analyzer,
+        "(concept (todo ?t title: ?x)
+           (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one))
+         (rule (xyz.seen ?t v: ?g) (todo/tag ?t ?g) (frobnicate ?t))",
+    );
+    assert_eq!(checked.refusals().count(), 1, "{:?}", checked.diagnostics);
+    let declared = dialog_notation::check(
+        &mut analyzer,
+        "(concept (todo/tag ?t is: ?g)
+           (xyz.todo/tag of: ?t is: ?g as: :text cardinality: :many))",
+    );
+    assert!(
+        declared.refusals().next().is_none(),
+        "{:?}",
+        declared.diagnostics
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
