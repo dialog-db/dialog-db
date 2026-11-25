@@ -766,6 +766,31 @@ mod safety {
         );
     }
 
+    /// An element a view does not make is refused saying so; only one
+    /// that runs or loads what it holds, or changes what every URL is read
+    /// against, is refused as a way for a row's values to reach script.
+    /// SVG and MathML are not made (gaps row 40).
+    #[test]
+    fn it_says_why_an_element_is_not_made() {
+        for tag in ["svg", "math", "marquee", "blink"] {
+            let refused = read(&format!("[:{tag}]"));
+            assert!(
+                matches!(&refused, Err(Error::Refused(said))
+                    if said.contains("is no element a view makes") && !said.contains("script")),
+                "{tag}: {refused:?}"
+            );
+        }
+        for tag in [
+            "script", "iframe", "frame", "frameset", "object", "embed", "applet", "base",
+        ] {
+            let refused = read(&format!("[:{tag}]"));
+            assert!(
+                matches!(&refused, Err(Error::Unsafe(_))),
+                "{tag}: {refused:?}"
+            );
+        }
+    }
+
     /// An event's kind is free-form, as a custom DOM event's is, but
     /// says something: an empty one, `:on/`, and one under the notation's
     /// namespace are refused.
