@@ -1433,4 +1433,77 @@ mod tests {
         );
         Ok(())
     }
+
+    /// What compile refuses is said the same by `check` and by
+    /// `check_forms`: of the form as the author wrote it, never of the
+    /// rule it expanded to.
+    #[test]
+    fn it_quotes_the_authors_form_form_by_form_as_whole() -> Result<(), Error> {
+        let list = "(concept (list ?l name: ?n) \
+                    (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))";
+        for text in [
+            format!("{list} (select (list ?l name: ?n) (unless (list/label ?l ?q)))"),
+            format!(
+                "{list} (rule (list/label ?l ?n) (list ?l name: ?n)) \
+                 (select (list ?l name: ?n) (unless (list/label ?l ?q)))"
+            ),
+        ] {
+            let said = |checked: Checked| {
+                checked
+                    .diagnostics
+                    .iter()
+                    .map(|said| (said.form.clone(), said.path.clone(), said.message.clone()))
+                    .collect::<Vec<_>>()
+            };
+            let whole = said(check(&mut Analyzer::new()?, &text));
+            let each = said(check_forms(&mut Analyzer::new()?, &text));
+            assert_eq!(whole, each, "{text}");
+            assert!(
+                each.iter()
+                    .all(|(_, _, message)| !message.contains("(rule (report")),
+                "{each:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A name is a concept or a derived attribute of one, never both:
+    /// a document that declares `list/open` a concept and concludes or
+    /// reads it as a derived attribute of `list` is refused at the
+    /// derived use, naming the declaration, in either order, whole or
+    /// form by form, never as "nothing says what" it is.
+    #[test]
+    fn it_refuses_a_name_that_is_a_concept_and_a_derived_attribute() -> Result<(), Error> {
+        let list = "(concept (list ?l name: ?n) \
+                    (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))";
+        let concept = "(concept (list/open ?l name: ?n) \
+                       (xyz.list/name of: ?l is: ?n cardinality: :one))";
+        let rule = "(rule (list/open ?l ?n) (list ?l name: ?n))";
+        for text in [
+            format!("{list} {rule} {concept}"),
+            format!("{list} {concept} {rule}"),
+            format!("{list} {concept} (select (list/open ?l ?n))"),
+        ] {
+            for checked in [
+                check(&mut Analyzer::new()?, &text),
+                check_forms(&mut Analyzer::new()?, &text),
+            ] {
+                let refused: Vec<_> = checked
+                    .refusals()
+                    .map(|said| said.message.clone())
+                    .collect();
+                assert!(
+                    !refused.is_empty()
+                        && refused.iter().all(|message| {
+                            message.contains("(list/open ?l ?n)")
+                                && message.contains("derived attribute of the concept `list`")
+                                && message.contains("(concept (list/open ?l name: ?n)")
+                                && !message.contains("nothing says what")
+                        }),
+                    "{text}: {refused:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 }
