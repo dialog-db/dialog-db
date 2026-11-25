@@ -4035,4 +4035,154 @@ mod tests {
         assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e["));
         assert!(kernel[0].contains(" name: ?n["));
     }
+
+    /// A concept, a command or a query is declared under a name, and a
+    /// name with `:` in it is an entity, which names no concept: each is
+    /// refused naming what was written, never installed as a rule about
+    /// syntax no read can reach.
+    #[test]
+    fn it_refuses_declaring_an_entity_as_a_name() {
+        for (text, what, name) in [
+            (
+                "(concept (a:b ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
+                "concept",
+                "a:b",
+            ),
+            (
+                "(concept (a:b/c ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
+                "concept",
+                "a:b/c",
+            ),
+            (
+                "(concept (a:b name: ?n) \
+                   (xyz.t/name of: ?c is: ?n in: :control cardinality: :many))",
+                "command",
+                "a:b",
+            ),
+            (
+                "(query (a:b ?x is: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
+                "query",
+                "a:b",
+            ),
+        ] {
+            let refused = expanded("", text).unwrap_err().to_string();
+            assert!(
+                refused.contains(&format!("declares a {what} named `{name}`"))
+                    && refused.contains("is an entity"),
+                "{text}: {refused}"
+            );
+        }
+    }
+
+    /// A concept, a command or a query declared under one of the
+    /// notation's own words would shadow it: each is refused naming the
+    /// word, and nothing is installed under it.
+    #[test]
+    fn it_refuses_declaring_a_word_of_the_notation() {
+        for word in [
+            "concept",
+            "select",
+            "query",
+            "rule",
+            "assert",
+            "retract",
+            "report",
+            "unless",
+            "once",
+            "is",
+            "this",
+            "all",
+            "when",
+            "view",
+            "rows",
+            "expand",
+            "syntax",
+            "warning",
+            "dialog/position",
+            "count",
+            "count-distinct",
+            "sum",
+            "min",
+            "max",
+            "avg",
+        ] {
+            for (text, what) in [
+                (
+                    format!(
+                        "(concept ({word} ?x name: ?n) \
+                           (xyz.t/name of: ?x is: ?n cardinality: :one))"
+                    ),
+                    "concept",
+                ),
+                (
+                    format!(
+                        "(concept ({word} name: ?n) \
+                           (xyz.t/name of: ?c is: ?n in: :control cardinality: :many))"
+                    ),
+                    "command",
+                ),
+                (
+                    format!(
+                        "(query ({word} ?x is: ?n) \
+                           (xyz.t/name of: ?x is: ?n cardinality: :one))"
+                    ),
+                    "query",
+                ),
+            ] {
+                let refused = expanded("", &text).unwrap_err().to_string();
+                assert!(
+                    refused.contains(&format!("declares a {what} named `{word}`"))
+                        && refused.contains("one of the notation's own words"),
+                    "{text}: {refused}"
+                );
+            }
+        }
+        // A read of the word after its refusal is the notation's again.
+        let mut expander = Expander::new().unwrap();
+        assert!(
+            expander
+                .submit(
+                    "(concept (select ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))"
+                )
+                .is_err()
+        );
+        let (kernel, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
+        assert_eq!(kernel.len(), 1);
+        assert!(kernel[0].to_string().starts_with("(rule (report (xyz.t ?x"));
+    }
+
+    /// What a name may hold beyond what [`syntax::named`] tells apart is
+    /// undecided (gaps row 47): a zero-width space, an accent written as
+    /// one character or as a letter and a combining mark, a `#` or a `?`
+    /// inside it. Today each is a name of its own, declared and read
+    /// back under exactly what was written, and `tx` written with a
+    /// zero-width space in it is not `tx`.
+    #[test]
+    fn it_declares_a_name_with_what_is_undecided_as_written() {
+        for name in ["t\u{200b}x", "caf\u{e9}", "cafe\u{301}", "a#b", "a?b"] {
+            let text = format!(
+                "(concept ({name} ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one)) \
+                 (select ({name} ?x name: ?n))"
+            );
+            assert_eq!(
+                expanded("", &text).unwrap(),
+                vec!["(rule (report (xyz.t ?x name: (:one ?n))) (xyz.t ?x name: (:one ?n)))"],
+                "{name:?}"
+            );
+        }
+        assert!(matches!(
+            expanded(
+                "(concept (t\u{200b}x ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
+                "(select (tx ?x name: ?n))"
+            ),
+            Err(Error::Unknown(_))
+        ));
+        assert!(matches!(
+            expanded(
+                "(concept (caf\u{e9} ?x name: ?n) (xyz.t/name of: ?x is: ?n cardinality: :one))",
+                "(select (cafe\u{301} ?x name: ?n))"
+            ),
+            Err(Error::Unknown(_))
+        ));
+    }
 }
