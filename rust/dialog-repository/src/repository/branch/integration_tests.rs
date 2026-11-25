@@ -8430,11 +8430,12 @@ async fn notes_in<S: PeerSpace>(layered: &Layered<S>) -> Result<Vec<(String, Str
 /// same base, so the second's publish to the remote loses the
 /// compare-and-swap the first won, to the very head it meant to publish.
 ///
-/// A reproduction: it fails on main, on every provider, with "Failed to
-/// publish revision to upstream: Version mismatch: expected …, found an
-/// unknown state". The remote says only that the condition failed, not
-/// what it holds, and the push takes a lost compare-and-swap it cannot
-/// see past as the push's answer.
+/// The remote says only that the condition failed, not what it holds,
+/// so the second push reads the remote's head once, finds it is the head
+/// it meant to publish, and has landed. Before, it failed on every
+/// provider with "Failed to publish revision to upstream: Version
+/// mismatch: expected …, found an unknown state", taking the lost
+/// compare-and-swap it could not see past for its answer.
 #[dialog_common::test]
 async fn it_lands_two_syncs_racing_on_one_replica(s3: S3Address) -> Result<()> {
     let seed = Seed::new(415);
@@ -8494,6 +8495,153 @@ async fn race_two_syncs<S: PeerSpace>(layered: &Layered<S>) -> Result<()> {
         upstream.revision().map(|head| head.tree),
         primary.revision().map(|head| head.tree),
         "the syncs published the replica's head, and recorded it"
+    );
+    let target = primary
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the primary pulls from a remote")?;
+    let tracked = primary.tracked();
+    assert_eq!(
+        tracked
+            .synced
+            .iter()
+            .filter(|synced| synced.target == target)
+            .count(),
+        1,
+        "one sync point is recorded for the remote"
+    );
+    assert_eq!(
+        tracked.tree(&target),
+        primary.revision().map(|head| head.tree),
+        "the sync point is the head the syncs published"
+    );
+    Ok(())
+}
+
+/// A push that loses the remote's compare-and-swap to a head another
+/// device published, on a remote that does not say what it holds, is
+/// refused as `PushError::NonFastForward` naming that head, and its sync
+/// point does not move.
+///
+/// Pushed assuming the upstream, the push writes its head without
+/// reading the remote first, conditioned on the head it last recorded.
+/// The author's push moved the remote since, so the write fails, and S3
+/// answers that with 412 and nothing else. The push reads the remote's
+/// head once to learn what it holds. Only a remote that does not say
+/// what it holds takes this path: one reached on S3, as here, or an
+/// access service of a release that answers a conflict with no body.
+#[dialog_common::test]
+async fn it_refuses_a_push_that_lost_to_another_head_at_a_remote_that_does_not_say_which(
+    s3: S3Address,
+) -> Result<()> {
+    let devices = followed(&s3, "lost-unknown").await?;
+    devices.name("user:0-0", "mine").await?;
+    devices
+        .alice
+        .commit(stream::iter(vec![named("user:0-1", "theirs")]))
+        .perform(&devices.operator)
+        .await?;
+    devices.alice.push().perform(&devices.operator).await?;
+    let theirs = devices
+        .alice
+        .revision()
+        .context("the author published a head")?;
+
+    let target = devices
+        .bob
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the follower pulls from a remote")?;
+    let before = devices.bob.tracked().tree(&target);
+    let refused = devices
+        .bob
+        .push()
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(crate::PushError::NonFastForward { actual: Some(tree), .. }) if *tree == theirs.tree
+        ),
+        "the push is refused, naming the head the author published: {refused:?}"
+    );
+    assert_eq!(
+        devices.bob.tracked().tree(&target),
+        before,
+        "a refused push does not move the sync point"
+    );
+    Ok(())
+}
+
+/// A push that loses the remote's compare-and-swap at a remote that does
+/// not say what it holds, and then cannot read what it holds, fails with
+/// that read's error: it is not taken for landed, and its sync point does
+/// not move.
+///
+/// The remote's head cell is made to hold bytes that are no revision,
+/// written there as any writer of the cell could, so the push's one read
+/// of it fails to decode.
+#[dialog_common::test]
+async fn it_reports_a_failed_read_after_losing_at_a_remote_that_does_not_say_what_it_holds(
+    s3: S3Address,
+) -> Result<()> {
+    use dialog_effects::memory::prelude::{
+        CellExt as _, MemoryExt as _, PublishCellExt as _, SpaceExt as _,
+    };
+
+    let devices = followed(&s3, "lost-unreadable").await?;
+    devices.name("user:0-0", "mine").await?;
+
+    let Some(crate::Upstream::Remote { remote, branch, .. }) =
+        devices.alice.pulls().iter().next().cloned()
+    else {
+        anyhow::bail!("the author pulls from no remote");
+    };
+    let recorded = remote
+        .branch(branch.clone())
+        .open()
+        .perform(&devices.operator)
+        .await?
+        .cache()
+        .content()
+        .context("the author recorded the remote's head")?;
+    remote
+        .did()
+        .writer()
+        .memory()
+        .space(format!("branch/{branch}"))
+        .cell("revision")
+        .publish(b"not a revision".to_vec(), Some(recorded.version))
+        .perform(&remote.connection(&devices.operator))
+        .await?;
+
+    let target = devices
+        .bob
+        .pulls()
+        .iter()
+        .next()
+        .map(|upstream| upstream.target())
+        .context("the follower pulls from a remote")?;
+    let before = devices.bob.tracked().tree(&target);
+    let failed = devices
+        .bob
+        .push()
+        .assuming_upstream()
+        .perform(&devices.env)
+        .await;
+    assert!(
+        matches!(&failed, Err(crate::PushError::FetchRemoteBranch(_))),
+        "the push fails with the read's error, not as landed: {failed:?}"
+    );
+    assert_eq!(
+        devices.bob.tracked().tree(&target),
+        before,
+        "a failed push does not move the sync point"
     );
     Ok(())
 }

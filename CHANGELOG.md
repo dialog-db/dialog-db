@@ -14,6 +14,44 @@ says how to cut a release.
 
 ## Unreleased
 
+### A push that loses to its own head at a remote that does not say what it holds has landed
+
+A push writes the remote's head conditioned on the head it last read. A
+remote reached on S3 answers a failed condition with 412 and nothing
+else, so the push learned only that it lost, not to what, and failed
+with the bare `VersionMismatch`. Two syncs of one replica racing both
+push the same head: the second lost to the first, to the very head it
+meant to publish, and failed. A push that loses at such a remote now
+reads the remote's head once. If it is exactly the revision the push
+published, signature and all, the push has landed and records its sync
+point; anything else is a head that moved, refused as it is at a
+remote that says where it stands.
+
+What this changes for you:
+
+- Two syncs or pushes of one replica racing to an S3 remote both
+  return. Before, the second failed with
+  `PushError::PublishRemoteBranch(Publish(VersionMismatch { current:
+  Current::Unknown, .. }))`.
+- A push that loses to another head at such a remote now fails with
+  `PushError::NonFastForward` naming that head, as at a remote that
+  says where it stands, instead of the bare `VersionMismatch`, and that
+  head is recorded for the pull that rebases onto it. A caller that
+  matched the `VersionMismatch` to detect a conflict matches
+  `NonFastForward` instead.
+- When the push cannot read the remote's head after losing, it fails
+  with that read's error, `PushError::FetchRemoteBranch`, and is not
+  taken for landed.
+
+Why: a replica that syncs from more than one place at once, a watch and
+a timer say, must not fail a sync because another sync of its own did
+the same work first. Taking a head that equals the one published as
+landed hides no lost write: every publish is conditioned on the head it
+read and is made only of a head that builds on it, so whatever came
+between is in the head. A writer that resets the remote without a
+fast-forward lost what it overwrote whatever this push does, and a
+forged head is never equal to the revision this push signed.
+
 ### A pick orders numbers by value
 
 [#874](https://github.com/dialog-db/dialog-db/pull/874)
