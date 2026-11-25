@@ -4090,3 +4090,43 @@ fn it_refuses_a_rule_that_writes_into_dialog_and_reads_from_it() -> Result<()> {
     assert!(read.refusals().next().is_none(), "{:?}", read.diagnostics);
     Ok(())
 }
+
+/// A pin, not a decision (gaps row 51): a document may write the facts
+/// Dialog-DB lets an application write under `dialog.`, a rule's among
+/// them, past what the notation checks when it installs a rule itself.
+/// Written by hand, `dialog.rule/source` is text, not the bytes of a
+/// rule's body (bytes have no written form, row 42), and its index
+/// entries name an attribute: the facts are kept and read back, the
+/// rule is not listed as invalid, and it runs nothing, so a write and a
+/// read of the attribute it names answer as before.
+#[dialog_common::test]
+async fn it_pins_a_rule_written_by_hand() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit("(concept (p ?t n: ?n) (xyz.p/n of: ?t is: ?n as: :text cardinality: :one))")
+        .await?;
+    notebook.submit(r#"(assert (xyz.p x:1 n: "a"))"#).await?;
+    notebook
+        .submit(
+            r#"(assert (dialog.rule rule:1 source: "not a rule"
+                 derives: on:xyz.p/n reads: on:xyz.p/n on: on:xyz.p/n))"#,
+        )
+        .await?;
+    notebook.submit(r#"(assert (xyz.p x:2 n: "b"))"#).await?;
+    assert_eq!(
+        report(&mut notebook, "(select (dialog.rule ?r derives: ?s))").await?,
+        vec!["(dialog.rule rule:1 derives: on:xyz.p/n)"]
+    );
+    assert!(
+        report(&mut notebook, "(select (dialog.rule ?r invalid: ?w))")
+            .await?
+            .is_empty()
+    );
+    let both = vec![r#"(xyz.p x:1 n: "a")"#, r#"(xyz.p x:2 n: "b")"#];
+    assert_eq!(report(&mut notebook, "(select (p ?t n: ?n))").await?, both);
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.p ?t n: ?n))").await?,
+        both
+    );
+    Ok(())
+}
