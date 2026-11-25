@@ -2025,3 +2025,9 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 **Decided.** By the coordinating session, on that reading, under the maintainer's instruction to proceed without blocking on him: the marker is `(distinct ?x)`, and `(collect ?x)` is refused as a former word, saying to write `(distinct ?x)`. The analyzed tree still names the gathering `collect`, a word of the notation's own. Reversing it is one step: `select::DISTINCT` back to the marker `collect` in `collects_in` and `collected`, `collected_as_before` in `src/expand.rs` removed, and the documents' `(distinct ?x)` written `(collect ?x)` again.
 
 **Confirmed.** By the maintainer, 2026-11-25: "We should also use distinct not collect, walkthrough even did that". The marker is `(distinct ?x)`, and the one-step reversal above is not taken.
+
+## 2026-11-25, Reversed: a derived attribute concludes its labels
+
+**Asked.** The maintainer, of the entry above, "a derived attribute is one value": "Rule without labels is just sugar for (rule (list/label of: ?l is: ?n) ...). I think it also ok to have other labeled parameters."
+
+**Decided.** By the maintainer, the same day, reversing the coordinating session's decision of that morning: a derived attribute's head and reads carry labels again, each the field it names, and its two terms unlabeled are sugar for `of:` and `is:`, `(list/label ?l ?n)` being `(list/label of: ?l is: ?n)`, which is now read so. What did not hang on the reversed decision stays: `in:` and a layer on a derived attribute are refused, its declared labels are spelled by the name rule and held to the room a relation leaves, a line of a concept or a command naming a derived attribute is refused, and so is a name that is both a concept and a derived attribute. Pinned by `it_concludes_and_reads_a_derived_attribute_with_labels` (`tests/notation.rs`) and the expansion test in `src/expand.rs`.

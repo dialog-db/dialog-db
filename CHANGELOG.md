@@ -87,14 +87,9 @@ What this changes for you:
   set of a variable's distinct values, where it was `(collect ?x)`.
   `(collect ?x)` is refused saying to write `(distinct ?x)`. What is
   gathered, and what `(count ?x)` of it counts, is unchanged: a set.
-- A derived attribute is one value: its head and its reads take the
-  entity and the value, unlabeled or under `is:`. `(rule (list/count ?l
-  status: ?s n: ?n) …)` and `(select (list/label ?l other: ?o))` are
-  refused, where the first concluded and read several fields and the
-  second answered nothing, saying to conclude a domain and read it
-  through a concept, `(rule (xyz.list.count ?l status: ?s n: ?n) …)` and
-  `(concept (list/count ?l status: ?s n: ?n) (xyz.list.count ?l status:
-  ?s n: ?n))`.
+- A derived attribute read with its entity under `of:`,
+  `(list/label of: ?l is: ?n)`, is read as `(list/label ?l ?n)`, of which
+  it is the spelling, where it was refused as needing its entity.
 - A count asked of what was not gathered says that count counts what
   was gathered, a set of distinct values, and how to count entities:
   gather a record that holds each, then count it. A fold not there yet

@@ -506,18 +506,6 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     }
     // A derived attribute is what rules conclude, on the default layer:
     // a command is a concept of its own.
-    // A derived attribute is one value: a tree built by hand is held to
-    // it as a document is.
-    if let Some((concept, field)) = written
-        .as_deref()
-        .and_then(|written| written.rsplit_once('/'))
-        && let Some(label) = operand
-            .terms
-            .keys()
-            .find(|label| !matches!(label.as_str(), "is" | "in"))
-    {
-        return Err(syntax::one_value(node, concept, field, label));
-    }
     // `in:` names a layer wherever it is written, on a derived attribute
     // as anywhere else: it is no field of one.
     let named_in = operand.terms.get("in").map(|layer| {

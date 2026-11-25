@@ -716,10 +716,11 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 /// (dialog.n.c.<hash of list, open> ?l is: ?n)
 /// ```
 ///
-/// Its two terms unlabeled are the entity and the value, under `is:`, or
-/// the entity and `is:` written. It is one value: any other label is
-/// refused, and several fields are a domain a rule concludes, read
-/// through a concept (gaps row 48, decided 2026-11-25).
+/// Its two terms unlabeled are the entity and the value, under `is:`:
+/// sugar for `of:` and `is:`, `(list/open of: ?l is: ?n)`, which reads
+/// the same. With labels, it is the fields they name,
+/// `(list/count ?l status: ?s count: ?n)`. A label has what the 64 bytes
+/// of a relation leave beside the domain.
 fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syntax, Error> {
     let operand = tree.operand().cloned().unwrap_or_default();
     let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
@@ -727,23 +728,18 @@ fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syn
             entity.clone(),
             BTreeMap::from([("is".into(), value.clone())]),
         ),
-        // One value, under `is:`: any other label is refused, but for
-        // `in:`, a layer, which the kernel refuses as one.
-        ([entity], false) => {
-            if let Some(label) = operand
-                .terms
-                .keys()
-                .find(|label| !matches!(label.as_str(), "is" | "in"))
-            {
-                return Err(syntax::one_value(tree, concept, name, label));
-            }
-            (entity.clone(), operand.terms)
+        ([entity], false) if !operand.terms.contains_key("of") => (entity.clone(), operand.terms),
+        // `of:` is the entity written by its label.
+        ([], false) if operand.terms.contains_key("of") => {
+            let mut terms = operand.terms;
+            let entity = terms.remove("of").unwrap_or(Syntax::Blank);
+            (entity, terms)
         }
         _ => {
             return Err(Error::Refused(format!(
-                "{tree} needs its entity and a value, unlabeled or under `is:`: it is read as \
-                 an attribute in the domain of the concept `{concept}`, since no concept is \
-                 declared under its name"
+                "{tree} needs its entity and a value, or its entity, unlabeled or under `of:`, \
+                 and labelled fields: it is read as an attribute in the domain of the concept \
+                 `{concept}`, since no concept is declared under its name"
             )));
         }
     };
