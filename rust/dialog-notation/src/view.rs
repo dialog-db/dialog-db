@@ -751,6 +751,21 @@ mod safety {
         assert!(read("[:button {:on/click (todo/go todo: .target.value)}]").is_ok());
     }
 
+    /// A word with a `:` is read as an entity, so an event kind that
+    /// holds one cannot be written (gaps row 52): it is refused saying so
+    /// in the author's terms, not in the URI parser's.
+    #[test]
+    fn it_refuses_an_event_kind_with_a_colon_in_the_authors_terms() {
+        let refused = read("[:button {:on/htmx:after-swap (todo/go todo: ?t)}]");
+        assert!(
+            matches!(&refused, Err(Error::Refused(said))
+                if said.contains("`on/htmx:after-swap` holds a `:`")
+                    && !said.contains("URI")
+                    && !said.contains("relative URL")),
+            "{refused:?}"
+        );
+    }
+
     /// An event's kind is free-form, as a custom DOM event's is, but
     /// says something: an empty one, `:on/`, and one under the notation's
     /// namespace are refused.
