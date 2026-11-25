@@ -1260,6 +1260,9 @@ pub struct Expander {
     /// How many parts one form of the top-level tree being expanded may
     /// expand to.
     largest: usize,
+    /// Whether the prelude has been read: what is installed after it is
+    /// a document's.
+    prelude_read: bool,
 }
 
 impl Expander {
@@ -1353,6 +1356,7 @@ impl Expander {
     pub fn new() -> Result<Self, Error> {
         let mut expander = Expander::default();
         expander.submit(PRELUDE)?;
+        expander.prelude_read = true;
         Ok(expander)
     }
 
@@ -1784,6 +1788,20 @@ impl Expander {
             }
             _ => false,
         };
+        // A document's macro, whatever its template, does not take a word
+        // of the notation's own: the prelude's own are its. A concept or
+        // a command is said as one.
+        if let Some(name) = pattern.applies()
+            && self.prelude_read
+            && syntax::FORMS.contains(&name)
+        {
+            let what = match (shaped, items(&pattern).is_empty()) {
+                (true, true) => "command",
+                (true, false) => "concept",
+                (false, _) => "macro",
+            };
+            return Err(syntax::undeclarable(&pattern, what, name));
+        }
         // A concept's or a command's name is a name: one applied as an
         // entity, `(a:b ?x …)`, has no signature, and is refused rather
         // than kept as a rule about syntax no read reaches.
@@ -4706,9 +4724,13 @@ mod tests {
         for word in syntax::FORMS {
             let text = format!("(rule (syntax (+ ?x 1)) (expand ({word} ?x)))");
             let refused = expanded("", &text).unwrap_err().to_string();
+            // `collect` in a rule is refused before its name is asked
+            // about, saying where it stands.
+            let collected = word == "collect" && refused.contains("collect stands only in a query");
             assert!(
-                refused.contains(&format!("declares a macro named `{word}`"))
-                    && refused.contains("one of the notation's own words"),
+                collected
+                    || refused.contains(&format!("declares a macro named `{word}`"))
+                        && refused.contains("one of the notation's own words"),
                 "{text}: {refused}"
             );
         }

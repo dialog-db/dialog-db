@@ -80,8 +80,9 @@ What this changes for you:
   `all`, `when`, `view`, `rows`, `expand`, `syntax`, `warning`,
   `quote`, `collect`, the words of a query's plan `call`, `required` and
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
-  `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
-  refusal names the name and why.
+  `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
+  is a document's macro, whatever its template. The refusal names the
+  name and why.
 - A retract through a concept by its entity alone, `(retract (p x:1))`
   or a rule's `(retract (p ?t))`, retracts every claim of each of the
   concept's fields on that entity, where it retracted only the claim a
