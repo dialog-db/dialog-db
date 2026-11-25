@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A typed read elects and picks among the values its type reads
 
+[#875](https://github.com/dialog-db/dialog-db/pull/875)
+
 A value of another type under an attribute is a claim of another
 relation, yet a stored cardinality-one read elected among every value
 of the cell and only then read the winner through the field's type. When
