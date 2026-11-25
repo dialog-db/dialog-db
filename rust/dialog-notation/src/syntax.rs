@@ -2077,4 +2077,46 @@ mod tests {
         ));
         Ok(())
     }
+
+    /// A derived attribute is told by what was written whatever its
+    /// name holds: a letter beyond ASCII, a combining mark, a `#`, a `?`
+    /// that is not a variable's, a zero-width space, several `/`. By its
+    /// hash, with its names, and as the analyzer names it, without; a
+    /// variable beside it untagged.
+    #[test]
+    fn it_tells_a_derived_attribute_whatever_its_name_holds() {
+        for (concept, field) in [
+            ("caf\u{e9}", "count"),
+            ("cafe\u{301}", "n"),
+            ("a#b", "x"),
+            ("a?b", "x"),
+            ("t\u{200b}x", "y"),
+            ("nb/blocks", "count"),
+            ("list", "count-open"),
+        ] {
+            let hash = derived(concept, field).unwrap();
+            let written = format!("{concept}/{field}");
+            let names: BTreeMap<String, String> = [(hash.clone(), written.clone())].into();
+            for (text, said) in [
+                (
+                    format!("{hash}/is is unbound"),
+                    format!("{written} is unbound"),
+                ),
+                (
+                    format!("{hash}/status is unbound"),
+                    format!("{written} status: is unbound"),
+                ),
+                (
+                    format!("(dialog.n.c/{written} ?l ?n) fails"),
+                    format!("({written} ?l ?n) fails"),
+                ),
+                (
+                    format!("(dialog.n.c/{written} ?l[q1] ?[2]) fails"),
+                    format!("({written} ?l _) fails"),
+                ),
+            ] {
+                assert_eq!(told_with(&text, &names), said, "{text:?}");
+            }
+        }
+    }
 }
