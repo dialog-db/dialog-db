@@ -1871,4 +1871,39 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A write written again in a document is a step again, in its
+    /// place: a document is a sequence, and the second assert of a claim
+    /// after its retract is what leaves the claim. A rule or a concept
+    /// written again is one step, as installing it again changes
+    /// nothing.
+    #[test]
+    fn it_keeps_a_write_written_again_and_installs_a_rule_once() -> Result<(), Error> {
+        for (text, steps) in [
+            (
+                r#"(assert (xyz.r x:1 o: "A")) (retract (xyz.r x:1 o: "A")) (assert (xyz.r x:1 o: "A"))"#,
+                3,
+            ),
+            (
+                "(assert (xyz.n x:1 v: (+ ?v : 1)) (when (xyz.n x:1 v: ?v)))
+                 (assert (xyz.n x:1 v: (+ ?v : 1)) (when (xyz.n x:1 v: ?v)))",
+                2,
+            ),
+            ("(retract (xyz.r x:1 o: ?v)) (retract (xyz.r x:1 o: ?v))", 2),
+            (
+                r#"(rule (assert (xyz.m ?t tag: "seen")) (xyz.n ?t v: 3))
+                   (rule (assert (xyz.m ?t tag: "seen")) (xyz.n ?t v: 3))"#,
+                1,
+            ),
+        ] {
+            let checked = check(&mut Analyzer::new()?, text);
+            assert!(
+                checked.refusals().next().is_none(),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+            assert_eq!(checked.steps.len(), steps, "{text}: {:?}", checked.steps);
+        }
+        Ok(())
+    }
 }
