@@ -139,6 +139,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let mut steps = Vec::new();
     let mut forms = Vec::new();
     let mut analyzed = Vec::new();
+    let mut failed: BTreeSet<usize> = BTreeSet::new();
     for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
         let tree = described(tree, &checked.written, *origin);
         let compiled = crate::compile::compiled(&tree);
@@ -149,9 +150,14 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
                 forms.extend(std::iter::repeat_n(*origin, compiled.len()));
                 steps.extend(compiled);
             }
-            Err(error) => checked
-                .diagnostics
-                .push(compile_refusal(error, &shown, &trees, *origin)),
+            // Said once of a form, however many rules it came to.
+            Err(_) if failed.contains(origin) => {}
+            Err(error) => {
+                failed.insert(*origin);
+                checked
+                    .diagnostics
+                    .push(compile_refusal(error, &shown, &trees, *origin));
+            }
         }
     }
     for (origin, error) in clashes(steps.iter().zip(forms.iter().copied()), &trees) {
