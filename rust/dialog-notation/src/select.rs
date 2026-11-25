@@ -290,6 +290,8 @@ pub struct Selection {
     defined: BTreeMap<String, Defined>,
     /// The derived attributes the tree it was compiled of names, by
     /// Dialog-DB's name for each: what is said of it is said by these.
+    /// Only the live driver reads them, which needs `repository`.
+    #[cfg_attr(not(feature = "repository"), allow(dead_code))]
     names: BTreeMap<String, String>,
 }
 
@@ -318,6 +320,7 @@ fn names(tree: &Syntax) -> Result<Vec<String>, Error> {
 impl Selection {
     /// The derived attributes the selection names, by Dialog-DB's name
     /// for each.
+    #[cfg_attr(not(feature = "repository"), allow(dead_code))]
     pub(crate) fn names(&self) -> &BTreeMap<String, String> {
         &self.names
     }
