@@ -277,3 +277,98 @@ fn it_compiles_no_write_a_document_is_refused() -> Result<()> {
     }
     Ok(())
 }
+
+/// `check_forms` takes an embedder's forms, as text: each forgery
+/// `compile` refuses, written out as a form and given to `check_forms`,
+/// is refused there too, as the same kind of refusal, and nothing of it
+/// compiles. The one difference is a derived attribute named as the
+/// analyzer names it, `dialog.n.c/list/label`, which a tree may name and
+/// is refused for writing, and which no text may name at all, so its
+/// form is refused as `Reserved`. A head into the record
+/// of descriptions or into the notation's namespace, `this:` in a head,
+/// a hash of the notation's, a malformed derived attribute, an assert, a
+/// retract and a command into a derived attribute, and a label that
+/// names another domain's attribute or the notation's.
+#[test]
+fn it_refuses_in_check_forms_every_forgery_compile_refuses() -> Result<()> {
+    use dialog_notation::{Error, Segment, check_forms};
+    let kind = |error: &Error| std::mem::discriminant(error);
+    let mut forged = vec![
+        ruled(None, "syntax.meta", "description"),
+        ruled(Some("assert"), "syntax.meta", "description"),
+        ruled(Some("retract"), "syntax.meta", "description"),
+        ruled(None, "xyz.out", "syntax.meta/description"),
+        ruled(Some("assert"), "xyz.out", "syntax.meta/description"),
+        ruled(None, "xyz.out", "this"),
+        ruled(Some("assert"), "xyz.out", "this"),
+        ruled(None, "dialog.n.anything", "v"),
+        ruled(Some("assert"), "dialog.n.anything", "v"),
+        ruled(Some("assert"), "dialog.n.c/list/label", "is"),
+        ruled(Some("retract"), "dialog.n.c/list/label", "is"),
+        ruled(Some("assert"), "xyz.a", "dialog.n.c/list/label/is"),
+        ruled(None, "xyz.a", "dialog.n.c/list/label/is"),
+        ruled(None, "xyz.a", "dialog.n/x"),
+        ruled(Some("assert"), "xyz.a", "dialog.n/x"),
+        ruled(None, "xyz.a", "b/c"),
+        ruled(Some("assert"), "xyz.a", "b/c"),
+        ruled(
+            Some("assert"),
+            "xyz.a",
+            "dialog.n.c.hudthsqxprxaqks3o67ts47m5i/is",
+        ),
+    ];
+    for malformed in [
+        "dialog.n.c/x",
+        "dialog.n.c//f",
+        "dialog.n.c/a/",
+        "dialog.n.c/a.b/f",
+        "dialog.n.c/a/f.g",
+        "dialog.n.c.hudthsqxprxaqks3o67ts47m5i",
+        "dialog.n.c.anything",
+    ] {
+        forged.push(ruled(None, malformed, "is"));
+        forged.push(ruled(None, "xyz.a", &format!("{malformed}/is")));
+    }
+    // A command into a derived attribute: its value on the control layer.
+    let issued = parse("(rule (assert (xyz.list ?l name: (:control ?n))) (xyz.list ?l name: ?n))")?
+        .remove(0);
+    forged.push(relabelled_relation(
+        issued,
+        "xyz.list",
+        "dialog.n.c/list/label",
+        "name",
+        "is",
+    ));
+    for tree in forged {
+        let compiled = compile(&tree);
+        let Err(refused) = &compiled else {
+            panic!("{tree} compiles: {:?}", compiled.map(|steps| steps.len()));
+        };
+        let text = tree.printed()?;
+        let checked = check_forms(&mut Analyzer::new()?, &text);
+        let said = checked
+            .refusals()
+            .find_map(|said| said.refusal.clone())
+            .ok_or_else(|| anyhow::anyhow!("{text} is not refused by check_forms"))?;
+        // A document may not write a derived attribute as the analyzer
+        // names it at all, so its text is refused for the name, where a
+        // tree may name one and is refused for writing it.
+        let expected = match text.contains("dialog.n.c/list/label") {
+            true => Error::Reserved(String::new()),
+            false => refused.clone(),
+        };
+        assert_eq!(
+            kind(&said),
+            kind(&expected),
+            "{text}: {said:?} against {refused:?}"
+        );
+        assert!(checked.steps.is_empty(), "{text}: {:?}", checked.steps);
+        assert!(
+            checked
+                .refusals()
+                .all(|said| said.path.first() == Some(&Segment::Item(0))),
+            "{text}"
+        );
+    }
+    Ok(())
+}
