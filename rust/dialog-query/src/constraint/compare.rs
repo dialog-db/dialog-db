@@ -335,25 +335,55 @@ mod tests {
         Ok(())
     }
 
-    /// A literal side adapts losslessly to the data's type; data is
-    /// never adapted, so an unadaptable literal is a non-match even
-    /// when the mathematical ordering is defined.
+    /// A literal side adapts losslessly to the data's type, and one that
+    /// cannot (a fraction against whole data, a negative against
+    /// naturals) orders against the data by value, from either side.
     #[dialog_common::test]
-    async fn it_adapts_literals_losslessly() -> Result<(), EvaluationError> {
+    async fn it_orders_literals_by_value() -> Result<(), EvaluationError> {
         assert_eq!(
             count(below(1u64), Value::Float(0.5)).await?,
             1,
             "integer literal compares against float data as 1.0"
         );
         assert_eq!(
-            count(below(1.5f64), Value::UnsignedInt(1)).await?,
-            0,
-            "no integer is 1.5: the literal cannot adapt, non-match"
-        );
-        assert_eq!(
             count(below(2u64), Value::SignedInt(-3)).await?,
             1,
             "unsigned literal adapts to signed data"
+        );
+        assert_eq!(
+            count(below(1.5f64), Value::UnsignedInt(1)).await?,
+            1,
+            "1 < 1.5"
+        );
+        assert_eq!(
+            count(below(1.5f64), Value::UnsignedInt(2)).await?,
+            0,
+            "2 < 1.5"
+        );
+        assert_eq!(
+            count(below(1.5f64), Value::SignedInt(-3)).await?,
+            1,
+            "-3 < 1.5"
+        );
+        assert_eq!(
+            count(below(-1i64), Value::UnsignedInt(0)).await?,
+            0,
+            "0 < -1"
+        );
+        let above = |limit: f64, x: Value| async move {
+            let premise = LessThan::new(Term::constant(limit), Term::var("x"));
+            count(premise, x).await
+        };
+        assert_eq!(above(1.5, Value::UnsignedInt(2)).await?, 1, "1.5 < 2");
+        assert_eq!(above(1.5, Value::SignedInt(-3)).await?, 0, "1.5 < -3");
+        let at_least = AtLeast::new(Term::var("x"), Term::constant(-1i64));
+        let mut row = Match::new();
+        row.bind(&Term::var("x"), Value::UnsignedInt(0))?;
+        let results: Vec<Match> = at_least.evaluate(row.seed()).try_collect().await?;
+        assert_eq!(
+            results.len(),
+            1,
+            "0 >= -1, a negative literal against a natural"
         );
         Ok(())
     }

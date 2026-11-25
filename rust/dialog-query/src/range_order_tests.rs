@@ -212,12 +212,48 @@ async fn a_range_predicate_orders_numbers_of_several_types_by_value() -> anyhow:
 }
 
 /// What `range/v` values a rule keeps that requires `?x > bound`: once
-/// with `bound` the constant `0`, which narrows the scan of the band to
-/// the numbers past it, and once with `bound` a variable bound to a stored
-/// `0`, which filters the rows the scan read. Both keep the same numbers
-/// of a mixed set, as the range predicates' module doc promises.
+/// with `bound` a constant, which narrows the scan of the band to the
+/// numbers past it, and once with `bound` a variable bound to the same
+/// number stored, which filters the rows the scan read. Both keep the
+/// same numbers of a mixed set, as the range predicates' module doc
+/// promises, for a whole bound (`0`) and a fractional one (`0.5`), which
+/// no natural or integer in the set can take as its type.
 #[dialog_common::test]
 async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyhow::Result<()> {
+    let natural = Value::UnsignedInt;
+    let float = Value::Float;
+    let cases = [
+        (
+            json!(0),
+            natural(0),
+            vec![natural(3), float(2.5), float(0.25)],
+        ),
+        (json!(0.5), float(0.5), vec![natural(3), float(2.5)]),
+    ];
+    let mut wrong = Vec::new();
+    for (constant, stored, expected) in cases {
+        let [pushed, residual] = kept_past(constant.clone(), stored).await?;
+        let mut expected: Vec<String> = expected.iter().map(|value| format!("{value:?}")).collect();
+        expected.sort();
+        if pushed != expected {
+            wrong.push(format!(
+                "pushed > {constant}: expected {expected:?}, got {pushed:?}"
+            ));
+        }
+        if residual != expected {
+            wrong.push(format!(
+                "residual > {constant}: expected {expected:?}, got {residual:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    Ok(())
+}
+
+/// The numbers of a mixed set past `constant` as a pushed range keeps
+/// them, then past `stored`, the same number stored, as the residual
+/// filter keeps them; each sorted, in debug rendering.
+async fn kept_past(constant: serde_json::Value, stored: Value) -> anyhow::Result<[Vec<String>; 2]> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -233,8 +269,7 @@ async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyho
     for value in &values {
         transaction = transaction.assert(statement("range/v", &Entity::new()?, value.clone())?);
     }
-    let zero = Entity::new()?;
-    transaction = transaction.assert(statement("range/zero", &zero, Value::UnsignedInt(0))?);
+    transaction = transaction.assert(statement("range/bound", &Entity::new()?, stored)?);
     transaction.commit().publish().perform(&operator).await?;
 
     let kept = |target: &str,
@@ -252,14 +287,14 @@ async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyho
     };
     let pushed = kept(
         "range/pushed",
-        vec![json!({ "assert": ">", "where": { "of": var("kept"), "with": 0 } })],
+        vec![json!({ "assert": ">", "where": { "of": var("kept"), "with": constant } })],
     )?;
     let residual = kept(
         "range/residual",
         vec![
             json!({
-                "assert": { "with": { "zero": field("range/zero", None) } },
-                "where": { "this": var("z"), "zero": var("bound") }
+                "assert": { "with": { "bound": field("range/bound", None) } },
+                "where": { "this": var("b"), "bound": var("bound") }
             }),
             json!({ "assert": ">", "where": { "of": var("kept"), "with": var("bound") } }),
         ],
@@ -268,24 +303,21 @@ async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyho
     registry.register(pushed.compile()?)?;
     registry.register(residual.compile()?)?;
     let source = TestEnv::new(&branch, &operator, registry);
-    let read = |target: &str| -> anyhow::Result<ConceptQuery> {
+    let mut answers: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    for (answer, target) in answers.iter_mut().zip(["range/pushed", "range/residual"]) {
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("kept".into(), Term::var("kept"));
-        Ok(ConceptQuery {
+        let rows = ConceptQuery {
             terms,
             predicate: serde_json::from_value(json!({ "with": {
                 "kept": { "the": target, "cardinality": "many" }
             }}))?,
-        })
-    };
-    let mut answers = Vec::new();
-    for target in ["range/pushed", "range/residual"] {
-        let rows = read(target)?
-            .evaluate(Match::new().seed(), &source)
-            .try_vec()
-            .await?;
-        let mut kept = rows
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        *answer = rows
             .iter()
             .map(|row| {
                 Ok(format!(
@@ -294,19 +326,7 @@ async fn a_pushed_range_and_the_residual_filter_keep_the_same_numbers() -> anyho
                 ))
             })
             .collect::<anyhow::Result<Vec<String>>>()?;
-        kept.sort();
-        answers.push(kept);
+        answer.sort();
     }
-    let expected = {
-        let mut expected = vec![
-            format!("{:?}", Value::UnsignedInt(3)),
-            format!("{:?}", Value::Float(2.5)),
-            format!("{:?}", Value::Float(0.25)),
-        ];
-        expected.sort();
-        expected
-    };
-    assert_eq!(answers[0], expected, "the pushed range");
-    assert_eq!(answers[1], expected, "the residual filter");
-    Ok(())
+    Ok(answers)
 }
