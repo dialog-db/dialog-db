@@ -1807,4 +1807,69 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A field a declaration declares is a declared name: a concept's, a
+    /// command's and a query's head labels and a derived attribute's head
+    /// labels are spelled as a stored name's part is, and one that is not
+    /// is refused naming the label, before anything is compiled. A select
+    /// head's labels, a value's map keys and variables are free.
+    #[test]
+    fn it_refuses_a_declared_field_spelled_as_no_stored_name_is() -> Result<(), Error> {
+        let a = "(concept (a ?t n: ?n) (xyz.a/n of: ?t is: ?n as: :text cardinality: :one))";
+        let line = "(xyz.a/n of: ?t is: ?n as: :text cardinality: :one)";
+        for (form, says) in [
+            (
+                format!("(concept (k ?t Name: ?n) {line})"),
+                "`Name` starts with `N`",
+            ),
+            (
+                format!("(concept (k ?t na_me: ?n) {line})"),
+                "`na_me` holds `_`",
+            ),
+            (
+                "(concept (k/go Name: ?n) \
+                 (xyz.k.go/n of: ?c is: ?n as: :text in: :control cardinality: :many))"
+                    .to_string(),
+                "`Name` starts with `N`",
+            ),
+            (
+                "(query (a/q ?t is: ?v Big: ?n) (a ?t n: ?n) (is ?v ?n))".to_string(),
+                "`Big` starts with `B`",
+            ),
+            (
+                "(rule (a/x ?t Big: ?n) (a ?t n: ?n))".to_string(),
+                "`Big` starts with `B`",
+            ),
+            (
+                "(rule (a/x ?t caf\u{e9}: ?n) (a ?t n: ?n))".to_string(),
+                "`caf\u{e9}` holds `\u{e9}`",
+            ),
+        ] {
+            let checked = check(&mut Analyzer::new()?, &format!("{a} {form}"));
+            let refused: Vec<_> = checked
+                .refusals()
+                .map(|said| said.message.clone())
+                .collect();
+            assert!(
+                refused.len() == 1
+                    && refused[0].contains(says)
+                    && refused[0].contains("a lowercase letter")
+                    && !refused[0].contains("invalid relation"),
+                "{form}: {refused:?}"
+            );
+        }
+        for free in [
+            "(select (xyz.out ?t Big: ?n) (a ?t n: ?n))",
+            "(query (a/q ?t is: ?v) (a ?t n: ?n) (is ?v {:Big ?n :caf\u{e9} ?n})) (select (a/q ?t is: ?v))",
+            "(select (a ?Big n: ?caf\u{e9}))",
+        ] {
+            let checked = check(&mut Analyzer::new()?, &format!("{a} {free}"));
+            assert!(
+                checked.refusals().next().is_none(),
+                "{free}: {:?}",
+                checked.diagnostics
+            );
+        }
+        Ok(())
+    }
 }
