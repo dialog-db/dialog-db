@@ -260,3 +260,66 @@ async fn it_reads_the_rules_it_sets_aside() -> Result<()> {
     );
     Ok(())
 }
+
+/// The rules `branch` answers under `dialog.rule/error`, each with its
+/// diagnostic, sorted by rule.
+async fn errors(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, String)>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "error": { "the": "dialog.rule/error", "as": "text:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("error".to_string(), Term::<Any>::var("error"));
+    let rows = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(operator)
+        .try_vec()
+        .await?;
+    let mut listed: Vec<(Entity, String)> = rows
+        .iter()
+        .map(|row| Ok((row.get::<Entity>("this")?, row.get::<String>("error")?)))
+        .collect::<Result<_>>()?;
+    listed.sort();
+    Ok(listed)
+}
+
+/// A rule set aside for closing a cycle is a compile error too: it is
+/// answered under `dialog.rule/error` as `cycle`, naming the concept it
+/// concludes, and the error lifts once the rule is retracted.
+#[dialog_common::test]
+async fn it_answers_a_rule_it_sets_aside_as_a_cycle_error() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    seeded(&branch, &operator).await?;
+
+    install(&branch, &operator, negating()?).await?;
+    assert_eq!(errors(&branch, &operator).await?, Vec::new());
+
+    let closing = closing()?;
+    install(&branch, &operator, closing.clone()).await?;
+    let listed = errors(&branch, &operator).await?;
+    let [(rule, error)] = listed.as_slice() else {
+        anyhow::bail!("one rule is answered as an error: {listed:?}");
+    };
+    assert_eq!(*rule, closing.this());
+    assert!(error.starts_with("cycle: "), "{error}");
+    assert!(
+        error.contains(&closing.conclusion().this().to_string()),
+        "the error names the concept the rule concludes: {error}"
+    );
+
+    branch
+        .transaction()
+        .retract(closing)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        errors(&branch, &operator).await?,
+        Vec::new(),
+        "the error lifts with the rule"
+    );
+    Ok(())
+}
