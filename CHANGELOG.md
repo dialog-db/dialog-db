@@ -26,7 +26,9 @@ unread: a field declared `integer:` over a relation a rule fills with
 text answered the text. Every value a rule concludes is now read through
 the field's declared type, as the stored scan reads a stored one, when
 one rule answers the read, when stored and deduced values meet, and
-through the fixpoint of a recursive relation.
+through the fixpoint of a recursive relation. The type is applied before
+the cardinality-one election on deduced reads, as the caller-variable
+lens does; the stored scan elects first.
 
 What this changes for you:
 
@@ -36,6 +38,14 @@ What this changes for you:
   back as that type, as a stored one does: a natural read as `float:` is
   a float, a fraction read as `natural:` is floored, and a negative is
   not a natural. It came back as the rule concluded it.
+- A read of a deduced relation whose value is bound to a number finds a
+  value of another number type that is the same number, as a stored read
+  does: a `float:` field bound to the natural `3` finds a deduced `3`,
+  and a `natural:` field bound to `3.0` finds it too. It missed it. A
+  number constant still finds no value that is not a number.
+- A cardinality-one read of a deduced relation whose newest value is of
+  a type the field does not read answers the newest value it does read.
+  The same read of a stored relation answers nothing, as before.
 - A read through a field that declares no type, and a read of a concept
   of several fields, answer as before.
 
