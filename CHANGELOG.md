@@ -14,6 +14,45 @@ says how to cut a release.
 
 ## Unreleased
 
+### A claim this replica cannot read yet is treated as if it did not exist
+
+A replica takes claims from writers it does not control, such as another
+implementation it syncs with, and a pull checks no claim's value. Such a
+writer can store a claim this replica cannot read yet: text that is not
+UTF-8, an entity value that is not a URI, or one that is a URI but not
+in its canonical rendering. Reading a cell that held one failed, a
+cardinality-one write to the cell was refused, and an entity stored as
+`Ref:qq` read as `ref:qq`, a value no claim stored. Every read and write
+now treats such a claim as if it were absent, the way a row whose entity
+or attribute column does not read already was.
+
+What this changes for you:
+
+- A cell holding an unread claim answers its readable claims: a
+  cardinality-one read elects among them, so an older readable claim
+  answers where an unread newer one stands, and a cell holding only
+  unread claims answers nothing. A read of every claim, a rule's
+  read, a subscription, an export and induction pass it over. None of
+  them fails on it.
+- An entity value stored in a rendering other than its canonical one is
+  unread: it no longer reads as the entity it would parse to.
+- A cardinality-one write to a cell holding an unread claim lands
+  and evicts it: its keys are erased and the written claim's record
+  supersedes its version, so every replica that pulls the write evicts
+  it too. A cardinality-many write or a retraction beside it lands and
+  leaves it in place. A write that changes nothing evicts nothing.
+- Every claim passed over goes through `dialog_corpus::pass_over`, which
+  logs it (`tracing::warn`) and returns an `Unread` naming its key
+  and why. No query or commit result reports them yet.
+- `FactView::checked_or_passed_over` validates a row as `checked` does,
+  passing over an unread one.
+- A history read (a revision's claims, a claim's lineage) still fails
+  on a record whose value does not read.
+
+Why: a replica cannot refuse what a writer it does not control has
+stored, and must not fail, or answer a value no claim holds, because of
+it.
+
 ### A range predicate orders two numbers of different types by value
 
 [#880](https://github.com/dialog-db/dialog-db/pull/880)
@@ -1523,6 +1562,12 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A claim this replica cannot read yet: nothing stored is rewritten on
+  upgrade, and no identity moves. A replica that holds one reads its cell
+  as if it were absent; the first cardinality-one write to the cell
+  evicts it, and the write's record, which an older release reads as it
+  reads any record, evicts it on every replica that pulls it. An older
+  release still fails to read the cell until it has the write.
 - A rule's write under cardinality one after the same commit's write
   of the cell: nothing stored changes shape, no identity moves and
   nothing is rewritten on upgrade. What a commit writes differs: one

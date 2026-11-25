@@ -1,4 +1,4 @@
-//! A claim whose stored value this dialog cannot read, arriving by a
+//! A claim whose stored value this replica cannot read yet, arriving by a
 //! pull.
 //!
 //! A typed write cannot produce such a claim, and a pull takes claims
@@ -61,7 +61,7 @@ async fn pulled(s3: &S3Address, name: &str) -> Result<Followed> {
     Ok(devices)
 }
 
-/// A replica that pulled a claim no reader can read, newer than its
+/// A replica that pulled a claim this replica cannot read yet, newer than its
 /// cell's readable one, answers the readable one, as the replica it came
 /// from does, and neither read fails.
 #[dialog_common::test]
@@ -99,7 +99,7 @@ async fn a_cardinality_one_write_evicts_a_pulled_undecodable_claim(s3: S3Address
         vec![Value::String("fine".into())]
     );
     assert_eq!(
-        stored(&devices.bob, "item/size", devices.env.inner()).await?,
+        stored(&devices.bob, "item/size", &devices.env).await?,
         1,
         "the write evicts the undecodable claim"
     );

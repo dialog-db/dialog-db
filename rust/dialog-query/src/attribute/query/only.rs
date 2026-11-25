@@ -40,7 +40,7 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
     match winner.to_owned() {
         Ok(fact) => Ok(Some((fact, standing))),
         Err(DialogCorpusError::CorruptEntry(reason)) => {
-            tracing::warn!(%reason, "ignoring corrupt stored row in election");
+            dialog_corpus::pass_over(winner.key(), reason);
             Ok(None)
         }
         Err(error) => Err(error),
@@ -209,10 +209,12 @@ fn slide<R: Windowed>(
 /// The row that stands of `current` and `challenger`, two rows of one
 /// cell. A value the read's type does not read is a claim of another
 /// relation: it takes no part in the cell's election, so the newest
-/// claim of the read's own type stands. Asked only when a cell holds
-/// two rows, so the read's type is taken from `is` here and not before:
-/// a cell's one row, of whatever type, stands and is read through the
-/// type as the cell closes (see [`admitted`]).
+/// claim of the read's own type stands. Nor does a claim no reader can
+/// read (see [`dialog_corpus::Unread`]): the cell elects as if it
+/// were absent. Asked only when a cell holds two rows, so the read's
+/// type is taken from `is` here and not before: a cell's one row, of
+/// whatever type, stands and is read through the type as the cell
+/// closes (see [`admitted`]), which passes over an unread one.
 #[inline(always)]
 fn contend<R: Windowed>(
     current: R,
@@ -220,6 +222,12 @@ fn contend<R: Windowed>(
     ranking: Option<&Ranking>,
     is: &Term<Any>,
 ) -> Result<R, DialogCorpusError> {
+    if unread(challenger.view()) {
+        return Ok(current);
+    }
+    if unread(current.view()) {
+        return Ok(challenger);
+    }
     let lens = is.kind();
     let lens = lens.as_ref();
     if lens.is_some() {
@@ -231,6 +239,21 @@ fn contend<R: Windowed>(
         }
     }
     current.elect(challenger, ranking, lens)
+}
+
+/// Whether `row` is a claim this replica cannot read yet, passing it over (see
+/// [`dialog_corpus::pass_over`]) when it is. Its value is read in place,
+/// nothing materialized. Any other failure to read it is left to the
+/// read of the cell's winner, which reports it.
+#[inline(always)]
+fn unread(row: &FactView) -> bool {
+    match row.value_view() {
+        Err(DialogCorpusError::CorruptEntry(reason)) => {
+            dialog_corpus::pass_over(row.key(), reason);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Whether `lens`, the type the read's value term declares, reads
@@ -856,7 +879,7 @@ mod tests {
 
     /// A cell whose newest claim does not decode answers the older,
     /// readable one, whatever the read's type, with or without a pick,
-    /// in either scan order: a claim this dialog cannot read takes no
+    /// in either scan order: a claim this replica cannot read yet takes no
     /// part in the election, so the cell answers as if it were absent.
     #[dialog_common::test]
     fn a_cell_whose_newest_claim_does_not_decode_answers_the_older() -> anyhow::Result<()> {

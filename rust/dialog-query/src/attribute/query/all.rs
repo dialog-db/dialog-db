@@ -422,14 +422,10 @@ impl AttributeQueryAll {
         // The standing reads the payload's versions: taken here, once, as
         // the checked row keeps only the key and the cause.
         let standing = row.standing();
-        match row.checked() {
-            Ok(row) => Ok(Placed::InPlace(row, standing, viewed)),
-            Err(DialogCorpusError::CorruptEntry(reason)) => {
-                tracing::warn!(%reason, "ignoring corrupt stored row");
-                Ok(Placed::Corrupt)
-            }
-            Err(error) => Err(error),
-        }
+        Ok(match row.checked_or_passed_over()? {
+            Some(row) => Placed::InPlace(row, standing, viewed),
+            None => Placed::Corrupt,
+        })
     }
 
     /// [`Self::merge`] for a row bound in place: its slots and its claim
@@ -788,7 +784,7 @@ impl AttributeQueryAll {
         let fact = match fact.to_owned() {
             Ok(fact) => fact,
             Err(DialogCorpusError::CorruptEntry(reason)) => {
-                tracing::warn!(%reason, "ignoring corrupt stored row");
+                dialog_corpus::pass_over(fact.key(), reason);
                 return Ok(None);
             }
             Err(error) => return Err(error.into()),
