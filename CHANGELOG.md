@@ -81,6 +81,14 @@ What this changes for you:
   `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A name Dialog-DB cannot keep is refused naming it, its length and the
+  limit, where it was refused as `not a symbol: Invalid attribute:
+  Relation "/<name>" …` or `invalid relation ".a/name"`: a name of no
+  `.` is at most 63 bytes, or 64 with a `/` in it; a domain or an
+  attribute at most 64, and a domain's read `(xyz.t ?x label: …)` at most
+  64 for `xyz.t/label`; no name holds a NUL; and no domain has an empty
+  part between its dots, `.a`, `a.`, `x..y`. A derived attribute's
+  written name, `nb/blocks/count`, is kept under a hash and may be longer.
 - A label under the notation's namespace, `dialog.n.c.<hash>/is:` or
   `dialog.n/x:`, is `Error::Reserved` wherever it is written, so no
   document concludes or reads a derived attribute by its hash. A label

@@ -276,6 +276,38 @@ fn malformed(tree: &Syntax) -> Option<(&Syntax, String)> {
     None
 }
 
+/// The first read of a domain in `tree` as written with a label that
+/// makes an attribute longer than Dialog-DB keeps, the label and the
+/// attribute: `(xyz.t ?x label: …)` reads `xyz.t/label`. What is quoted
+/// is not a form.
+fn overlong(tree: &Syntax) -> Option<(&Syntax, String, String)> {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            Syntax::Application(operator, operand) => {
+                if let Syntax::Reference(domain) = &**operator
+                    && syntax::named(domain) == syntax::Named::Domain
+                    && let Some(label) = operand.terms.keys().find(|label| {
+                        !label.is_empty()
+                            && domain.len() + 1 + label.len() > syntax::RELATION_LENGTH
+                    })
+                {
+                    return Some((part, label.clone(), format!("{domain}/{label}")));
+                }
+                open.extend(operand.terms.values().rev());
+                open.extend(operand.items.iter().rev());
+            }
+            Syntax::Map(entries) => entries.iter().rev().for_each(|(_, value)| {
+                open.push(value);
+            }),
+            Syntax::Tuple(items) => open.extend(items.iter().rev()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The first application in `tree` as written with a label that holds a
 /// `/`, and the label. Only the notation writes one, where it joins the
 /// reads of one entity under `unless` into one read: a document that
@@ -1480,10 +1512,22 @@ impl Expander {
         }
         if let Some((part, name)) = malformed(tree) {
             let part = part.clone();
+            let why = syntax::unkept(&name).unwrap_or_else(|| {
+                "a name is a word, or words with a single `/` between each two, `todo`, \
+                 `notebook/blocks`, `nb/blocks/count`, and an attribute a domain, a `/` and a \
+                 word, `xyz.todo/text`"
+                    .to_string()
+            });
+            let message = format!("{part} names `{name}`, which is no name: {why}");
+            return self.about(&part, |_| Err(Error::Refused(message)));
+        }
+        if let Some((part, label, attribute)) = overlong(tree) {
+            let part = part.clone();
             let message = format!(
-                "{part} names `{name}`, which is no name: a name is a word, or words with a \
-                 single `/` between each two, `todo`, `notebook/blocks`, `nb/blocks/count`, and \
-                 an attribute a domain, a `/` and a word, `xyz.todo/text`"
+                "{part} has the label `{label}:`, and `{label}:` makes the attribute \
+                 `{attribute}`, which is {} bytes, and an attribute is at most {}",
+                attribute.len(),
+                syntax::RELATION_LENGTH
             );
             return self.about(&part, |_| Err(Error::Refused(message)));
         }
@@ -4216,6 +4260,12 @@ mod tests {
                 format!("`{long}` is 64 bytes, and a name is at most 63"),
             ),
             (
+                format!("(concept (a/{long} ?x name: ?n) {line})"),
+                format!(
+                    "`a/{long}` is 66 bytes, and a name is at most 63 bytes, or 64 with a `/` in it"
+                ),
+            ),
+            (
                 format!("(select ({long} ?x name: ?n))"),
                 format!("`{long}` is 64 bytes, and a name is at most 63"),
             ),
@@ -4280,8 +4330,10 @@ mod tests {
         let field = "a".repeat(58);
         // A domain read by a field is at most what leaves the field room.
         let domain = format!("xyz.{}", "a".repeat(54));
+        let slashed = format!("a/{}", "a".repeat(62));
         for text in [
             format!("(concept ({name} ?x name: ?n) {line}) (select ({name} ?x name: ?n))"),
+            format!("(concept ({slashed} ?x name: ?n) {line}) (select ({slashed} ?x name: ?n))"),
             format!("(select ({domain} ?x name: ?n))"),
             format!("(select (xyz.t/{field} ?x ?n))"),
             format!("(select (xyz.t ?x {field}: ?n))"),

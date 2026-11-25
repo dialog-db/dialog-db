@@ -366,8 +366,10 @@ pub enum Named {
     /// ([`derived_parts`]). A document never writes one.
     Derived,
     /// No name: empty, with space in it or a variable's `?`, beginning
-    /// or ending with a `/` or with two together, `a/`, `a//b`, or an
-    /// attribute whose name holds a `/`, `a.b/c/d`.
+    /// or ending with a `/` or with two together, `a/`, `a//b`, an
+    /// attribute whose name holds a `/`, `a.b/c/d`, or one Dialog-DB
+    /// cannot keep ([`unkept`]): holding a NUL, a domain with an empty
+    /// part between its dots, `.a`, or too long.
     Malformed,
 }
 
@@ -387,6 +389,7 @@ pub fn named(name: &str) -> Named {
         Kind::Operator => Named::Operator,
         Kind::Entity => Named::Entity,
         _ if name.is_empty()
+            || unkept(name).is_some()
             || name.starts_with('?')
             || name.chars().any(char::is_whitespace)
             || name.starts_with('/')
@@ -405,6 +408,62 @@ pub fn named(name: &str) -> Named {
         _ if !name.contains('.') => Named::Declarable,
         _ if name.contains('/') => Named::Attribute,
         _ => Named::Domain,
+    }
+}
+
+/// The most bytes Dialog-DB keeps a relation in. A tree's names are kept
+/// as relations, and one with no domain is kept under the empty domain,
+/// `/todo`, so a name with no `.` has a byte less.
+pub const RELATION_LENGTH: usize = 64;
+
+/// The most bytes `name`, with no `.`, may be: it is kept as a relation,
+/// as written where it has a `/`, `notebook/blocks`, and under the empty
+/// domain where it has none, `/todo`.
+fn limit(name: &str) -> usize {
+    match name.contains('/') {
+        true => RELATION_LENGTH,
+        false => RELATION_LENGTH - 1,
+    }
+}
+
+/// That `name`, which has no `.`, is longer than [`limit`].
+fn long(name: &str) -> String {
+    format!(
+        "`{name}` is {} bytes, and a name is at most {} bytes, or {RELATION_LENGTH} with a `/` \
+         in it",
+        name.len(),
+        RELATION_LENGTH - 1
+    )
+}
+
+/// Why Dialog-DB cannot keep `name`, in the author's terms: it holds a
+/// NUL, its domain has an empty part between its dots, `.a`, `a.`,
+/// `x..y`, or it is longer than a name, a domain or an attribute may
+/// be. `None` for a name it keeps. A name of words joined by `/` with no
+/// `.` may be longer here: a derived attribute's, `nb/blocks/count`, is
+/// kept under a hash, and [`declares`] holds a concept's, a command's
+/// and a query's to the limit.
+pub fn unkept(name: &str) -> Option<String> {
+    let domain = name.split_once('/').map_or(name, |(domain, _)| domain);
+    let bytes = name.len();
+    if name.contains('\0') {
+        Some(format!("`{name}` holds a NUL"))
+    } else if domain.contains('.') && domain.split('.').any(str::is_empty) {
+        Some(format!(
+            "`{name}` has a domain with an empty part between its dots"
+        ))
+    } else if !name.contains('.') && !name.contains('/') && bytes > limit(name) {
+        Some(long(name))
+    } else if name.contains('.') && bytes > RELATION_LENGTH {
+        let what = match name.contains('/') {
+            true => "an attribute",
+            false => "a domain",
+        };
+        Some(format!(
+            "`{name}` is {bytes} bytes, and {what} is at most {RELATION_LENGTH}"
+        ))
+    } else {
+        None
     }
 }
 
@@ -450,10 +509,11 @@ pub const FORMS: [&str; 25] = [
 ];
 
 /// Whether a document may declare a concept, a command or a query under
-/// `name`: one that [`declarable`] and none of the notation's own words,
-/// [`FORMS`]. Every place a document declares a name asks this.
+/// `name`: one that [`declarable`], none of the notation's own words,
+/// [`FORMS`], and no longer than it is kept in, [`limit`]. Every place a
+/// document declares a name asks this.
 pub fn declares(name: &str) -> bool {
-    declarable(name) && !FORMS.contains(&name)
+    declarable(name) && !FORMS.contains(&name) && name.len() <= limit(name)
 }
 
 /// The refusal of `form`, which declares `name` as `what` though it
@@ -463,6 +523,7 @@ pub fn undeclarable(form: &dyn std::fmt::Display, what: &str, name: &str) -> Err
         Named::Entity => "which is an entity: a name with a `:` names a thing, not a concept, a \
                           query or a command, `todo` or `notebook/blocks`"
             .to_string(),
+        Named::Declarable if name.len() > limit(name) => long(name),
         Named::Declarable => format!(
             "which is one of the notation's own words: declared, it would shadow what \
              `({name} …)` means; declare it under another name"
@@ -815,7 +876,16 @@ impl Syntax {
             Syntax::Variable(name) => node("variable", [("name", data::text(name))]),
             Syntax::Blank => node("blank", []),
             Syntax::Constant(value) => node("constant", [("value", value.clone())]),
-            Syntax::Reference(name) => node("reference", [("name", data::symbol(name)?)]),
+            // A name is kept as a relation: one too long for it is
+            // refused saying so, in the author's terms.
+            Syntax::Reference(name) => node(
+                "reference",
+                [(
+                    "name",
+                    data::symbol(name)
+                        .map_err(|_| Error::Refused(unkept(name).unwrap_or_else(|| long(name))))?,
+                )],
+            ),
             Syntax::Map(entries) => node(
                 "map",
                 [(
