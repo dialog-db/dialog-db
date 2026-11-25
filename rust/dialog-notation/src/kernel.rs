@@ -503,6 +503,18 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     if fields.is_empty() {
         return Err(Error::Refused(format!("{node} names no field")));
     }
+    // A derived attribute is what rules conclude, on the default layer:
+    // a command is a concept of its own.
+    if let Some(written) = &written
+        && let Some(layer) = fields.iter().find_map(|field| field.layer.as_deref())
+    {
+        return Err(Error::Refused(format!(
+            "{node} has `{written}`, a derived attribute, on the {layer} layer: a derived \
+             attribute is what rules conclude, on the default layer, and is read there; a \
+             command is a concept of its own, its lines on the {layer} layer, \
+             `(concept ({written}-go …) (xyz.… in: :{layer} …))`"
+        )));
+    }
     Ok(Read {
         domain: domain.to_string(),
         written,

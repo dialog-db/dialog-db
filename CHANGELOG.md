@@ -82,6 +82,16 @@ What this changes for you:
   `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow. The
   refusal names the name and why.
+- A derived attribute is concluded and read on the default layer only:
+  `(rule (list/label ?l (:control ?n)) …)`, which compiled and issued a
+  command into it every round, and a read of one on a layer, `(select
+  (list/label ?l (:control ?n)))`, which answered nothing, are refused
+  naming the attribute and the layer. A command is a concept of its own.
+- A line of a concept or a command is a stored attribute: one that names
+  a derived attribute, `(concept (list/go label: ?x) (list/label of: ?c
+  is: ?x in: :control cardinality: :many))`, is refused at the
+  declaration naming the line, where the concept was left undeclared and
+  its use refused as an attribute of `list`.
 - A name is a concept or a derived attribute of one, never both: with
   `list` and `list/open` both declared concepts, `(list/open ?l ?n)` or
   `(list/open ?l is: ?n)` is refused naming the declaration of

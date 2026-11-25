@@ -1681,6 +1681,28 @@ impl Expander {
             },
             _ => None,
         };
+        // A line of a concept or a command, which says its cardinality,
+        // is a stored attribute: one that names a derived attribute of a
+        // declared concept, which rules conclude, is refused, naming it.
+        if let Some(Answer::Syntax(template)) = &answer
+            && let Some((line, name, concept)) =
+                members(template.clone()).into_iter().find_map(|member| {
+                    let name = member.applies()?.to_string();
+                    let (concept, _) = name.rsplit_once('/')?;
+                    let concept = concept.to_string();
+                    (member.operand()?.terms.contains_key("cardinality")
+                        && syntax::declarable(&name)
+                        && self.concepts.contains(&concept)
+                        && !self.concepts.contains(&name))
+                    .then_some((member, name, concept))
+                })
+        {
+            return Err(Error::Refused(format!(
+                "{line} names `{name}`, a derived attribute of the concept `{concept}`, which \
+                 rules conclude: a line of a concept or a command is a stored attribute, its \
+                 domain dotted, `xyz.{name}`"
+            )));
+        }
         // A concept written as lines is kept as the reads they are.
         let answer = match answer {
             Some(Answer::Syntax(template)) => Some(Answer::Syntax(lines(template)?)),

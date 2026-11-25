@@ -1552,8 +1552,8 @@ mod tests {
 
     /// A line of a concept or a command is a stored attribute, its domain
     /// dotted: one that names a derived attribute, which rules conclude,
-    /// is refused at the declaration, naming the line, written two-term
-    /// or labelled, in a concept or a command, whether the concept it is
+    /// is refused at the declaration, naming the line, its entity written
+    /// with no label or under `of:`, in a concept or a command, whether the concept it is
     /// derived under is declared in the same document or an earlier one.
     #[test]
     fn it_refuses_a_line_that_names_a_derived_attribute() -> Result<(), Error> {
@@ -1561,9 +1561,9 @@ mod tests {
                     (xyz.list/name of: ?l is: ?n as: :text cardinality: :one)) \
                     (rule (list/label ?l ?n) (list ?l name: ?n))";
         let declarations = [
-            "(concept (memo ?m label: ?x) (list/label ?m ?x cardinality: :one))",
+            "(concept (memo ?m label: ?x) (list/label ?m is: ?x cardinality: :one))",
             "(concept (memo ?m label: ?x) (list/label of: ?m is: ?x cardinality: :one))",
-            "(concept (list/go label: ?x) (list/label ?c ?x in: :control cardinality: :many))",
+            "(concept (list/go label: ?x) (list/label ?c is: ?x in: :control cardinality: :many))",
             "(concept (list/go label: ?x) \
              (list/label of: ?c is: ?x in: :control cardinality: :many))",
         ];
