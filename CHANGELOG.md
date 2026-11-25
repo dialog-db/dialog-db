@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### Two opens of one credential racing both open it
 
+[#878](https://github.com/dialog-db/dialog-db/pull/878)
+
 `OpenCredential::open` loads the credential named, and creates one when
 none is there. When another opener created it between this one's load
 and its create, the create was refused as already there and the open
