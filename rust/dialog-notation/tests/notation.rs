@@ -4387,3 +4387,47 @@ async fn it_computes_a_formula_in_the_head_of_a_write_with_a_when() -> Result<()
     }
     Ok(())
 }
+
+/// A read of a concept takes no pick, `(:last …)`, `(:all …)`, `(:max …)`
+/// or `(:min …)`, as it takes no type or cardinality: the concept says
+/// its field's cardinality, which replaced picks, and elects a claim by
+/// the elector in its head. Each is refused naming the field and the
+/// pick, saying to write it bare. A read of the domain itself still
+/// takes one.
+#[dialog_common::test]
+async fn it_refuses_a_pick_on_a_concept_read() -> Result<()> {
+    let concept = r#"(concept (n ?t v: ?v w: ?w)
+          (xyz.n/v of: ?t is: ?v as: :integer cardinality: :one)
+          (xyz.n/w of: ?t is: ?w as: :integer cardinality: :many))"#;
+    for (read, pick) in [
+        ("(select (n ?t v: (:last ?v) w: ?w))", "last"),
+        ("(select (n ?t v: ?v w: (:all ?w)))", "all"),
+        ("(select (n ?t v: ?v w: (:max ?w)))", "max"),
+        ("(select (n ?t v: ?v w: (:min ?w)))", "min"),
+    ] {
+        let checked = dialog_notation::check(
+            &mut dialog_notation::Analyzer::new()?,
+            &format!("{concept} {read}"),
+        );
+        let refused: Vec<_> = checked
+            .refusals()
+            .map(|said| said.message.clone())
+            .collect();
+        assert!(
+            refused.len() == 1
+                && refused[0].contains(&format!("(:{pick} …)"))
+                && refused[0].contains("bare"),
+            "{read}: {refused:?}"
+        );
+    }
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        &format!("{concept} (select (xyz.n ?t w: (:max ?w)) (xyz.n ?t w: (:max ?w)))"),
+    );
+    assert!(
+        checked.refusals().next().is_none(),
+        "{:?}",
+        checked.diagnostics
+    );
+    Ok(())
+}
