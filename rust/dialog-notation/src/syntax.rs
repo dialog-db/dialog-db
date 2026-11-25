@@ -302,6 +302,47 @@ pub fn unwritten(name: &str) -> bool {
     name.contains('[')
 }
 
+/// What a name names, told from its spelling alone: the one place the
+/// notation tells a stored name from a declared one and either from its
+/// own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    /// Under the notation's namespace, `dialog.n` and `dialog.n.*`, or
+    /// an attribute of such a domain: what only the notation writes.
+    Reserved,
+    /// Only operator characters: `+`, `<=`.
+    Operator,
+    /// A URI: `list:home`.
+    Entity,
+    /// A domain, where facts are stored: a name with a `.` and no `/`,
+    /// `xyz.todo`.
+    Domain,
+    /// An attribute of a domain: a name with a `/` and a `.`,
+    /// `xyz.todo/text`.
+    Attribute,
+    /// A name a document may declare, a concept's, a query's, a command's
+    /// or a derived attribute's: no `.`, `todo`, `notebook/blocks`.
+    Declarable,
+}
+
+/// What `name` names. See [`Named`].
+pub fn named(name: &str) -> Named {
+    let relation = name.split_once('/').map_or(name, |(relation, _)| relation);
+    if relation
+        .strip_prefix(NAMESPACE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    {
+        return Named::Reserved;
+    }
+    match Kind::of(name) {
+        Kind::Operator => Named::Operator,
+        Kind::Entity => Named::Entity,
+        _ if !name.contains('.') => Named::Declarable,
+        _ if name.contains('/') => Named::Attribute,
+        _ => Named::Domain,
+    }
+}
+
 /// Whether `name` may be declared: the name of a concept, a query or a
 /// command, `todo` or `notebook/blocks`. One with a `.` anywhere is a
 /// domain, `xyz.todo`, or an attribute in one, `xyz.todo/text`, read

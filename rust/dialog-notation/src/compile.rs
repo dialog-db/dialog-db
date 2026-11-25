@@ -518,8 +518,10 @@ pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
-    if let Some(reserved) = writes_reserved(form) {
-        return Err(Error::Reserved(reserved));
+    match writes_reserved(form) {
+        Some(Ok(reserved)) => return Err(Error::Reserved(reserved)),
+        Some(Err(refused)) => return Err(refused.said(&crate::syntax::told)),
+        None => {}
     }
     compiled(form).map_err(|error| error.said(&crate::syntax::told))
 }
@@ -529,24 +531,36 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
 /// a retract or a command into it, or a derived attribute this process
 /// did not name. A tree the notation analyzed derives only what it made
 /// and writes nothing there; a tree built otherwise may name anything.
-fn writes_reserved(form: &Syntax) -> Option<String> {
+fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
+    use crate::syntax::{Named, named};
     let rule = Rule::parse(form).ok()?;
-    let reserved = |domain: &str| {
-        domain
-            .strip_prefix(crate::syntax::NAMESPACE)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    let reserved = |name: &str| named(name) == Named::Reserved;
+    let read = match &rule.head {
+        Head::Assert(read) | Head::Retract(read) | Head::Hold(read) | Head::Derive(read) => read,
+        Head::Report(_) => return None,
     };
-    match &rule.head {
-        Head::Assert(read) | Head::Retract(read) | Head::Hold(read) if reserved(&read.domain) => {
-            Some(read.domain.clone())
-        }
-        Head::Derive(read)
-            if reserved(&read.domain) && !crate::syntax::made_derived(&read.domain) =>
-        {
-            Some(read.domain.clone())
-        }
-        _ => None,
+    let derives = matches!(rule.head, Head::Derive(_));
+    if reserved(&read.domain) && !(derives && crate::syntax::made_derived(&read.domain)) {
+        return Some(Ok(read.domain.clone()));
     }
+    // A field is written as an attribute of the head's domain, or, where
+    // its label holds a `/`, as the attribute the label names: that must
+    // be an attribute of a domain, and none of the notation's.
+    read.fields.iter().find_map(|field| {
+        if !field.label.contains('/') {
+            return None;
+        }
+        match named(&field.attribute) {
+            Named::Reserved => Some(Ok(field.attribute.clone())),
+            Named::Attribute => None,
+            _ => Some(Err(Error::Refused(format!(
+                "{form} writes `{}:`, which is no attribute of a domain: a field is written as \
+                 an attribute of its read's domain, or of another named with its domain, \
+                 `io.contact/email`",
+                field.label
+            )))),
+        }
+    })
 }
 
 /// [`compile`], with no check of what `form` names and its refusals as
