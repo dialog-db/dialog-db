@@ -8,10 +8,14 @@ use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
 use crate::resource::Resource;
 use async_stream::try_stream;
 use dialog_effects::storage::{Directory, Location};
+use futures_util::lock::{Mutex as AsyncMutex, OwnedMutexGuard};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Weak};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
@@ -535,8 +539,15 @@ impl FileWriter {
     }
 }
 
-/// Acquire a cross-process write lock for the given handle's CAS critical
-/// section. The lock file lives at `{path}.lock`; see [`LockGuard`].
+/// Acquire the write lock for the given handle's CAS critical section: in
+/// this process, a turn among the tasks writing the same cell, waited for;
+/// then the lock file at `{path}.lock` (see [`LockGuard`]), which another
+/// process may hold, and which is not waited for.
+///
+/// Two tasks of one process writing one cell therefore take turns, and
+/// the second compares against what the first wrote, as a write to a
+/// volatile or IndexedDB cell does. Only a holder in another process
+/// refuses the write, with [`FileSystemError::Held`].
 pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSystemError> {
     let path: PathBuf = handle.try_into()?;
     let lock_path = lock_path(&path);
@@ -544,7 +555,30 @@ pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSys
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| FileSystemError::Io(e.to_string()))?;
     }
-    LockGuard::acquire(lock_path)
+    let turn = turn(&lock_path).lock_owned().await;
+    let mut guard = LockGuard::acquire(lock_path)?;
+    guard.turn = Some(turn);
+    Ok(guard)
+}
+
+/// The turns of this process's writers, by lock file: an entry lives while
+/// some task holds or waits for its turn, since each holds the turn's
+/// `Arc`. A lock file nobody holds or waits for keeps no entry beyond the
+/// next miss, which drops every entry no task holds, so the map holds at
+/// most one entry per cell being written at once, and one more.
+static TURNS: LazyLock<Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The turn the writers of the lock file at `path` take in this process.
+fn turn(path: &Path) -> Arc<AsyncMutex<()>> {
+    let mut turns = TURNS.lock();
+    if let Some(turn) = turns.get(path).and_then(Weak::upgrade) {
+        return turn;
+    }
+    turns.retain(|_, turn| turn.strong_count() > 0);
+    let turn = Arc::new(AsyncMutex::new(()));
+    turns.insert(path.to_path_buf(), Arc::downgrade(&turn));
+    turn
 }
 
 /// The lock file for the cell at `path`: `{path}.lock`. The suffix is
@@ -598,8 +632,9 @@ const CLAIM_ATTEMPTS: usize = 2;
 ///   replaces the file between that read and the removal.
 ///
 /// A writer that finds the lock held is refused at once with
-/// [`FileSystemError::Lock`]; nothing waits here. A lock naming this process
-/// is held, so two tasks of one process exclude each other.
+/// [`FileSystemError::Held`]; nothing waits here. A lock naming this process
+/// is held, so two tasks of one process exclude each other; [`lock`] has
+/// them take turns before they reach it.
 ///
 /// Whether a holder is running is asked of the OS, in this process's PID
 /// namespace: writers sharing a store must share one (a writer in another
@@ -611,6 +646,10 @@ const CLAIM_ATTEMPTS: usize = 2;
 pub(crate) struct LockGuard {
     path: PathBuf,
     content: String,
+    /// This process's turn at the cell, when [`lock`] took one: given up
+    /// only after [`Drop`] has removed the lock file, so the next task of
+    /// this process finds the file gone.
+    turn: Option<OwnedMutexGuard<()>>,
 }
 
 /// What a writer that found the lock file learned by reading it.
@@ -632,7 +671,7 @@ enum Holder {
 impl LockGuard {
     /// Take the lock at the given path.
     ///
-    /// If the lock is held, returns [`FileSystemError::Lock`] immediately
+    /// If the lock is held, returns [`FileSystemError::Held`] immediately
     /// rather than waiting; the caller decides whether to try again.
     fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
         let pid = std::process::id();
@@ -646,7 +685,7 @@ impl LockGuard {
                 Holder::Gone { content, token } => recover(&path, &content, token)?,
             }
         }
-        Err(FileSystemError::Lock(format!(
+        Err(FileSystemError::Held(format!(
             "Concurrent write in progress (lock {} held)",
             path.display()
         )))
@@ -673,6 +712,7 @@ impl LockGuard {
             Ok(()) => Ok(Some(Self {
                 path: path.to_path_buf(),
                 content,
+                turn: None,
             })),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
             Err(e) => Err(FileSystemError::Lock(format!(
@@ -890,8 +930,8 @@ mod tests {
             Err(e) => e,
         };
         assert!(
-            matches!(err, FileSystemError::Lock(_)),
-            "expected Lock error, got: {err:?}"
+            matches!(err, FileSystemError::Held(_)),
+            "expected the lock to read as held, got: {err:?}"
         );
         Ok(())
     }
@@ -981,7 +1021,7 @@ mod tests {
         std::fs::write(&lock_path, b"")?;
         assert!(matches!(
             LockGuard::acquire(lock_path.clone()),
-            Err(FileSystemError::Lock(_))
+            Err(FileSystemError::Held(_))
         ));
         assert_eq!(std::fs::read(&lock_path)?, b"");
         // The refused claim left no temporary file behind.
@@ -1008,7 +1048,7 @@ mod tests {
             assert!(
                 matches!(
                     LockGuard::acquire(lock_path.clone()),
-                    Err(FileSystemError::Lock(_))
+                    Err(FileSystemError::Held(_))
                 ),
                 "{content:?} is held"
             );
@@ -1044,7 +1084,7 @@ mod tests {
         std::fs::write(&lock_path, &content)?;
         assert!(matches!(
             LockGuard::acquire(lock_path.clone()),
-            Err(FileSystemError::Lock(_))
+            Err(FileSystemError::Held(_))
         ));
         assert_eq!(std::fs::read_to_string(&lock_path)?, content);
         assert_eq!(names(dir.path())?, ["cell.lock"]);
@@ -1060,7 +1100,7 @@ mod tests {
         std::fs::write(&lock_path, &content)?;
         assert!(matches!(
             LockGuard::acquire(lock_path.clone()),
-            Err(FileSystemError::Lock(_))
+            Err(FileSystemError::Held(_))
         ));
         assert_eq!(std::fs::read_to_string(&lock_path)?, content);
 
@@ -1072,7 +1112,7 @@ mod tests {
             std::fs::write(&lock_path, &content)?;
             assert!(matches!(
                 LockGuard::acquire(lock_path.clone()),
-                Err(FileSystemError::Lock(_))
+                Err(FileSystemError::Held(_))
             ));
             assert_eq!(std::fs::read_to_string(&lock_path)?, content);
         }
@@ -1119,8 +1159,8 @@ mod tests {
                         done.wait();
                         match result {
                             Ok(_guard) => true,
-                            Err(FileSystemError::Lock(_)) => false,
-                            Err(other) => panic!("expected a Lock refusal, got {other:?}"),
+                            Err(FileSystemError::Held(_)) => false,
+                            Err(other) => panic!("expected a Held refusal, got {other:?}"),
                         }
                     })
                 })

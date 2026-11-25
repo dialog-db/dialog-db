@@ -619,6 +619,149 @@ async fn direct_writes_in_order<S: PeerSpace>(
     Ok(())
 }
 
+/// One write of [`three_direct_writes`]: an assertion or a retraction of
+/// a title.
+#[derive(Clone, Copy, Debug)]
+enum Write {
+    Assert(&'static str),
+    Retract(&'static str),
+}
+
+/// `task/title` of every task, as an attribute query reads it.
+fn titles() -> dialog_query::AttributeQuery {
+    use dialog_query::Term;
+    use dialog_query::attribute::Relation as QueryRelation;
+    dialog_query::AttributeQuery::from(
+        Term::<QueryRelation>::from(QueryRelation::from(relation("task/title")))
+            .of(Term::<Entity>::var("this"))
+            .is(Term::<String>::var("title")),
+    )
+}
+
+/// The titles `claims` hold, sorted.
+fn read_titles(claims: &[dialog_query::Claim]) -> Vec<Value> {
+    let mut titles: Vec<Value> = claims.iter().map(|claim| claim.is.clone()).collect();
+    titles.sort_by_key(|value| format!("{value:?}"));
+    titles
+}
+
+/// No rule: one transaction writing `writes` of the task's title, each
+/// its own call, in order, under `cardinality`, over the titles `ground`
+/// committed before. What the title reads as three ways, which must
+/// agree: the transaction's own query before it commits, the branch's
+/// query after, and the claims the branch stores.
+async fn three_direct_writes<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+    ground: &[&str],
+    writes: [Write; 3],
+    cardinality: Cardinality,
+) -> Result<Vec<Value>> {
+    use dialog_query::query::Output as _;
+
+    let repo = test_repo(session, peer).await;
+    let branch = repo.branch("main").open().perform(session).await?;
+    if !ground.is_empty() {
+        let mut held = Changes::new();
+        for title in ground {
+            write(&mut held, "task/title", &task(), text(title), cardinality);
+        }
+        commit(&branch, session, &[], held).await?;
+    }
+
+    let mut transaction = branch.transaction();
+    for step in writes {
+        let mut change = Changes::new();
+        match step {
+            Write::Assert(title) => {
+                write(&mut change, "task/title", &task(), text(title), cardinality)
+            }
+            Write::Retract(title) => change.dissociate(relation("task/title"), task(), text(title)),
+        }
+        transaction = transaction.assert(change);
+    }
+    let staged = read_titles(
+        &transaction
+            .query()
+            .select(titles())
+            .perform(session)
+            .try_vec()
+            .await?,
+    );
+    transaction.commit().publish().perform(session).await?;
+    branch.refresh(session).await?;
+
+    let committed = read_titles(
+        &branch
+            .query()
+            .select(titles())
+            .perform(session)
+            .try_vec()
+            .await?,
+    );
+    let stored = values(&branch, session, "task/title", &task()).await?;
+    assert_eq!(
+        staged, committed,
+        "{writes:?} under {cardinality:?}: the transaction reads what it commits"
+    );
+    assert_eq!(
+        committed, stored,
+        "{writes:?} under {cardinality:?}: a query reads what is stored"
+    );
+    Ok(stored)
+}
+
+/// No rule: three writes of one claim in one transaction take effect in
+/// the order written, as two do ([`direct_writes_in_order`]). Asserting,
+/// retracting and asserting again leaves the claim; with it stored,
+/// retracting, asserting and retracting again leaves nothing; and under
+/// cardinality one, asserting `A`, `B` and `A` again leaves `A`.
+async fn three_direct_writes_in_order<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    use Write::{Assert, Retract};
+    for cardinality in [Cardinality::One, Cardinality::Many] {
+        assert_eq!(
+            three_direct_writes(
+                session,
+                peer,
+                &[],
+                [Assert("A"), Retract("A"), Assert("A")],
+                cardinality
+            )
+            .await?,
+            vec![text("A")],
+            "asserted, retracted and asserted again under {cardinality:?}, the claim holds"
+        );
+        assert_eq!(
+            three_direct_writes(
+                session,
+                peer,
+                &["A"],
+                [Retract("A"), Assert("A"), Retract("A")],
+                cardinality
+            )
+            .await?,
+            Vec::<Value>::new(),
+            "retracted, asserted and retracted again under {cardinality:?}, the claim is gone"
+        );
+    }
+    assert_eq!(
+        three_direct_writes(
+            session,
+            peer,
+            &[],
+            [Assert("A"), Assert("B"), Assert("A")],
+            Cardinality::One
+        )
+        .await?,
+        vec![text("A")],
+        "under cardinality one, the last of three assertions holds alone"
+    );
+    Ok(())
+}
+
 /// `assert! task{title: ?title} when <domain>{task: ?this, <name>:
 /// ?title}`: asserts the title the command names in its field `name`.
 fn assert_title_from(domain: &str, name: &str) -> Result<InductiveRule> {
@@ -966,6 +1109,13 @@ macro_rules! cases {
                 let $root = $make;
                 let (session, peer) = $session;
                 direct_writes_in_order(&session, &peer).await
+            }
+
+            #[dialog_common::test]
+            async fn it_takes_three_writes_of_one_claim_in_order() -> Result<()> {
+                let $root = $make;
+                let (session, peer) = $session;
+                three_direct_writes_in_order(&session, &peer).await
             }
 
             #[dialog_common::test]

@@ -43,6 +43,11 @@
 //! compose more sources, commit the transaction first and use
 //! [`Branch::query`](crate::Branch::query).
 //!
+//! The one composition it takes is a deductive rule laid over a single
+//! query, [`TransactionQuery::with_rule`]: a rule adds no fact, only a
+//! way of reading the facts there are, and it is read beside the
+//! transaction for that query, never staged in it.
+//!
 //! Deductive-rule resolution is built into the shared [`QueryEnv`] this
 //! routes through (a durable layer per branch + the overlay as a
 //! transient layer), so rules resolve identically whether a concept is
@@ -64,7 +69,9 @@ use dialog_search_tree::nodes;
 
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
-use crate::{RemoteSite, Staged};
+use crate::{Ephemeral, RemoteSite, Staged};
+use dialog_corpus::{Changes, Statement as _};
+use dialog_query::DeductiveRule;
 use std::slice::from_ref;
 
 /// A non-composable query handle returned by
@@ -81,6 +88,10 @@ use std::slice::from_ref;
 pub struct TransactionQuery<'a> {
     view: View<'a>,
     layers: Vec<Staged>,
+    /// The deductive rules laid over this one query
+    /// ([`with_rule`](Self::with_rule)): read beside the transaction,
+    /// never staged in it.
+    rules: Changes,
     /// The layers a transaction through a session reads beside its
     /// line, with the guide that leads the read; `None` for a transaction
     /// on the line alone.
@@ -92,6 +103,7 @@ impl<'a> TransactionQuery<'a> {
         Self {
             view,
             layers,
+            rules: Changes::new(),
             composite: None,
         }
     }
@@ -102,12 +114,33 @@ impl<'a> TransactionQuery<'a> {
         self
     }
 
+    /// Lay `rule` over this query alone: what it derives from the
+    /// transaction's view, staged claims and stored ones, is read as a
+    /// rule on the branch is, and nothing of it is staged in the
+    /// transaction or written by its commit. Each call of
+    /// [`Transaction::query`](crate::repository::branch::Transaction::query)
+    /// starts with no rule laid over it, so one query's rules are never
+    /// another's.
+    ///
+    /// The one composition a transaction's view takes. It stays closed to
+    /// more fact sources, since what it reads is the branch and the
+    /// transaction's own writes and nothing else; a rule adds no fact,
+    /// only a way of reading the facts there are. It is for a read that
+    /// needs a rule of its own, a query of several premises, made in the
+    /// middle of a transaction, as [`QueryLayer::with`](crate::QueryLayer::with)
+    /// lays one over a branch.
+    pub fn with_rule(mut self, rule: DeductiveRule) -> Self {
+        rule.assert(&mut self.rules);
+        self
+    }
+
     /// Stage a query against this transaction's view. Call
     /// [`perform`](TransactionSelectQuery::perform) to execute.
     pub fn select<Q: Application>(self, query: Q) -> TransactionSelectQuery<'a, Q> {
         TransactionSelectQuery {
             view: self.view,
             layers: self.layers,
+            rules: self.rules,
             composite: self.composite,
             query,
         }
@@ -118,6 +151,7 @@ impl<'a> TransactionQuery<'a> {
 pub struct TransactionSelectQuery<'a, Q> {
     view: View<'a>,
     layers: Vec<Staged>,
+    rules: Changes,
     composite: Option<Composite>,
     query: Q,
 }
@@ -157,6 +191,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         let TransactionSelectQuery {
             view,
             layers,
+            rules,
             composite,
             query,
         } = self;
@@ -170,7 +205,17 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // in (Session, SessionBranch, per-branch BranchMetadata),
             // shared rather than rebuilt, beside the transaction's
             // staged layers.
-            let overlay = shared_metadata(from_ref(&view), &operator);
+            let metadata = shared_metadata(from_ref(&view), &operator);
+            // The rules laid over this query join the metadata in the
+            // query's own overlay, as a branch query's do: read beside
+            // the transaction's layers, never staged in them.
+            let overlay = if rules.is_empty() {
+                metadata
+            } else {
+                let mut overlay = rules;
+                metadata.export().assert(&mut overlay);
+                Ephemeral::holding(overlay)
+            };
 
             // A transaction query is just a single-line `QueryEnv`.
             // Constructing the *same* env type the branch-session path
@@ -202,8 +247,11 @@ mod tests {
     use crate::schema::DidExt as _;
     use dialog_corpus::Entity;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer::{Peer, Session};
     use dialog_query::query::Output;
+    use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
+    use dialog_storage::provider::storage::VolatileSpace;
 
     mod people {
 
@@ -473,6 +521,179 @@ mod tests {
             .map(|p| p.name.0)
             .collect();
         assert_eq!(committed, names);
+        Ok(())
+    }
+
+    /// A rule deriving `conclusion` from each `test/name`, read under
+    /// cardinality one.
+    fn naming(conclusion: &str) -> anyhow::Result<dialog_query::DeductiveRule> {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "name": { "the": conclusion, "as": "text:" } } },
+            "when": [{
+                "assert": { "with": { "name": {
+                    "the": "test/name", "as": "text:", "cardinality": "one"
+                } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        Ok(descriptor.compile()?)
+    }
+
+    /// The names `rule`'s conclusion holds, read through `query`, sorted.
+    async fn derived(
+        query: super::TransactionQuery<'_>,
+        rule: &dialog_query::DeductiveRule,
+        operator: &Peer<VolatileSpace, Session>,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut terms = dialog_query::Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows = query
+            .select(dialog_query::ConceptQuery {
+                predicate: rule.conclusion().clone(),
+                terms,
+            })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut names = rows
+            .iter()
+            .map(|row| {
+                match row
+                    .source()
+                    .lookup(&Term::<dialog_query::Any>::var("name"))
+                    .and_then(|binding| binding.content())?
+                {
+                    dialog_corpus::Value::String(name) => Ok(name),
+                    other => anyhow::bail!("a name that is no text: {other:?}"),
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        names.sort();
+        Ok(names)
+    }
+
+    /// A rule laid over one query of a transaction reads through the
+    /// transaction's view: the claims the branch holds and the ones the
+    /// transaction stages, a staged cardinality-one replace as the
+    /// commit will leave the cell.
+    #[dialog_common::test]
+    async fn it_reads_staged_and_stored_claims_through_a_rule_laid_over_a_query()
+    -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let carol: Entity = "id:carol".parse()?;
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .assert(Person {
+                this: carol.clone(),
+                name: people::Name("Carol".into()),
+            })
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let rule = naming("test/employee")?;
+        let tx = branch
+            .transaction()
+            .assert(Person {
+                this: bob.clone(),
+                name: people::Name("Bob".into()),
+            })
+            .assert(Person {
+                this: carol.clone(),
+                name: people::Name("Caroline".into()),
+            });
+        assert_eq!(
+            derived(tx.query().with_rule(rule.clone()), &rule, &operator).await?,
+            vec!["Alice", "Bob", "Caroline"],
+        );
+        Ok(())
+    }
+
+    /// A rule laid over a query is never staged: the commit writes the
+    /// transaction's own claims and no rule, and a query of the branch
+    /// after it derives nothing through the rule. Another query of the
+    /// same transaction does not read a rule laid over the first.
+    #[dialog_common::test]
+    async fn it_keeps_a_rule_laid_over_a_query_to_that_query() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let bob: Entity = "id:bob".parse()?;
+        let employee = naming("test/employee")?;
+        let contractor = naming("test/contractor")?;
+        let tx = branch.transaction().assert(Person {
+            this: bob.clone(),
+            name: people::Name("Bob".into()),
+        });
+
+        assert_eq!(
+            derived(tx.query().with_rule(employee.clone()), &employee, &operator).await?,
+            vec!["Bob"],
+        );
+        assert_eq!(
+            derived(
+                tx.query().with_rule(contractor.clone()),
+                &contractor,
+                &operator
+            )
+            .await?,
+            vec!["Bob"],
+        );
+        // Each query reads its own rule alone.
+        assert_eq!(
+            derived(
+                tx.query().with_rule(employee.clone()),
+                &contractor,
+                &operator
+            )
+            .await?,
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            derived(tx.query(), &employee, &operator).await?,
+            Vec::<String>::new(),
+        );
+
+        tx.commit().publish().perform(&operator).await?;
+        let rules: Vec<dialog_corpus::Fact> = futures_util::TryStreamExt::try_collect(
+            branch
+                .claims()
+                .select(dialog_corpus::Selector::new().the("dialog.rule/source".parse()?))
+                .to_owned()
+                .perform(&operator)
+                .await?,
+        )
+        .await?;
+        assert!(rules.is_empty(), "no rule was written: {rules:?}");
+        assert_eq!(
+            derived(branch.transaction().query(), &employee, &operator).await?,
+            Vec::<String>::new(),
+        );
+        let names: Vec<String> = branch
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|person| person.name.0)
+            .collect();
+        assert_eq!(names, vec!["Bob".to_string()]);
         Ok(())
     }
 
