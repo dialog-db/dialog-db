@@ -2199,4 +2199,33 @@ mod tests {
             }
         }
     }
+
+    /// A declared name is strict kebab-case in each part between `/`:
+    /// lowercase letters and digits, words joined by one `-`, starting
+    /// with a letter. A digit may follow a hyphen.
+    #[test]
+    fn it_spells_a_declared_name_in_strict_kebab_case() {
+        for name in [
+            "to-2",
+            "to-2do",
+            "t2",
+            "count-open",
+            "notebook/blocks",
+            "a/b-c/d1",
+        ] {
+            assert_eq!(unspelled(name), None, "{name}");
+        }
+        for (name, why) in [
+            ("to--do", "`to--do` holds `--`"),
+            ("to-", "`to-` ends with `-`"),
+            ("-to", "`-to` starts with `-`"),
+            ("a/to--do", "`to--do` holds `--`"),
+        ] {
+            let refused = unspelled(name);
+            assert!(
+                refused.as_deref().is_some_and(|said| said.starts_with(why)),
+                "{name}: {refused:?}"
+            );
+        }
+    }
 }
