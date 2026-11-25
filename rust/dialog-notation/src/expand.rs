@@ -4198,4 +4198,100 @@ mod tests {
             Err(Error::Unknown(_))
         ));
     }
+
+    /// A name too long, holding a NUL, or a domain with an empty part
+    /// between its dots is refused in what the author wrote: the name,
+    /// its length and the limit, never the relation the notation keeps a
+    /// tree's names under. A name with no `.` is at most 63 bytes, one
+    /// with a `.` and an attribute's domain, `/` and field at most 64.
+    #[test]
+    fn it_refuses_a_name_dialog_db_cannot_keep_in_the_authors_terms() {
+        let line = "(xyz.t/name of: ?x is: ?n cardinality: :one)";
+        let long = "a".repeat(64);
+        let field = "a".repeat(59);
+        let domain = format!("xyz.{}", "a".repeat(61));
+        for (text, says) in [
+            (
+                format!("(concept ({long} ?x name: ?n) {line})"),
+                format!("`{long}` is 64 bytes, and a name is at most 63"),
+            ),
+            (
+                format!("(select ({long} ?x name: ?n))"),
+                format!("`{long}` is 64 bytes, and a name is at most 63"),
+            ),
+            (
+                format!("(select ({domain} ?x name: ?n))"),
+                format!("`{domain}` is 65 bytes, and a domain is at most 64"),
+            ),
+            (
+                format!("(select (xyz.t/{field} ?x ?n))"),
+                format!("`xyz.t/{field}` is 65 bytes, and an attribute is at most 64"),
+            ),
+            (
+                format!("(select (xyz.t ?x {field}: ?n))"),
+                format!(
+                    "`{field}:` makes the attribute `xyz.t/{field}`, which is 65 bytes, and an \
+                     attribute is at most 64"
+                ),
+            ),
+            (
+                format!("(concept (a\u{0}b ?x name: ?n) {line})"),
+                "`a\u{0}b` holds a NUL".to_string(),
+            ),
+            (
+                "(select (xyz.t ?x a\u{0}b: ?n))".to_string(),
+                "`a\u{0}b` holds a NUL".to_string(),
+            ),
+            (
+                "(select (.a ?x name: ?n))".to_string(),
+                "`.a` has a domain with an empty part between its dots".to_string(),
+            ),
+            (
+                "(select (a. ?x name: ?n))".to_string(),
+                "`a.` has a domain with an empty part between its dots".to_string(),
+            ),
+            (
+                "(select (x..y/name ?x ?n))".to_string(),
+                "`x..y/name` has a domain with an empty part between its dots".to_string(),
+            ),
+        ] {
+            let refused = expanded("", &text).unwrap_err().to_string();
+            assert!(
+                refused.contains(&says) && !refused.contains("Relation"),
+                "{text}: {refused}"
+            );
+            // The check says the same, and nothing of a relation.
+            let checked = crate::check::check(&mut crate::analyze::Analyzer::new().unwrap(), &text);
+            assert!(
+                checked
+                    .diagnostics
+                    .iter()
+                    .any(|said| said.message.contains(&says))
+                    && checked
+                        .diagnostics
+                        .iter()
+                        .all(|said| !said.message.contains("Relation")),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+        }
+        // At the limit each is a name, and its read compiles.
+        let name = "a".repeat(63);
+        let field = "a".repeat(58);
+        // A domain read by a field is at most what leaves the field room.
+        let domain = format!("xyz.{}", "a".repeat(54));
+        for text in [
+            format!("(concept ({name} ?x name: ?n) {line}) (select ({name} ?x name: ?n))"),
+            format!("(select ({domain} ?x name: ?n))"),
+            format!("(select (xyz.t/{field} ?x ?n))"),
+            format!("(select (xyz.t ?x {field}: ?n))"),
+        ] {
+            let checked = crate::check::check(&mut crate::analyze::Analyzer::new().unwrap(), &text);
+            assert!(
+                checked.refusals().next().is_none(),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+        }
+    }
 }
