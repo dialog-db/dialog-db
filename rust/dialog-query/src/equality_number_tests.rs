@@ -115,10 +115,14 @@ enum Outcome {
 }
 
 /// Two numbers of one value are equal whatever types they are read as:
-/// `3` read as `natural:` equals `3` read as `integer:` or as
-/// `float:`, by an `==` premise and by one variable joined across the
-/// two reads, and the rule compiles. Numbers of different values are not
-/// equal, and a number of one type equals itself as it did.
+/// `3` read as `natural:` equals `3` read as `integer:` or as `float:`
+/// by an `==` premise. Numbers of different values are not equal, and a
+/// number of one type equals itself as it did.
+///
+/// One variable joined across two reads of different number types is
+/// refused when the rule compiles, as it is today: whether inference
+/// lets two number types meet on one variable is a separate decision,
+/// and this pins the refusal until it is made.
 #[dialog_common::test]
 async fn numbers_of_one_value_are_equal_whatever_type_reads_them() -> anyhow::Result<()> {
     let natural = Value::UnsignedInt;
@@ -160,6 +164,12 @@ async fn numbers_of_one_value_are_equal_whatever_type_reads_them() -> anyhow::Re
     for (case, a, b, a_as, b_as, expected) in cases {
         for join in [false, true] {
             let got = equal(a.clone(), b.clone(), a_as, b_as, join).await?;
+            if join && a_as != b_as {
+                if !matches!(got, Outcome::Refused(_)) {
+                    wrong.push(format!("{case}, joined: expected refused, got {got:?}"));
+                }
+                continue;
+            }
             if got != expected {
                 let how = if join { "joined" } else { "==" };
                 wrong.push(format!("{case}, {how}: expected {expected:?}, got {got:?}"));
@@ -167,5 +177,51 @@ async fn numbers_of_one_value_are_equal_whatever_type_reads_them() -> anyhow::Re
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+    Ok(())
+}
+
+/// A formula whose output is a constant derives its row when the value
+/// it computes is that number in another type: two `float:` reads of
+/// `2.5` and `3.5` sum to the float `6.0`, which is the constant `6`.
+/// This held before numbers compared by value (the constant takes the
+/// formula's type), and is pinned so it keeps holding.
+#[dialog_common::test]
+async fn a_formula_output_equals_a_constant_of_one_value() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let who = Entity::new()?;
+    branch
+        .transaction()
+        .assert(statement("sum/a", &who, Value::Float(2.5))?)
+        .assert(statement("sum/b", &who, Value::Float(3.5))?)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": { "with": { "held": { "the": "sum/held", "cardinality": "many" } } },
+        "when": [
+            { "assert": { "with": { "a": field("sum/a", Some("float:")), "b": field("sum/b", Some("float:")) } },
+              "where": { "this": var("this"), "a": var("held"), "b": var("b") } },
+            { "assert": "math/sum", "where": { "of": var("held"), "with": var("b"), "is": 6 } }
+        ]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rule.compile()?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::Constant(Value::Entity(who)));
+    terms.insert("held".into(), Term::var("held"));
+    let rows = ConceptQuery {
+        terms,
+        predicate: serde_json::from_value(json!({ "with": {
+            "held": { "the": "sum/held", "cardinality": "many" }
+        }}))?,
+    }
+    .evaluate(Match::new().seed(), &source)
+    .try_vec()
+    .await?;
+    assert_eq!(rows.len(), 1, "2.5 + 3.5 is 6");
     Ok(())
 }
