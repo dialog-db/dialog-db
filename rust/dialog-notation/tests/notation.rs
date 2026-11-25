@@ -3749,64 +3749,54 @@ async fn it_runs_the_notebooks_commands() -> Result<()> {
     Ok(())
 }
 
-/// A derived attribute is one value (gaps row 48, decided): its head
-/// and its reads take the entity and the value, unlabeled or under
-/// `is:`. Any other label is refused, in a head beside `is:` or alone, in
-/// a read, and in a tree built by hand, saying to conclude a domain and
-/// read it through a concept, the rewrite that keeps several fields.
+/// A derived attribute concludes the fields its labels name (gaps row
+/// 48, the maintainer's word, 2026-11-25): a head may write `is:` beside
+/// another label, and a read of both answers both. Its two terms
+/// unlabeled are sugar for `of:` and `is:`, and either spelling reads
+/// what the other concluded. A read of a label no rule concludes is
+/// accepted and answers nothing. A tree built by hand with labels
+/// compiles as the document's does.
 #[dialog_common::test]
-async fn it_refuses_a_derived_attribute_with_a_label_other_than_is() -> Result<()> {
-    let list = r#"(concept (list ?l name: ?n)
-          (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
-        (rule (list/label ?l ?n) (list ?l name: ?n))"#;
-    for form in [
-        "(rule (list/tag ?l is: ?n other: ?n) (list ?l name: ?n))",
-        "(rule (list/tag ?l other: ?n) (list ?l name: ?n))",
-        "(select (list/label ?l is: ?n other: ?o))",
-        "(select (list/label ?l wat: ?q))",
-        "(rule (xyz.out ?l v: ?q) (list/label ?l wat: ?q))",
-    ] {
-        let checked = dialog_notation::check(
-            &mut dialog_notation::Analyzer::new()?,
-            &format!("{list} {form}"),
-        );
-        let refused: Vec<_> = checked
-            .refusals()
-            .map(|said| said.message.clone())
-            .collect();
-        assert!(
-            refused.len() == 1
-                && refused[0].contains("a derived attribute is one value")
-                && refused[0].contains("(concept (list/"),
-            "{form}: {refused:?}"
-        );
-    }
-    // The rewrite it shows runs: a domain concluded, read through a
-    // concept.
+async fn it_concludes_and_reads_a_derived_attribute_with_labels() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit(&format!(
-            r#"{list}
-               (rule (xyz.list.tag ?l is: ?n other: ?n) (list ?l name: ?n))
-               (concept (list/tag ?l is: ?n other: ?o) (xyz.list.tag ?l is: ?n other: ?o))
-               (assert (list list:home name: "Home"))"#
-        ))
+        .submit(
+            r#"(concept (list ?l name: ?n)
+                 (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+               (rule (list/label ?l is: ?n other: ?n) (list ?l name: ?n))
+               (rule (list/title of: ?l is: ?n) (list ?l name: ?n))
+               (rule (list/heading ?l ?n) (list ?l name: ?n))
+               (assert (list list:home name: "Home"))"#,
+        )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(select (list/tag ?l is: ?n other: ?o))").await?,
-        vec![r#"(xyz.list.tag list:home is: "Home" other: "Home")"#]
+        report(&mut notebook, "(select (list/label ?l is: ?n other: ?o))").await?,
+        vec![r#"(list/label list:home is: "Home" other: "Home")"#]
     );
-    // Built by hand.
+    assert_eq!(
+        report(&mut notebook, "(select (list/label ?l wat: ?q))").await?,
+        Vec::<String>::new()
+    );
+    for read in [
+        "(select (list/title ?l ?n))",
+        "(select (list/title of: ?l is: ?n))",
+    ] {
+        assert_eq!(
+            report(&mut notebook, read).await?,
+            vec![r#"(list/title list:home is: "Home")"#],
+            "{read}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (list/heading of: ?l is: ?n))").await?,
+        vec![r#"(list/heading list:home is: "Home")"#]
+    );
     let tree = dialog_notation::parse(
         "(rule (dialog.n.c/list/tag ?l is: ?n other: ?n) (xyz.list ?l name: ?n))",
     )?
     .remove(0);
     let compiled = dialog_notation::compile(&tree);
-    assert!(
-        matches!(&compiled, Err(Error::Refused(said)) if said.contains("a derived attribute is one value")),
-        "{:?}",
-        compiled.map(|steps| steps.len())
-    );
+    assert!(compiled.is_ok(), "{compiled:?}");
     Ok(())
 }
 
