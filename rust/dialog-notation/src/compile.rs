@@ -742,6 +742,9 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
 
 /// The steps one rule of `form` compiles to.
 fn ruled(rule: Rule, form: &Syntax) -> Result<Vec<Step>, Error> {
+    if let Head::Assert(read) | Head::Hold(read) | Head::Derive(read) = &rule.head {
+        unlisted(read)?;
+    }
     if rule.once {
         return Ok(vec![once(&rule, form)?]);
     }
@@ -1284,6 +1287,34 @@ fn ground(head: &Head) -> Result<Step, Error> {
             read.domain
         ))),
     }
+}
+
+/// Refuse a case written as a constant in `read` that its field's
+/// listed type does not list: Dialog-DB stores whatever case it is
+/// given. A retract is not refused it, so a claim written before can be
+/// taken back; a case a variable is bound to is not known until the
+/// rule runs.
+fn unlisted(read: &Read) -> Result<(), Error> {
+    for field in read.fields.iter().filter(|field| !field.listed.is_empty()) {
+        let Term::Entity(entity) = &field.term else {
+            continue;
+        };
+        let Some(case) = entity
+            .strip_suffix(':')
+            .filter(|case| !case.is_empty() && !case.contains(':'))
+        else {
+            continue;
+        };
+        if !field.listed.iter().any(|listed| listed == case) {
+            let cases: Vec<String> = field.listed.iter().map(|case| format!(":{case}")).collect();
+            return Err(Error::Refused(format!(
+                "`:{case}` is not a case of {}, whose cases are [{}]",
+                field.attribute,
+                cases.join(" ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A write says every field of what it writes. A field an expansion

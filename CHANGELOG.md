@@ -128,6 +128,12 @@ What this changes for you:
   compile refusal once per form. An element a view does not make,
   `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
   it would let a row's values reach script.
+- A case a listed type does not list, written as a constant, is
+  refused naming the listing: `(assert (k x:1 lvl: :huge))` under
+  `as: [:low :mid :high]`, the same in a write with a `when`, in a rule's
+  head and in a command, where it was stored. A retract of such a case
+  is not refused, so a claim stored before can be taken back. A case a
+  variable carries is still written as it is bound (gaps row 55).
 - A retract through a concept by its entity alone, `(retract (p x:1))`
   or a rule's `(retract (p ?t))`, retracts every claim of each of the
   concept's fields on that entity, where it retracted only the claim a
