@@ -642,6 +642,22 @@ impl Match {
         }
     }
 
+    /// Bind `name` to `value` in place of what this row holds for it: a
+    /// read that views the value through a type (a number read as
+    /// another number type) replaces the value it was given. A binding
+    /// an ancestor holds is shadowed, not changed.
+    pub(crate) fn rebind(&mut self, name: &str, value: Value) {
+        let slot = Slot::Bound(Binding::Present(value));
+        match self
+            .bindings
+            .iter_mut()
+            .find(|(bound, _)| bound.as_ref() == name)
+        {
+            Some((_, existing)) => *existing = slot,
+            None => self.bindings.push((Arc::from(name), slot)),
+        }
+    }
+
     /// [`Self::bind`] for a variable given by name and kind, so a
     /// caller holding a typed term need not widen it to a
     /// `Term<Any>` (a copy of its name) for every value it binds.
