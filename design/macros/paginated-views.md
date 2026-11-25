@@ -38,7 +38,7 @@ the query that collects it:
 ```clj
 (query (message/item ?m is: ?item)
   (message ?m body: ?body author: ?who)
-  (person/chip ?who is: (collect ?chip))
+  (person/chip ?who is: (distinct ?chip))
   (view ?item [:li ?chip ?body]))
 
 (query (log/segment ?channel from: ?lower to: ?upper is: ?rows)

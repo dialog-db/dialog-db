@@ -52,14 +52,14 @@
 //!
 //! ## What a collection holds, and what is counted
 //!
-//! `(collect ?x)` gathers the values a field takes across the rows into
+//! `(distinct ?x)` gathers the values a field takes across the rows into
 //! one value, and that value is a set: equal values are one. `(count ?x)`
 //! of it is the size of the set. It is the one function of a collection
 //! there is: `count-distinct`, `sum`, `min`, `max` and `avg` are not
 //! there yet, and a fold in a rule is refused, the notation's in a rule
 //! that writes and Dialog-DB's in a rule that derives. So of three items
 //! titled "same", "same" and "other", the titles are two, and the count
-//! of them is 2. To count the items, collect something that holds each,
+//! of them is 2. To count the items, gather something that holds each,
 //! a record with the entity in it, and count that:
 //!
 //! ```
@@ -78,13 +78,13 @@
 //!   (assert (item item:2 title: "same"))
 //!   (assert (item item:3 title: "other"))
 //!
-//!   (query (item/titles is: ?all) (item _ title: (collect ?all)))
+//!   (query (item/titles is: ?all) (item _ title: (distinct ?all)))
 //!   (query (item/size is: ?s)
-//!     (item _ title: (collect ?all))
+//!     (item _ title: (distinct ?all))
 //!     (is ?s {:titles (count ?all)}))
 //!   (query (item/card ?t is: ?c) (item ?t title: ?x) (is ?c {:id ?t :title ?x}))
 //!   (query (item/count is: ?s)
-//!     (item/card _ is: (collect ?cards))
+//!     (item/card _ is: (distinct ?cards))
 //!     (is ?s {:items (count ?cards)}))
 //!
 //!   (select (item/titles is: ?all))
@@ -124,14 +124,14 @@
 //!
 //! Against Datomic, whose choices these follow and part from: an
 //! aggregate stands only where nothing is derived, in a query's answer
-//! as in Datomic's `:find`, never in a rule; a collection is a set, as
-//! Datomic's `distinct` gives one. There is no `count` over the rows of
+//! as in Datomic's `:find`, never in a rule; what a read gathers is
+//! marked `(distinct ?x)`, Datomic's word, and is a set, as Datomic's
+//! `distinct` gives one. There is no `count` over the rows of
 //! a query, which in Datomic counts tuples and so counts a value once for
 //! each row it stands in, and no `:with` to keep a variable that tells
 //! rows apart: here a set merges equal answers, and entities are counted
-//! by collecting what holds each of them, as above. (The marker's word,
-//! `collect`, or Datomic's `distinct`, is open: `design/macros/gaps.md`
-//! row 14.)
+//! by gathering what holds each of them, as above. `(collect ?x)`, the
+//! word before `distinct`, is refused saying so.
 
 mod analyze;
 mod check;

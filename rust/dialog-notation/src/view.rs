@@ -6,7 +6,7 @@
 //! ```clj
 //! (query (todo/row ?t list: ?l is: ?row)
 //!   (todo ?t list: ?l title: ?title)
-//!   (todo/chip ?t is: (collect ?chips))
+//!   (todo/chip ?t is: (distinct ?chips))
 //!   (view ?row [:li ?title ?chips]))
 //! ```
 //!
@@ -269,7 +269,7 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
             {
                 return Err(refused(format!(
                     "{tree}: a view nested by reference is a query collected, `(todo/row _ is: \
-                     (collect ?rows))`, its variable put where it stands"
+                     (distinct ?rows))`, its variable put where it stands"
                 )));
             }
             let mut element = Element {
@@ -300,13 +300,13 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
         Syntax::Map(_) => {
             return Err(refused(format!(
                 "{tree} in a template: a view nested by reference is a query collected, \
-                 `(todo/row _ is: (collect ?rows))`, its variable put where it stands"
+                 `(todo/row _ is: (distinct ?rows))`, its variable put where it stands"
             )));
         }
         Syntax::Application(..) if tree.applies() == Some("view") => {
             return Err(refused(format!(
                 "{tree} in a template: a view is a query whose answer is markup, and one in a \
-                 template is that query collected, `(todo/chip ?t is: (collect ?chips))`, its \
+                 template is that query collected, `(todo/chip ?t is: (distinct ?chips))`, its \
                  variable put where it stands"
             )));
         }

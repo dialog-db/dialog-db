@@ -4,7 +4,7 @@
 
 **For:** a notebook with no block is no `notebook` with a block (no entry, no row, decided 2026-11-18), and still whoever asks for a notebook expects its blocks, none included. A to-do with no tag keeps its `li`. A count of nothing is 0.
 
-**Decided** by the maintainer, by voice, on 2026-11-18, and built in two stages: rows, `select` and `collect` (stage 1), and views as queries (stage 2). How each part got here is in the [journal](journal.md).
+**Decided** by the maintainer, by voice, on 2026-11-18, and built in two stages: rows, `select` and `collect` (stage 1), and views as queries (stage 2). How each part got here is in the [journal](journal.md). The marker is `(distinct ?x)` since 2026-11-25 (journal, "the marker is distinct"); `collect`, the word it was built as, is refused as a former word.
 
 ## Two layers
 
@@ -52,13 +52,13 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 | | one at a time: a row for each, and no row for none | the whole: one row, and empty for none |
 |---|---|---|
-| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: (collect ?tags))`, a set: a map with no names |
-| a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: (collect ?blocks))`, a map |
+| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: (distinct ?tags))`, a set: a map with no names |
+| a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: (distinct ?blocks))`, a map |
 
-- `collect` stands where an elector does. `(max ?s)` chooses one of a field's claims; `(collect ?s)` takes every one.
+- `distinct` stands where an elector does. `(max ?s)` chooses one of a field's claims; `(distinct ?s)` takes every one.
 - Key and value are paired because they were never apart: an entry is one term.
 - What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`, stored in a record as a list. No list as such: many values have no order, and a sequence's order is in its keys.
-- A pattern takes one value apart; `collect` puts many rows together. `{…}` and `[…]` in a condition are always the first.
+- A pattern takes one value apart; `distinct` puts many rows together. `{…}` and `[…]` in a condition are always the first.
 - **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank. A query of an entity that only collects is refused: nothing would say which entities. A query of no entity that only collects answers once, and that is an index.
 - It is a fold, so it is refused in a `rule`.
 - A write goes through one entry: `(assert (notebook/blocks ?n block: {"N3" block:x}))`. The whole is not written.
@@ -79,7 +79,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 ```clj
 (query (todo/card ?t is: ?card)
   (todo ?t title: ?title)
-  (todo/tag ?t tag: (collect ?tags))
+  (todo/tag ?t tag: (distinct ?tags))
   (is ?card {:title ?title :tags ?tags}))
 ```
 
@@ -99,7 +99,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 (query (todo/row ?t list: ?l is: ?row)
   (todo ?t list: ?l title: ?title)
-  (todo/chip ?t is: (collect ?chips))
+  (todo/chip ?t is: (distinct ?chips))
   (view ?row [:li ?title ?chips]))
 ```
 ```html
@@ -114,7 +114,7 @@ Written `(todo/chip ?t is: ?chip)`, one at a time, "Call mum" has no `li`.
 ```clj
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
-  (notebook/blocks ?n block: (collect ?blocks))
+  (notebook/blocks ?n block: (distinct ?blocks))
   (is ?outline {:title ?title :blocks ?blocks}))
 ```
 
@@ -132,7 +132,7 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
-  (notebook/source ?n is: (collect ?sources))
+  (notebook/source ?n is: (distinct ?sources))
   (is ?outline {:title ?title :blocks ?sources}))
 ```
 
@@ -155,8 +155,8 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 (query (notebook/ui ?n is: ?ui)
   (notebook/named ?n title: ?title)
-  (notebook/order-item ?n is: (collect ?order))
-  (notebook/block-row _ notebook: ?n is: (collect ?rows))
+  (notebook/order-item ?n is: (distinct ?order))
+  (notebook/block-row _ notebook: ?n is: (distinct ?rows))
   (view ?ui
     [:notebook-save {:style "display: block;"}
       [:tonk-notebook {:data-subject ?n :data-notebook ?n :title ?title
@@ -181,10 +181,10 @@ This morning's six views are six queries. Four are a row each, like this one, an
 
 (query (table/ui ?t is: ?ui)
   (table ?t name: ?name)
-  (table/sheet-row _ is: (collect ?sheets))
-  (table/cell-row _ is: (collect ?cells))
-  (table/column-row _ is: (collect ?columns))
-  (table/rowsize-row _ is: (collect ?sizes))
+  (table/sheet-row _ is: (distinct ?sheets))
+  (table/cell-row _ is: (distinct ?cells))
+  (table/column-row _ is: (distinct ?columns))
+  (table/rowsize-row _ is: (distinct ?sizes))
   (view ?ui
     [:tonk-table {:subject ?t
                   ; the nine :on/ bindings, as before
@@ -200,7 +200,7 @@ The directory has no entity in its head, as a command's concept has none. It ans
 
 ```clj
 (query (table/directory is: ?directory)
-  (table/ui _ is: (collect ?tables))
+  (table/ui _ is: (distinct ?tables))
   (view ?directory [:div {:class "table-directory"} ?tables]))
 ```
 
@@ -210,7 +210,7 @@ This was the one view of eleven that repeated the wrong element under the marker
 
 **The maintainer's: not `{... ?x}`.** It does not say whether it takes a value apart or puts rows together, and those are different things.
 
-| | a word: `(collect ?blocks)` | the spread: `{... ?blocks}` |
+| | a word: `(distinct ?blocks)` | the spread: `{... ?blocks}` |
 |---|---|---|
 | says which it is | 🟢 only ever puts together | 🔴 a pattern's rest, which takes apart; here it would put together |
 | says it does not gate | 🟢 by a word an error can name | by what a rest is |
@@ -228,9 +228,9 @@ This was the one view of eleven that repeated the wrong element under the marker
 | `?..x` | a variable named `..x`, with no error | none |
 | `{?..x}` | a struct that ends on a key, which gets a blank value | none; and under `{?k ?b}` it is an entry with any value |
 
-Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the word explains itself, sits with the electors, and is what an error would say anyway.
+Of the four, `?..x`. Against `(distinct ?x)` it is shorter and adds no form; the word explains itself, sits with the electors, and is what an error would say anyway.
 
-**Decided 2026-11-18, by the maintainer: `(collect ?x)`.**
+**Decided 2026-11-18, by the maintainer: `(distinct ?x)`.**
 
 ## What it replaces
 
@@ -248,7 +248,7 @@ Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the 
 
 - **A rule that must read a fold.** tonk's library has no fold in any rule; where it counts, an element's script does.
 - **A real view that reads worse.** Every repeated part built from more than one field is a query with a name. The notebook's page is three queries for two views; the table's are six for six. Neither is run.
-- **Readers.** None of it has met one: not the head with `is:`, not `{?k ?b}`, not `collect` on a field.
+- **Readers.** None of it has met one: not the head with `is:`, not `{?k ?b}`, not `distinct` on a field.
 
 ## Open
 
@@ -279,7 +279,7 @@ Built on #773, 2026-11-18, in `rust/dialog-notation`: `src/select.rs`, `src/expa
 - **A row is kept whole.** A query of several reads read back through its head's entity crosses the values of one entity (the view plan's workaround picks the entity that fixes most). Here each row's entity is `(id ?query-row c0: ?a c1: ?b …)` of all its values, so a row is its values and nothing else.
 - **The entry.** `block: {?k ?b}` in a concept's head; a head with the key as a field of its own is refused. A pattern takes `{?k ?b}` apart against one entry, the one place a key is a variable. Assert and retract go through one entry.
 - **Sets.** `{: 1 : 2}` reads and prints as written. A map that names some keys and not others is refused. Written into a record it is a list, its members in the order of their values, each once; it reads back as that list.
-- **Refused:** a query of an entity that only collects; a term of a collecting read bound by nothing that does not collect; `collect` in a rule, in a concept, under `unless`, in what is asked, and in a write's head ("writes the whole of a field"); a rule or a concept that applies a query; a query that calls itself; a function of a collection other than `count`.
+- **Refused:** a query of an entity that only collects; a term of a collecting read bound by nothing that does not collect; `distinct` in a rule, in a concept, under `unless`, in what is asked, and in a write's head ("writes the whole of a field"); a rule or a concept that applies a query; a query that calls itself; a function of a collection other than `count`.
 
 **Where it differs from the sketch, and why:**
 
@@ -307,8 +307,8 @@ flowchart TD
 - **What is collected is put in place.** A query collected into markup has its template put where its variable stands, its variables named apart (`[q1]`, `[q2]` …, names no document can spell), and its required conditions a layer under the element it stands in. Calls are not mounted; the whole page is one plan, one subscription a layer.
 - **What tells instances apart.** The root by the query's entity, or once for a query of no entity. A query collected by the terms of its head the call leaves free, an entry's key first, so the order stands by position and a set by its values.
 - **A count** is a layer whose instances are counted and never shown, under the element that shows it: `0 open`, and `1 open` when a to-do arrives, one text set.
-- **A layer that does not bind a key above it takes that layer's conditions too**, so `(table/sheet-row _ is: (collect ?sheets))` gives every sheet under each table. Its rows are re-read when the table's conditions change.
-- **A query not found** under a declared concept is shown as its source, now from the collecting read, `(todo/missing _ list: ?l is: (collect ?items))`.
+- **A layer that does not bind a key above it takes that layer's conditions too**, so `(table/sheet-row _ is: (distinct ?sheets))` gives every sheet under each table. Its rows are re-read when the table's conditions change.
+- **A query not found** under a declared concept is shown as its source, now from the collecting read, `(todo/missing _ list: ?l is: (distinct ?items))`.
 - **Removed:** the view form, its call, `{:view …}`, `Plan::repeating` and the marker rule, `Plan::called`, the read of `key: ?k block: ?b` as an entry. Each is refused with a message that points to a query.
 - **The sketches.** `notebook-views.clj` and `table-views.clj` are queries, `:on/` bindings in full. The view forms in `notebook.clj` and `table.clj` are taken out, with a line saying where they went. The measures read the views' file after the sketch.
 

@@ -6,7 +6,7 @@
 //! `(is ?x shape)` for what a variable is. A condition is one of:
 //!
 //! - a read or a call of another query, which every answer needs;
-//! - a read or a call with `(collect ?x)` for one of its terms, which
+//! - a read or a call with `(distinct ?x)` for one of its terms, which
 //!   binds `?x` to the whole of that term, `{}` for none, and never
 //!   keeps a row from being an answer.
 //!
@@ -21,12 +21,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
-use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
+use crate::select::{
+    COLLECT, COUNT, DISTINCT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function,
+};
 use crate::syntax::{Parameters, Signature, Syntax};
 
 use super::{Expander, apply, items, open};
 
-/// Where in a condition its `(collect ?x)` stands.
+/// Where in a condition its `(distinct ?x)` stands.
 #[derive(Clone, Debug)]
 enum Place {
     /// The part with no label at this index: the entity.
@@ -66,7 +68,7 @@ const ROW_ENTITY: &str = "[query-row]";
 fn collects_in(tree: &Syntax) -> Vec<&Syntax> {
     let mut found = Vec::new();
     fn walk<'a>(tree: &'a Syntax, found: &mut Vec<&'a Syntax>) {
-        if tree.applies() == Some(COLLECT) {
+        if tree.applies() == Some(DISTINCT) {
             found.push(tree);
             return;
         }
@@ -141,7 +143,7 @@ fn asks(tree: &Syntax) -> Error {
 
 impl Expander {
     /// What the forms of the query layer are: a definition kept, a
-    /// question of a query analyzed, and the refusals of `collect`
+    /// question of a query analyzed, and the refusals of `distinct`
     /// and of a query read where rows are. `None` for any other tree.
     pub(super) fn query_forms(&mut self, tree: &Syntax) -> Result<Option<Vec<Syntax>>, Error> {
         match tree.applies() {
@@ -156,7 +158,7 @@ impl Expander {
                         Err(Error::Refused(format!(
                             "{found} stands in what is asked: the whole of a field is collected \
                              in a query's body, `(query (todo/card ?t is: ?card) … (todo/tag ?t \
-                             tag: (collect ?tags)) …)`, and the query is asked"
+                             tag: (distinct ?tags)) …)`, and the query is asked"
                         )))
                     });
                 }
@@ -188,7 +190,7 @@ impl Expander {
             Some("view") => Err(Error::Refused(format!(
                 "{tree}: a view is a query whose answer is markup, `(query (todo/row ?t is: \
                  ?row) (todo ?t title: ?title ...) (view ?row [:li ?title]))`, and a view in a \
-                 template is a query collected, `(todo/chip ?t is: (collect ?chips))`"
+                 template is a query collected, `(todo/chip ?t is: (distinct ?chips))`"
             ))),
             Some(word @ ("rule" | "concept" | "assert" | "retract")) => {
                 let word = word.to_string();
@@ -217,7 +219,7 @@ impl Expander {
                     };
                     return self.about(&found, |_| {
                         Err(Error::Refused(format!(
-                            "{found} stands in a {word}, and collect stands only in a query: \
+                            "{found} stands in a {word}, and distinct stands only in a query: \
                              {why}"
                         )))
                     });
@@ -415,8 +417,8 @@ impl Expander {
         let all = collects_in(condition);
         if all.len() > places.len() {
             return Err(Error::Refused(format!(
-                "{} stands inside a term: collect is a term of a read, `(todo/tag ?t tag: \
-                 (collect ?tags))`",
+                "{} stands inside a term: distinct is a term of a read, `(todo/tag ?t tag: \
+                 (distinct ?tags))`",
                 all[0]
             )));
         }

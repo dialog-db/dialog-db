@@ -661,8 +661,8 @@ mod tests {
         let concept =
             "(concept (n ?n title: ?t) (xyz.n/title of: ?n is: ?t as: :text cardinality: :one))";
         for read in [
-            "(nothing ?n block: (collect ?b))",
-            "(n ?n other: (collect ?b))",
+            "(nothing ?n block: (distinct ?b))",
+            "(n ?n other: (distinct ?b))",
         ] {
             let checked = check(
                 &mut Analyzer::new()?,
@@ -747,7 +747,7 @@ mod tests {
                 "(concept (notebook/named ?n title: ?t) \
                  (xyz.tonk.notebook/title of: ?n is: ?t as: :text cardinality: :one))",
                 "(query (notebook/outline ?n is: ?o) (notebook/named ?n title: ?t) \
-                 (notebook/blocks ?n block: (collect ?blocks)) (is ?o {:title ?t :blocks ?blocks}))",
+                 (notebook/blocks ?n block: (distinct ?blocks)) (is ?o {:title ?t :blocks ?blocks}))",
                 "(select (notebook/outline ?n is: ?o))",
             ],
         ];

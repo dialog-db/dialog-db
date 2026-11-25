@@ -1439,7 +1439,7 @@ async fn it_tells_a_count_what_it_counts() -> Result<()> {
         .await
         .map_err(|error| format!("{error:#}"));
     assert!(
-        matches!(&counted, Err(said) if said.contains("count counts what was collected")
+        matches!(&counted, Err(said) if said.contains("count counts what was gathered")
             && said.contains("a set")
             && said.contains("(distinct ?cards)")),
         "{counted:?}"

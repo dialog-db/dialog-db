@@ -1109,7 +1109,7 @@ mod tests {
               (view ?item [:li ?title]))
             (query (list/card ?l is: ?card)
               (list ?l name: ?name)
-              (todo/item _ list: ?l is: (collect ?items))
+              (todo/item _ list: ?l is: (distinct ?items))
               (view ?card [:article [:h2 ?name] [:ul ?items]]))
             (select (list/card ?l is: ?card))"#;
         let analysis = Analyzer::new().unwrap().analyze(&parse(document).unwrap());
@@ -1288,12 +1288,12 @@ mod tests {
               (view ?chip [:span ?g]))
             (query (todo/item ?t list: ?l is: ?item)
               (todo ?t list: ?l title: ?title state: ?s)
-              (todo/chip ?t is: (collect ?chips))
+              (todo/chip ?t is: (distinct ?chips))
               (view ?item [:li {:class ?s} ?title ?chips]))
             (query (list/summary ?l is: ?card)
               (list ?l name: ?name)
-              (todo (collect ?open) list: ?l state: :open ...)
-              (todo/item _ list: ?l is: (collect ?items))
+              (todo (distinct ?open) list: ?l state: :open ...)
+              (todo/item _ list: ?l is: (distinct ?items))
               (is ?count (count ?open))
               (view ?card [:article [:h2 ?name] [:p ?count " open"] [:ul ?items]]))
             (select (list/summary ?l is: ?card))"#;

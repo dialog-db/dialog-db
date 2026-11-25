@@ -6,7 +6,7 @@
 //! ```clj
 //! (query (todo/card ?t is: ?card)
 //!   (todo ?t title: ?title)
-//!   (todo/tag ?t tag: (collect ?tags))
+//!   (todo/tag ?t tag: (distinct ?tags))
 //!   (is ?card {:title ?title :tags ?tags}))
 //!
 //! (select (todo/card ?t is: ?card))
@@ -71,6 +71,12 @@ pub const COUNT: &str = "count";
 /// What collects the whole of a field.
 pub const COLLECT: &str = "collect";
 
+/// What a read gathers is marked with: `(distinct ?x)`, the set of the
+/// distinct values the field takes, Datomic's word. `collect`, the word
+/// before it, names the gathering in the analyzed tree, and a document
+/// that writes it is refused ([`COLLECT`]).
+pub const DISTINCT: &str = "distinct";
+
 /// A row: what each variable was bound to.
 pub type Row = BTreeMap<String, Syntax>;
 
@@ -132,20 +138,20 @@ pub fn order(a: &Syntax, b: &Syntax) -> Ordering {
     a.to_string().cmp(&b.to_string())
 }
 
-/// Whether `tree` is `(collect ?x)`, and the variable if so.
+/// Whether `tree` is `(distinct ?x)`, and the variable if so.
 pub fn collected(tree: &Syntax) -> Option<Result<&str, Error>> {
-    if tree.applies() != Some(COLLECT) {
+    if tree.applies() != Some(DISTINCT) {
         return None;
     }
     Some(match tree.operand() {
         Some(Parameters { items, terms }) if terms.is_empty() => match items.as_slice() {
             [Syntax::Variable(name)] => Ok(name.as_str()),
             _ => Err(Error::Refused(format!(
-                "{tree}: collect takes one variable, what the whole of the field is bound to"
+                "{tree}: distinct takes one variable, what the whole of the field is bound to"
             ))),
         },
         _ => Err(Error::Refused(format!(
-            "{tree}: collect takes one variable, what the whole of the field is bound to"
+            "{tree}: distinct takes one variable, what the whole of the field is bound to"
         ))),
     })
 }
@@ -1060,11 +1066,11 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
                 other => {
                     return Err(Error::Refused(format!(
                         "{shape}: {other} is not the whole of a field, and count counts what was \
-                         collected, `(collect ?x)`, which is a set: equal values are one. To \
-                         count entities, collect something that holds each, a record with the \
+                         gathered, `(distinct ?x)`, which is a set: equal values are one. To \
+                         count entities, gather something that holds each, a record with the \
                          entity in it, and count that: `(query (item/card ?t is: ?c) (item ?t \
                          title: ?x) (is ?c {{:id ?t :title ?x}}))`, then `(item/card _ is: \
-                         (collect ?cards))` and `(count ?cards)`"
+                         (distinct ?cards))` and `(count ?cards)`"
                     )));
                 }
             },

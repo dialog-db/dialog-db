@@ -274,6 +274,37 @@ fn malformed(tree: &Syntax) -> Option<(&Syntax, String)> {
     None
 }
 
+/// The first `(collect ?x)` in `tree` as written: the marker of what a
+/// read gathers before it was `distinct`. Only its shape, one part and
+/// no label: `collect` as a name is refused as one of the notation's own
+/// words. What is quoted is not a form.
+fn collected_as_before(tree: &Syntax) -> Option<&Syntax> {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            Syntax::Application(operator, operand) => {
+                if part.applies() == Some(crate::select::COLLECT)
+                    && operand.items.len() == 1
+                    && operand.terms.is_empty()
+                {
+                    return Some(part);
+                }
+                open.push(operator);
+                open.extend(operand.terms.values().rev());
+                open.extend(operand.items.iter().rev());
+            }
+            Syntax::Map(entries) => entries.iter().rev().for_each(|(key, value)| {
+                open.push(value);
+                open.push(key);
+            }),
+            Syntax::Tuple(items) => open.extend(items.iter().rev()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The first read of a domain in `tree` as written with a label that
 /// makes an attribute longer than Dialog-DB keeps, the label and the
 /// attribute: `(xyz.t ?x label: …)` reads `xyz.t/label`. What is quoted
@@ -1602,6 +1633,15 @@ impl Expander {
         if let Some((part, name)) = reserved(tree) {
             let part = part.clone();
             return self.about(&part, |_| Err(Error::Reserved(name)));
+        }
+        if let Some(part) = collected_as_before(tree) {
+            let part = part.clone();
+            return self.about(&part, |_| {
+                Err(Error::Refused(format!(
+                    "{part}: `collect` is written `distinct`, `(distinct ?x)`: what a read \
+                     gathers is the set of the distinct values the field takes, Datomic's word"
+                )))
+            });
         }
         if let Some((part, name)) = malformed(tree) {
             let part = part.clone();
@@ -4375,8 +4415,9 @@ mod tests {
                 let refused = expanded("", &text).unwrap_err().to_string();
                 // `collect` in a concept is refused before its name is
                 // asked about, saying where it stands.
-                let collected =
-                    word == "collect" && refused.contains("collect stands only in a query");
+                let collected = word == "distinct"
+                    && refused.contains("distinct stands only in a query")
+                    || word == "collect" && refused.contains("`collect` is written `distinct`");
                 assert!(
                     collected
                         || refused.contains(&format!("declares a {what} named `{word}`"))
@@ -4674,6 +4715,7 @@ mod tests {
                 POSITION,
                 crate::kernel::QUOTE,
                 crate::select::COLLECT,
+                crate::select::DISTINCT,
                 "site",
             ]
             .map(String::from),
@@ -4830,7 +4872,9 @@ mod tests {
             let refused = expanded("", &text).unwrap_err().to_string();
             // `collect` in a rule is refused before its name is asked
             // about, saying where it stands.
-            let collected = word == "collect" && refused.contains("collect stands only in a query");
+            let collected = word == "distinct"
+                && refused.contains("distinct stands only in a query")
+                || word == "collect" && refused.contains("`collect` is written `distinct`");
             assert!(
                 collected
                     || refused.contains(&format!("declares a macro named `{word}`"))
