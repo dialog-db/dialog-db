@@ -49,6 +49,89 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## What a collection holds, and what is counted
+//!
+//! `(collect ?x)` gathers the values a field takes across the rows into
+//! one value, and that value is a set: equal values are one. `(count ?x)`
+//! of it is the size of the set. It is the one function of a collection
+//! there is: `count-distinct`, `sum`, `min`, `max` and `avg` are not
+//! there yet, and a fold in a rule is refused, the notation's in a rule
+//! that writes and Dialog-DB's in a rule that derives. So of three items
+//! titled "same", "same" and "other", the titles are two, and the count
+//! of them is 2. To count the items, collect something that holds each,
+//! a record with the entity in it, and count that:
+//!
+//! ```
+//! # use dialog_notation::live::Live;
+//! # use dialog_notation::{Analyzer, Step, check};
+//! # use dialog_peer::helpers::{test_repo, test_session_with_peer};
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> anyhow::Result<()> {
+//! # let (operator, profile) = test_session_with_peer().await;
+//! # let repo = test_repo(&operator, &profile).await;
+//! # let mut branch = repo.branch("main").open().perform(&operator).await?;
+//! let document = r#"
+//!   (concept (item ?t title: ?x)
+//!     (xyz.item/title of: ?t is: ?x as: :text cardinality: :one))
+//!   (assert (item item:1 title: "same"))
+//!   (assert (item item:2 title: "same"))
+//!   (assert (item item:3 title: "other"))
+//!
+//!   (query (item/titles is: ?all) (item _ title: (collect ?all)))
+//!   (query (item/size is: ?s)
+//!     (item _ title: (collect ?all))
+//!     (is ?s {:titles (count ?all)}))
+//!   (query (item/card ?t is: ?c) (item ?t title: ?x) (is ?c {:id ?t :title ?x}))
+//!   (query (item/count is: ?s)
+//!     (item/card _ is: (collect ?cards))
+//!     (is ?s {:items (count ?cards)}))
+//!
+//!   (select (item/titles is: ?all))
+//!   (select (item/size is: ?s))
+//!   (select (item/count is: ?s))"#;
+//! # let checked = check(&mut Analyzer::new()?, document);
+//! # assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
+//! # let mut transaction = branch.transaction();
+//! # let mut selections = Vec::new();
+//! # for step in checked.steps {
+//! #     match step {
+//! #         Step::Assert(statement) => transaction = transaction.assert(statement),
+//! #         Step::Select(selection) => selections.push(*selection),
+//! #         _ => {}
+//! #     }
+//! # }
+//! # transaction.commit().publish().perform(&operator).await?;
+//! # branch.refresh(&operator).await?;
+//! # let live = Live::new(branch.clone());
+//! # let mut answers = Vec::new();
+//! # for selection in &selections {
+//! #     for answer in live.select(selection, &operator).await? {
+//! #         answers.push(answer.to_string());
+//! #     }
+//! # }
+//! assert_eq!(
+//!     answers,
+//!     [
+//!         r#"(item/titles is: {: "other" : "same"})"#,
+//!         "(item/size is: {:titles 2})",
+//!         "(item/count is: {:items 3})",
+//!     ]
+//! );
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Against Datomic, whose choices these follow and part from: an
+//! aggregate stands only where nothing is derived, in a query's answer
+//! as in Datomic's `:find`, never in a rule; a collection is a set, as
+//! Datomic's `distinct` gives one. There is no `count` over the rows of
+//! a query, which in Datomic counts tuples and so counts a value once for
+//! each row it stands in, and no `:with` to keep a variable that tells
+//! rows apart: here a set merges equal answers, and entities are counted
+//! by collecting what holds each of them, as above. (The marker's word,
+//! `collect`, or Datomic's `distinct`, is open: `design/macros/gaps.md`
+//! row 14.)
 
 mod analyze;
 mod check;
