@@ -147,8 +147,18 @@ fn last(listed: &[Value], value: &Value) -> usize {
 }
 
 /// The order of two values, falling back on their encoding for values
-/// the comparable order does not relate, so the order stays total.
+/// the comparable order does not relate, so the order stays total. Two
+/// numbers of different types order by value ([`Value::cmp_number`]),
+/// numbers being one stratum: a float does not outrank every natural.
+/// Values of one type, and values of different types that are not both
+/// numbers, order as [`Value`]'s own order does: by type first, which
+/// only a field of no type holding several types meets.
 fn compare(a: &Value, b: &Value) -> Ordering {
+    if a.data_type() != b.data_type()
+        && let Some(order) = a.cmp_number(b)
+    {
+        return order;
+    }
     a.partial_cmp(b)
         .unwrap_or_else(|| a.tiebreak().cmp(&b.tiebreak()))
 }
