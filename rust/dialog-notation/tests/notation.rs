@@ -4367,3 +4367,33 @@ async fn it_refuses_a_case_the_listing_does_not_list() -> Result<()> {
     assert_eq!(report(&mut notebook, lvl).await?, Vec::<String>::new());
     Ok(())
 }
+
+/// A formula in the head of a write with a `when` is computed from what
+/// the `when` matched, as the same head in a rule is: each match writes
+/// its value, also inside a type and in two fields at once.
+#[dialog_common::test]
+async fn it_computes_a_formula_in_the_head_of_a_write_with_a_when() -> Result<()> {
+    let concept = r#"(concept (n ?t v: ?v w: ?w)
+          (xyz.n/v of: ?t is: ?v as: :integer cardinality: :one)
+          (xyz.n/w of: ?t is: ?w as: :integer cardinality: :one))"#;
+    let read = "(select (n ?t v: ?v w: ?w))";
+    for (write, after) in [
+        (
+            "(assert (n ?t v: (+ ?v : 1) w: ?w) (when (n ?t v: ?v w: ?w)))",
+            ["(xyz.n x:1 v: 2 w: 10)", "(xyz.n x:2 v: 6 w: 20)"],
+        ),
+        (
+            "(assert (n ?t v: (:integer (* ?v : 3)) w: (- ?w : ?v)) (when (n ?t v: ?v w: ?w)))",
+            ["(xyz.n x:1 v: 3 w: 9)", "(xyz.n x:2 v: 15 w: 15)"],
+        ),
+    ] {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(concept).await?;
+        notebook
+            .submit("(assert (n x:1 v: 1 w: 10)) (assert (n x:2 v: 5 w: 20))")
+            .await?;
+        notebook.submit(write).await?;
+        assert_eq!(report(&mut notebook, read).await?, after, "{write}");
+    }
+    Ok(())
+}
