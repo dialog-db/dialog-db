@@ -1865,7 +1865,8 @@ async fn it_says_an_unbound_head_variable_as_the_author_wrote_it() -> Result<()>
 }
 
 /// Concepts whose bodies read each other round cannot expand to
-/// anything finite: whichever is written first, of two or of three, the
+/// anything finite: one that reads itself, and whichever is written
+/// first of two or of three, the
 /// document is refused as a cycle naming every concept on it, and
 /// nothing is declared.
 #[dialog_common::test]
@@ -1880,6 +1881,7 @@ async fn it_refuses_concepts_that_read_each_other_round_in_any_order() -> Result
         "(concept (r ?t v: ?x) (p ?t v: ?x))",
     ];
     for (forms, names) in [
+        (vec!["(concept (s ?t v: ?x) (s ?t v: ?x))"], vec!["(s "]),
         (vec![two[0], two[1]], vec!["(a ", "(b "]),
         (vec![two[1], two[0]], vec!["(a ", "(b "]),
         (
@@ -1903,8 +1905,9 @@ async fn it_refuses_concepts_that_read_each_other_round_in_any_order() -> Result
             "{text}: {refused:?}"
         );
         // Nothing was declared: a later read of either is no concept.
+        let read = format!("(select {}?t v: ?x))", names[0]);
         let unknown = notebook
-            .submit("(select (a ?t v: ?x))")
+            .submit(&read)
             .await
             .map_err(|error| error.downcast::<Error>());
         assert!(
