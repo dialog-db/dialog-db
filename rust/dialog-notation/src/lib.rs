@@ -194,9 +194,10 @@ pub enum Error {
     /// A document writes a name the build writes itself, the one given.
     #[error("{0} is a name the notation writes itself, and a document cannot")]
     Reserved(String),
-    /// Two sites of a document would derive into one relation, the one
-    /// named, each said as its form.
-    #[error("{0} would be the relation of two sites, {1} and {2}")]
+    /// Two sites would derive into one relation, the one named, each
+    /// said as its form where it is known. What is shown names the sites,
+    /// not the relation, which is the notation's own.
+    #[error("{1} and {2} would derive into one relation and answer as one: write one apart")]
     Clash(String, String, String),
     /// A view's template lets data reach script, at the part given: an
     /// element that runs what it holds, an inline handler, or a URL a

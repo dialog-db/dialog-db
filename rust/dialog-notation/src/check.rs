@@ -141,7 +141,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let mut analyzed = Vec::new();
     for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
         let tree = described(tree, &checked.written, *origin);
-        let compiled = compile(&tree);
+        let compiled = crate::compile::compiled(&tree);
         let shown = tree.to_string();
         analyzed.push(tree);
         match compiled {
@@ -270,47 +270,9 @@ fn spell(diagnostic: &mut Diagnostic, analyzer: &Analyzer) {
         .map(|error| error.said(&|text| said(text, analyzer)));
 }
 
-/// `text` as an author is given it: what the notation named spelled as
-/// written, and its variables untagged.
-fn said(text: &str, analyzer: &Analyzer) -> String {
-    untagged(&analyzer.spelled(text))
-}
-
-/// `text` with each variable the notation tagged as the author wrote it,
-/// `?t[0]` as `?t`, and one the notation made for no variable of the
-/// author's, `?[2]`, as `_`.
-fn untagged(text: &str) -> String {
-    let mut said = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find('?') {
-        said.push_str(&rest[..at]);
-        let tail = &rest[at + 1..];
-        let name_end = tail
-            .find(|c: char| !(c.is_alphanumeric() || "-_./*+!<>=".contains(c)))
-            .unwrap_or(tail.len());
-        let (name, after) = tail.split_at(name_end);
-        let tag = after
-            .strip_prefix('[')
-            .and_then(|inside| inside.find(']').map(|close| close + 2));
-        match tag {
-            Some(length) if name.is_empty() => {
-                said.push('_');
-                rest = &after[length..];
-            }
-            Some(length) => {
-                said.push('?');
-                said.push_str(name);
-                rest = &after[length..];
-            }
-            None => {
-                said.push('?');
-                said.push_str(name);
-                rest = after;
-            }
-        }
-    }
-    said.push_str(rest);
-    said
+/// `text` as an author is given it.
+fn said(text: &str, _analyzer: &Analyzer) -> String {
+    crate::syntax::told(text)
 }
 
 /// Each form of `steps` whose report relation is named as one of an

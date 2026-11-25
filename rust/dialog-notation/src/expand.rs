@@ -1152,10 +1152,6 @@ pub struct Expander {
     /// the tree: one the document declares as a concept after that tree
     /// was expanded was read as another relation than the one meant.
     misread: Vec<(usize, String)>,
-    /// The domain of each derived attribute read or written, a hash, with
-    /// the name it is written by, `list/count-open`: what a person is
-    /// shown in its place.
-    spelled: BTreeMap<String, String>,
     /// Each name read or concluded as a derived attribute, `todo/tag`,
     /// with the document that first did, by its number, and the form
     /// that did: a later document that declares the name a concept would
@@ -1195,42 +1191,6 @@ pub struct Expander {
 }
 
 impl Expander {
-    /// `text` with each derived attribute's domain this expander made
-    /// written as the name it was made of: `list/count-open` for its
-    /// `/is`, `list/count status:` for a label, `list/count` alone.
-    pub(crate) fn spelled(&self, text: &str) -> String {
-        let mut text = text.to_string();
-        for (domain, written) in &self.spelled {
-            let mut out = String::with_capacity(text.len());
-            let mut rest = text.as_str();
-            while let Some(at) = rest.find(domain.as_str()) {
-                out.push_str(&rest[..at]);
-                rest = &rest[at + domain.len()..];
-                match rest.strip_prefix('/') {
-                    Some(after) => {
-                        let end = after
-                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-                            .unwrap_or(after.len());
-                        match &after[..end] {
-                            "is" => out.push_str(written),
-                            label => {
-                                out.push_str(written);
-                                out.push(' ');
-                                out.push_str(label);
-                                out.push(':');
-                            }
-                        }
-                        rest = &after[end..];
-                    }
-                    None => out.push_str(written),
-                }
-            }
-            out.push_str(rest);
-            text = out;
-        }
-        text
-    }
-
     /// The concepts declared under `name` that a use written with
     /// `labels` fits: each has every label written, and, unless the use
     /// ends with `...`, no other. Two concepts of one
@@ -2344,8 +2304,6 @@ impl Expander {
                 && self.concepts.contains(concept)
             {
                 let domain = syntax::derived(concept, name)?;
-                self.spelled
-                    .insert(domain.clone(), format!("{concept}/{name}"));
                 let form = self
                     .document
                     .get(self.tree)

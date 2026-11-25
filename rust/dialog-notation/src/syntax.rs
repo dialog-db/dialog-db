@@ -106,20 +106,135 @@ pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
     Ok(hash)
 }
 
-/// The name each derived attribute's domain made in this process was
+/// How many derived attributes' names [`WRITTEN`] keeps: the latest
+/// made, 4096 of them, a few hundred kilobytes at most. A name made
+/// earlier than that and asked for again is made again by [`derived`];
+/// one only answered with is shown as its hash.
+pub const WRITTEN_KEPT: usize = 4096;
+
+/// The name each derived attribute's domain this process made lately was
 /// made of, `list/count-open`: what a person is shown in its place. A
-/// hash is made only by [`derived`], so every one this process answers
-/// with is here; each is a few dozen bytes, once.
-static WRITTEN: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+/// hash is made only by [`derived`]. It is filled before a document is
+/// known to be refused, so it is bounded, the oldest name let go first.
+static WRITTEN: Mutex<Made> = Mutex::new(Made {
+    names: BTreeMap::new(),
+    order: std::collections::VecDeque::new(),
+});
+
+/// The names [`WRITTEN`] keeps, and the order they were made in.
+struct Made {
+    names: BTreeMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl Made {
+    fn insert(&mut self, hash: String, name: String) {
+        if self.names.insert(hash.clone(), name).is_none() {
+            self.order.push_back(hash);
+        }
+        while self.order.len() > WRITTEN_KEPT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.names.remove(&oldest);
+            }
+        }
+    }
+}
 
 /// The name a derived attribute's domain was made of, `list/count-open`,
-/// where this process made it.
+/// where this process made it lately.
 pub fn written_derived(domain: &str) -> Option<String> {
     WRITTEN
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .names
         .get(domain)
         .cloned()
+}
+
+/// `text` as an author is told it, in one pass: each derived attribute's
+/// domain written as the name it was made of, `list/count-open` for its
+/// `/is` and `list/count status:` for a label; each variable the
+/// notation tagged as the author wrote it, `?t[0]` as `?t`, and one it
+/// made for none of theirs, `?[2]`, as `_`. Every error an embedder is
+/// given passes through this.
+pub fn told(text: &str) -> String {
+    let mut said = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let derived = rest.find(DERIVED);
+        let variable = rest.find('?');
+        match (derived, variable) {
+            (Some(at), variable) if variable.is_none_or(|variable| at < variable) => {
+                said.push_str(&rest[..at]);
+                let tail = &rest[at..];
+                let end = tail
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+                    .unwrap_or(tail.len());
+                let domain = &tail[..end];
+                match written_derived(domain) {
+                    Some(written) => {
+                        let after = &tail[end..];
+                        match after.strip_prefix('/') {
+                            Some(after) => {
+                                let label_end = after
+                                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                                    .unwrap_or(after.len());
+                                match &after[..label_end] {
+                                    "is" => said.push_str(&written),
+                                    label => {
+                                        said.push_str(&written);
+                                        said.push(' ');
+                                        said.push_str(label);
+                                        said.push(':');
+                                    }
+                                }
+                                rest = &after[label_end..];
+                            }
+                            None => {
+                                said.push_str(&written);
+                                rest = after;
+                            }
+                        }
+                    }
+                    None => {
+                        said.push_str(domain);
+                        rest = &tail[end..];
+                    }
+                }
+            }
+            (_, Some(at)) => {
+                said.push_str(&rest[..at]);
+                let tail = &rest[at + 1..];
+                let name_end = tail
+                    .find(|c: char| !(c.is_alphanumeric() || "-_./*+!<>=".contains(c)))
+                    .unwrap_or(tail.len());
+                let (name, after) = tail.split_at(name_end);
+                let tag = after
+                    .strip_prefix('[')
+                    .and_then(|inside| inside.find(']').map(|close| close + 2));
+                match tag {
+                    Some(length) if name.is_empty() => {
+                        said.push('_');
+                        rest = &after[length..];
+                    }
+                    Some(length) => {
+                        said.push('?');
+                        said.push_str(name);
+                        rest = &after[length..];
+                    }
+                    None => {
+                        said.push('?');
+                        said.push_str(name);
+                        rest = after;
+                    }
+                }
+            }
+            _ => {
+                said.push_str(rest);
+                return said;
+            }
+        }
+    }
 }
 
 /// The hash [`derived`] names the domain by.

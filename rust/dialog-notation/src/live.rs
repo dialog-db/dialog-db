@@ -106,13 +106,13 @@ impl<T> Reader for T where
 #[derive(Debug, thiserror::Error)]
 pub enum LiveError {
     /// The notation refused what it was given.
-    #[error(transparent)]
+    #[error("{}", crate::syntax::told(&.0.to_string()))]
     Notation(#[from] Error),
     /// Dialog-DB failed to evaluate a query.
-    #[error(transparent)]
+    #[error("{}", crate::syntax::told(&.0.to_string()))]
     Evaluation(#[from] EvaluationError),
     /// A rule could not be laid on the branch's overlay.
-    #[error("a rule could not be laid on the branch: {0}")]
+    #[error("a rule could not be laid on the branch: {}", crate::syntax::told(.0))]
     Rule(String),
 }
 
@@ -291,11 +291,13 @@ impl Live {
                         .map(str::to_string),
                     _ => None,
                 });
-            if let Some(other) = other {
+            // The other site was laid by another document, whose form
+            // is not known here.
+            if other.is_some() {
                 return Err(LiveError::Notation(Error::Clash(
                     relation.clone(),
-                    other,
-                    site.clone(),
+                    "a selection another document laid on this branch".into(),
+                    "this one".into(),
                 )));
             }
         }

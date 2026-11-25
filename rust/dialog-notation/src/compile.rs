@@ -518,6 +518,40 @@ pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
+    if let Some(reserved) = writes_reserved(form) {
+        return Err(Error::Reserved(reserved));
+    }
+    compiled(form).map_err(|error| error.said(&crate::syntax::told))
+}
+
+/// The relation under the notation's namespace a kernel rule `form`
+/// writes or derives into, where the notation did not make it: an assert,
+/// a retract or a command into it, or a derived attribute this process
+/// did not name. A tree the notation analyzed derives only what it made
+/// and writes nothing there; a tree built otherwise may name anything.
+fn writes_reserved(form: &Syntax) -> Option<String> {
+    let rule = Rule::parse(form).ok()?;
+    let reserved = |domain: &str| {
+        domain
+            .strip_prefix(crate::syntax::NAMESPACE)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    };
+    match &rule.head {
+        Head::Assert(read) | Head::Retract(read) | Head::Hold(read) if reserved(&read.domain) => {
+            Some(read.domain.clone())
+        }
+        Head::Derive(read)
+            if reserved(&read.domain) && crate::syntax::written_derived(&read.domain).is_none() =>
+        {
+            Some(read.domain.clone())
+        }
+        _ => None,
+    }
+}
+
+/// [`compile`], with no check of what `form` names and its refusals as
+/// they are made.
+pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
     // A query whose answer is markup is laid out in layers, each a query
     // of its own, and maintained where it is rendered: nothing of it is
     // folded, and nothing of it is written. It compiles when every
@@ -1664,18 +1698,39 @@ fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<(Json, Vec<Proposi
 
 /// A deductive rule as Dialog-DB reads it written out, with the
 /// patterns it holds put among its premises.
-fn deductive(written: Json, patterns: Vec<Proposition>) -> Result<DeductiveRule, Error> {
+fn deductive(
+    written: Json,
+    patterns: Vec<Proposition>,
+    read: &Read,
+) -> Result<DeductiveRule, Error> {
     let mut descriptor: DeductiveRuleDescriptor =
         serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
     descriptor.when.extend(patterns);
-    descriptor.compile().map_err(rule_refused)
+    descriptor
+        .compile()
+        .map_err(|error| rule_refused(error, read))
 }
 
 /// Dialog-DB's refusal of a rule, said in the author's terms: a binding
 /// it finds missing is named by what the author wrote, and a variable
-/// the notation made for a part of a pattern is left out.
-fn rule_refused(error: dialog_query::error::TypeError) -> Error {
+/// the notation made for a part of a pattern is left out. A field of
+/// the head it finds unbound is named by the variable the author wrote
+/// there, not by the rule's identity or the field's name alone.
+fn rule_refused(error: dialog_query::error::TypeError, read: &Read) -> Error {
     match error {
+        dialog_query::error::TypeError::UnboundVariable { variable, .. } => {
+            let field = read.fields.iter().find(|field| {
+                field.label == variable || field.attribute.ends_with(&format!("/{variable}"))
+            });
+            let written = match field.map(|field| &field.term) {
+                Some(Term::Variable(name)) if !crate::syntax::unwritten(name) => format!("?{name}"),
+                _ => format!("what the head gives `{variable}:`"),
+            };
+            Error::Refused(format!(
+                "{written} is bound by nothing the rule's premises say: a rule concludes what \
+                 its premises bind"
+            ))
+        }
         dialog_query::error::TypeError::RequiredBindings { required } => {
             // A variable is named with its `?`, and a field of the
             // head by its label.
@@ -1714,7 +1769,7 @@ fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
         )));
     }
     let (written, patterns) = concluding(rule, read, "deduce")?;
-    deductive(written, patterns).map(|rule| Step::Deduce(Box::new(rule)))
+    deductive(written, patterns, read).map(|rule| Step::Deduce(Box::new(rule)))
 }
 
 fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> {
@@ -1722,7 +1777,9 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
     let mut descriptor: InductiveRuleDescriptor =
         serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
     descriptor.when.extend(patterns);
-    descriptor.compile().map_err(rule_refused)
+    descriptor
+        .compile()
+        .map_err(|error| rule_refused(error, read))
 }
 
 /// A report. When the premises are one read, the read is what is
@@ -2040,7 +2097,11 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     }
     let select = json!({ "assert": selected, "where": terms });
     Ok(Step::Query(Box::new(Query {
-        rule: Some(deductive(scope.rule("deduce", concept, None), patterns)?),
+        rule: Some(deductive(
+            scope.rule("deduce", concept, None),
+            patterns,
+            read,
+        )?),
         select: serde_json::from_value(select).map_err(|error| refused("the query", error))?,
         domain: read.domain.clone(),
         entity,
@@ -2199,12 +2260,22 @@ mod tests {
     /// unsupported. Anywhere else it is no term.
     #[test]
     fn it_says_a_fold_in_a_head_that_derives_is_not_supported() {
+        // A derived attribute the notation named: it is shown as written.
+        let domain = crate::syntax::derived("list", "count-open").unwrap();
+        assert!(matches!(
+            steps(&format!(
+                "(rule ({domain} ?l is: (count ?t))
+                   (xyz.todo ?t list: ?l))"
+            )),
+            Err(Error::Unsupported(said)) if said.contains("list/count-open is a fold")
+        ));
+        // One it did not name is no derived attribute of the notation's.
         assert!(matches!(
             steps(
                 "(rule (dialog.n.c.listcountopen ?l is: (count ?t))
                    (xyz.todo ?t list: ?l))"
             ),
-            Err(Error::Unsupported(said)) if said.contains("dialog.n.c.listcountopen/is is a fold")
+            Err(Error::Reserved(name)) if name == "dialog.n.c.listcountopen"
         ));
         for written in [
             "(rule (assert (xyz.list ?l open: (count ?t))) (xyz.todo ?t list: ?l))",

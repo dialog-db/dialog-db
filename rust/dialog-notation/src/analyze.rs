@@ -55,7 +55,7 @@ impl Analyzer {
     /// for Dialog-DB, [`crate::Checked::analyzed`]. Refusals from `check`
     /// and answers are written so already.
     pub fn spelled(&self, text: &str) -> String {
-        self.expander.spelled(text)
+        crate::syntax::told(text)
     }
 
     /// An analyzer that knows the core forms.
