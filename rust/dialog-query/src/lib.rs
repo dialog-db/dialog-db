@@ -113,6 +113,11 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// A read of a deduced relation whose value is bound to a number
+/// constant, pinned as tests.
+#[cfg(test)]
+mod deduced_constant_tests;
+
 /// Scans binding rows in place against binding them eagerly, pinned as
 /// tests.
 #[cfg(test)]
