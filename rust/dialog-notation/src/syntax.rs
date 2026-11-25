@@ -230,9 +230,21 @@ pub fn told(text: &str) -> String {
                     .strip_prefix('[')
                     .and_then(|inside| inside.find(']').map(|close| close + 2));
                 match tag {
+                    // Tagged in front, `?[q1]x`: the author's name follows
+                    // the tag, or there is none, `?[2]`.
                     Some(length) if name.is_empty() => {
-                        said.push('_');
-                        rest = &after[length..];
+                        let after = &after[length..];
+                        let end = after
+                            .find(|c: char| !(c.is_alphanumeric() || "-_./*+!<>=".contains(c)))
+                            .unwrap_or(after.len());
+                        match &after[..end] {
+                            "" => said.push('_'),
+                            name => {
+                                said.push('?');
+                                said.push_str(name);
+                            }
+                        }
+                        rest = &after[end..];
                     }
                     Some(length) => {
                         said.push('?');
