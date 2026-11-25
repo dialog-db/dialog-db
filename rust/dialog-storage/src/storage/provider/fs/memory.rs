@@ -9,6 +9,7 @@
 use super::{FileSystem, FileSystemError, FileSystemHandle};
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
+use dialog_effects::Rejection;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
 use dialog_effects::memory::{
     Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
@@ -32,8 +33,15 @@ fn content_hash(content: &[u8]) -> ContentHash {
 }
 
 impl From<FileSystemError> for MemoryError {
+    /// A cell whose lock another writer holds (another process: this
+    /// one's writers take turns) refuses the write as
+    /// [`Rejection::Unavailable`], retryable as-is, with nothing written.
+    /// Anything else is a storage error.
     fn from(e: FileSystemError) -> Self {
-        MemoryError::Storage(e.to_string())
+        match e {
+            FileSystemError::Held(reason) => MemoryError::Rejected(Rejection::unavailable(reason)),
+            other => MemoryError::Storage(other.to_string()),
+        }
     }
 }
 
@@ -855,6 +863,149 @@ mod tests {
         let edition = resolved.expect("should have content");
         assert_eq!(edition.content, content);
 
+        Ok(())
+    }
+
+    /// How many writers race in the tests of racing publishes.
+    const RACING: usize = 8;
+
+    /// [`RACING`] writers publish the cell `raced` of `did` on `provider`
+    /// at once, each from the version it is at: exactly one lands, every
+    /// other loses the compare-and-swap with `VersionMismatch`, and the
+    /// cell holds what the one that landed wrote.
+    async fn race_publishes<P>(provider: &P, did: &dialog_capability::Did) -> anyhow::Result<()>
+    where
+        P: Provider<Publish> + Provider<Resolve> + dialog_common::ConditionalSync,
+    {
+        let base = did
+            .clone()
+            .writer()
+            .memory()
+            .space("local")
+            .cell("raced")
+            .publish(b"base".to_vec(), None)
+            .perform(provider)
+            .await?;
+        let results = futures_util::future::join_all((0..RACING).map(|writer| {
+            did.clone()
+                .writer()
+                .memory()
+                .space("local")
+                .cell("raced")
+                .publish(format!("writer {writer}").into_bytes(), Some(base.clone()))
+                .perform(provider)
+        }))
+        .await;
+
+        let mut landed = Vec::new();
+        for (writer, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(_) => landed.push(writer),
+                Err(MemoryError::VersionMismatch { .. }) => {}
+                Err(other) => {
+                    anyhow::bail!("writer {writer} failed other than by losing the race: {other:?}")
+                }
+            }
+        }
+        assert_eq!(landed.len(), 1, "exactly one writer lands: {landed:?}");
+        let held = did
+            .clone()
+            .reader()
+            .memory()
+            .space("local")
+            .cell("raced")
+            .resolve()
+            .perform(provider)
+            .await?
+            .map(|edition| edition.content);
+        assert_eq!(
+            held,
+            Some(format!("writer {}", landed[0]).into_bytes()),
+            "the cell holds what the writer that landed wrote"
+        );
+        Ok(())
+    }
+
+    /// Writers of one process racing to publish one cell take turns at
+    /// its lock: the losers lose the compare-and-swap, as on the volatile
+    /// provider ([`it_takes_turns_at_a_cell_in_memory`]), and none is
+    /// refused because another of the same process holds the lock file.
+    #[dialog_common::test]
+    async fn it_takes_turns_at_a_cell_on_the_filesystem() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-racing-publishes"));
+        let provider = FileSystem::open(&location).await?;
+        race_publishes(&provider, &unique_did().await).await
+    }
+
+    /// The volatile run of [`it_takes_turns_at_a_cell_on_the_filesystem`].
+    #[dialog_common::test]
+    async fn it_takes_turns_at_a_cell_in_memory() -> anyhow::Result<()> {
+        let provider = crate::provider::Volatile::new();
+        race_publishes(&provider, &unique_did().await).await
+    }
+
+    /// A cell whose lock file another writer holds refuses a publish as
+    /// `Rejection::Unavailable`, which a caller can tell from any other
+    /// failure and try again, and nothing is written. Only the writers of
+    /// one process take turns; a holder this process's turns know nothing
+    /// of, such as another process, is not waited for.
+    ///
+    /// The lock file is written as a holder writes it, `{pid} {token}`,
+    /// naming a running process: this one, whose turns do not know the
+    /// file, so it reads as held, as another process's would.
+    #[dialog_common::test]
+    async fn it_refuses_a_publish_while_another_holder_has_the_cell() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-held-elsewhere"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+        let base = did
+            .clone()
+            .writer()
+            .memory()
+            .space("local")
+            .cell("held")
+            .publish(b"base".to_vec(), None)
+            .perform(&provider)
+            .await?;
+
+        let cell_handle = provider.memory()?.resolve("local")?.cell("held")?;
+        let cell_path: std::path::PathBuf = cell_handle.try_into()?;
+        let lock_path = super::super::native::lock_path(&cell_path);
+        let holder = format!("{} 7", std::process::id());
+        std::fs::write(&lock_path, &holder)?;
+
+        let refused = did
+            .clone()
+            .writer()
+            .memory()
+            .space("local")
+            .cell("held")
+            .publish(b"refused".to_vec(), Some(base))
+            .perform(&provider)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(MemoryError::Rejected(Rejection::Unavailable { .. }))
+            ),
+            "a cell held elsewhere refuses the write as unavailable: {refused:?}"
+        );
+        let held = did
+            .reader()
+            .memory()
+            .space("local")
+            .cell("held")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .map(|edition| edition.content);
+        assert_eq!(held, Some(b"base".to_vec()), "nothing was written");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path)?,
+            holder,
+            "the holder's lock file is left as it was"
+        );
+        std::fs::remove_file(&lock_path)?;
         Ok(())
     }
 

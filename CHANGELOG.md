@@ -308,6 +308,70 @@ Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
 
+### A pick orders numbers by value
+
+[#874](https://github.com/dialog-db/dialog-db/pull/874)
+
+A field that picks `max` or `min` compared two values by their type
+first: a float outranked every integer, and an integer every natural,
+whatever the numbers, so `max` over {3, -5, 2.5, 10} answered 2.5 and an
+`integer:` field's `max` over {3, -5, 10} answered -5. Numbers are one
+stratum, keyed by value in the band whatever type wrote them, so a pick
+now orders two numbers of different types by their value, as their keys
+sort.
+
+What this changes for you:
+
+- `max` and `min` over numbers answer the greatest and the least number,
+  stored or deduced, through a field of no type, a `number:` field or
+  any number type. They answered by type first.
+- `Value::cmp_number` is new: the order of two numbers by value, total
+  and deterministic, NaN least, `-0.0` equal to 0, a float past `2^53`
+  read as the decimal it prints as, as the band keys it.
+- Two numbers of one value held as two types, such as 3 and 3.0, pick
+  the same one whatever order they arrive in: `max` the float, `min`
+  the natural.
+- A text, an entity or a listed type picks as before, and a pick over a
+  field of no type holding values of several types that are not numbers
+  still orders them by type first.
+- The `max` and `min` folds of a rule's `reduce` still refuse a group
+  holding numbers of different types, as before.
+
+Why: a number is one value whatever type holds it, so which one a pick
+elects must not depend on the type it decodes as.
+
+### Writes through one replica on the filesystem take turns instead of failing with a lock error
+
+[#870](https://github.com/dialog-db/dialog-db/pull/870)
+
+The filesystem provider writes a cell under a lock file and refused a
+second writer at once, to keep two processes from writing one cell. It
+refused a second writer of the same process the same way, so two
+writes through one replica that met at a cell (two writes into a stack,
+say) failed with "Concurrent write in progress" instead of one losing
+the compare-and-swap and running again, as it does on the volatile
+provider and on IndexedDB. The writers of one process now take turns at
+a cell before its lock file, and the second compares against what the
+first wrote. Only a holder in another process still refuses the write at
+once.
+
+What this changes for you:
+
+- Concurrent writes through one replica on the native filesystem land:
+  the loser of a race at a cell gets `MemoryError::VersionMismatch`,
+  which the stack and a commit already run again, instead of a lock
+  error that ended the write.
+- A cell whose lock another process holds refuses a write as
+  `MemoryError::Rejected(Rejection::Unavailable { .. })`, retryable
+  as-is, with nothing written. Before, it was a `MemoryError::Storage`
+  whose only sign was its message.
+- `dialog_storage::provider::FileSystemError::Held` is new: the lock
+  is held by another writer. A `match` over `FileSystemError` without a
+  wildcard arm needs the new arm. `FileSystemError::Lock` now means only
+  that the lock file could not be read or written.
+
+Why: a replica that writes while it syncs, or runs two writes at once,
+must not lose one of them to its own other write.
 ### A rule's write under cardinality one succeeds a claim the same commit wrote
 
 [#872](https://github.com/dialog-db/dialog-db/pull/872)
