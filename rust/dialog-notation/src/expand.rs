@@ -1578,10 +1578,13 @@ impl Expander {
                 );
             }
         }
+        // A rule, a concept or a query written again installs nothing
+        // new, and is kept once. A write written again writes again: a
+        // document is a sequence, so each is kept in its place.
         let mut kernel = Vec::new();
         for (at, rules) in done {
             for rule in rules {
-                if !kernel.contains(&rule) {
+                if writes(&rule) || !kernel.contains(&rule) {
                     kernel.push(rule);
                     self.origin.push(at);
                 }
@@ -2946,6 +2949,22 @@ impl Expander {
         }
         Ok(rules)
     }
+}
+
+/// Whether `rule`, a kernel tree, writes where it stands: a write at the
+/// top level, with no premise, or with a `when` and run once.
+fn writes(rule: &Syntax) -> bool {
+    let Some(operand) = rule.operand() else {
+        return false;
+    };
+    matches!(
+        operand.items.first().and_then(Syntax::applies),
+        Some("assert" | "retract")
+    ) && (operand.items.len() == 1
+        || matches!(
+            operand.terms.get("once"),
+            Some(Syntax::Constant(Value::Boolean(true)))
+        ))
 }
 
 #[cfg(test)]
@@ -4610,8 +4629,9 @@ mod tests {
     #[test]
     fn it_lists_every_word_the_notation_defines_in_forms() {
         use std::collections::BTreeSet;
-        let files: [(&str, &str); 21] = [
+        let files: [(&str, &str); 22] = [
             ("analyze.rs", include_str!("analyze.rs")),
+            ("apply.rs", include_str!("apply.rs")),
             ("check.rs", include_str!("check.rs")),
             ("compile.rs", include_str!("compile.rs")),
             ("data.rs", include_str!("data.rs")),

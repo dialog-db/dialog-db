@@ -128,6 +128,11 @@ What this changes for you:
   compile refusal once per form. An element a view does not make,
   `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
   it would let a row's values reach script.
+- A write written again in a document is a step again, in its place:
+  `(assert X) (retract X) (assert X)` leaves `X`, and a write with a
+  `when` written twice runs twice. The second was dropped as a copy of
+  the first, as a rule or a concept written again is, which installs
+  nothing new and is still kept once.
 - A formula in the head of a write with a `when`,
   `(assert (n ?t v: (+ ?v : 1)) (when (n ?t v: ?v)))`, is computed from
   each match, as the same head in a rule is, where it was refused saying

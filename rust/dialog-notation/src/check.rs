@@ -1889,7 +1889,6 @@ mod tests {
                  (assert (xyz.n x:1 v: (+ ?v : 1)) (when (xyz.n x:1 v: ?v)))",
                 2,
             ),
-            ("(retract (xyz.r x:1 o: ?v)) (retract (xyz.r x:1 o: ?v))", 2),
             (
                 r#"(rule (assert (xyz.m ?t tag: "seen")) (xyz.n ?t v: 3))
                    (rule (assert (xyz.m ?t tag: "seen")) (xyz.n ?t v: 3))"#,
