@@ -43,6 +43,7 @@ use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, merge_grouped_in};
 use crate::placement::{memory_layer, session_layer};
+use crate::report::{Answered, Entry, Report};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -495,7 +496,10 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// via [`QueryLayer::overlay`], lifts any retracts in it into
     /// tombstones, and unions every line's stream (tombstone-filtered)
     /// with the overlay.
-    pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
+    ///
+    /// The rows come with the [`Report`] of what the query left out,
+    /// readable at any point ([`Answered::report`]).
+    pub fn perform<Env>(self, env: &'a Env) -> Answered<impl Output<Q::Conclusion> + 'a>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -517,7 +521,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + 'static,
     {
         let SelectQuery { layer, query } = self;
-        async_stream::try_stream! {
+        let report = Report::default();
+        let reporting = report.clone();
+        let rows = async_stream::try_stream! {
             let operator = Identify
                 .perform(env)
                 .await
@@ -530,7 +536,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let overlay = layer.overlay_at(&views, &operator);
             let composite = layer.composite(views);
             let sources = composite.sources.clone();
-            let query_env = QueryEnv::over(composite, overlay, env);
+            let query_env = QueryEnv::over(composite, overlay, env).with_report(reporting);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -542,7 +548,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             for await result in driven {
                 yield result?;
             }
-        }
+        };
+        Answered::new(rows, report)
     }
 }
 
@@ -636,6 +643,10 @@ pub(crate) struct QueryEnv<'a> {
     /// demanded range here. Subscriptions use the recorded cover to
     /// gate re-evaluation.
     demand: Option<crate::Demand>,
+    /// When present, what the query this environment runs leaves out is
+    /// reported here as it is found: a rule its derivation reaches that
+    /// did not compile (see [`crate::report`]).
+    report: Option<Report>,
     /// Every rule-discovery read this environment made, in order: what
     /// a rule set assembled here is recorded with, so a subscription
     /// reusing the set still records the reads as demand.
@@ -765,6 +776,7 @@ impl<'a> QueryEnv<'a> {
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
+            report: None,
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches: Arc::default(),
@@ -978,6 +990,30 @@ impl<'a> QueryEnv<'a> {
         self
     }
 
+    /// Report what the query this environment runs leaves out into
+    /// `report`, as it is found.
+    pub(crate) fn with_report(mut self, report: Report) -> Self {
+        self.report = Some(report);
+        self
+    }
+
+    /// Report `entry`, something the query left out, if this environment
+    /// reports: a read that skips something says so here, as it skips.
+    pub(crate) fn record(&self, entry: Entry) {
+        if let Some(report) = &self.report {
+            report.record(entry);
+        }
+    }
+
+    /// Report `skipped`, the rules a concept's rule set left out.
+    fn report_skipped(&self, skipped: &[Entry]) {
+        if self.report.is_some() {
+            for entry in skipped {
+                self.record(entry.clone());
+            }
+        }
+    }
+
     /// Attach a subscription's retained fixpoint for `concept`:
     /// when that concept's rules resolve recursive, evaluation
     /// continues the retained answer table instead of recomputing.
@@ -1099,6 +1135,7 @@ impl Clone for QueryEnv<'_> {
             layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
+            report: self.report.clone(),
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches.clone(),
@@ -1815,7 +1852,7 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
         manifest: &Manifest,
-    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
+    ) -> Result<Vec<Resolved>, EvaluationError> {
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
         let entities = rule_entities(overlay.scan(&conclusions));
@@ -1826,8 +1863,8 @@ impl<'a> QueryEnv<'a> {
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
             };
-            if let Some(rule) = self.pending_body(rule_entity, &bytes)? {
-                rules.push((rule, Installed::Pending));
+            if let Some(found) = self.pending_body(rule_entity, &bytes) {
+                rules.push(found.map(|rule| (rule, Installed::Pending)));
             }
         }
         Ok(rules)
@@ -1842,7 +1879,7 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
         manifest: &Manifest,
-    ) -> Vec<(DeductiveRule, Installed)> {
+    ) -> Vec<Resolved> {
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
         let entities = rule_entities(layer.scan(&conclusions));
@@ -1851,9 +1888,9 @@ impl<'a> QueryEnv<'a> {
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             if let Some(bytes) = source_bytes(layer.scan(&sources))
-                && let Ok(Some(rule)) = self.pending_body(rule_entity, &bytes)
+                && let Some(found) = self.pending_body(rule_entity, &bytes)
             {
-                rules.push((rule, Installed::Pending));
+                rules.push(found.map(|rule| (rule, Installed::Pending)));
             }
         }
         rules
@@ -1867,15 +1904,15 @@ impl<'a> QueryEnv<'a> {
     /// So is a body this release does not decode: one spelling the picks
     /// 0.3 and 0.4 wrote, which the upgrade rewrites where it can, or one
     /// in a later format. No read fails over it.
-    fn pending_body(
-        &self,
-        rule_entity: Entity,
-        bytes: &[u8],
-    ) -> Result<Option<DeductiveRule>, EvaluationError> {
-        Ok(match self.judged(&rule_entity, bytes) {
-            Ok(Hydrated::Deductive(rule)) => Some(rule),
-            _ => None,
-        })
+    /// `None` for a body that is an inductive rule, which a deductive
+    /// index does not name; the error, with the rule's entity, for one
+    /// that is no rule here.
+    fn pending_body(&self, rule_entity: Entity, bytes: &[u8]) -> Option<Found> {
+        match self.judged(&rule_entity, bytes) {
+            Ok(Hydrated::Deductive(rule)) => Some(Ok(rule)),
+            Ok(Hydrated::Inductive(_)) => None,
+            Err(error) => Some(Err((rule_entity, error))),
+        }
     }
 
     /// What the body `bytes` stored under `entity` is on this release,
@@ -1954,7 +1991,7 @@ impl<'a> QueryEnv<'a> {
         source: &Source,
         index: Index,
         key: &Entity,
-    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
+    ) -> Result<Vec<Resolved>, EvaluationError> {
         let rule_entities = self.durable_rule_entities(source, index, key).await?;
 
         // Each rule's `dialog.rule/source` is read from this line, which
@@ -1973,14 +2010,22 @@ impl<'a> QueryEnv<'a> {
                     return Ok::<_, EvaluationError>(None);
                 };
                 Ok(self
-                    .pending_body(rule_entity, &bytes)?
-                    .map(|body| (body, installed)))
+                    .pending_body(rule_entity, &bytes)
+                    .map(|found| found.map(|body| (body, installed))))
             },
         ))
         .await?;
         Ok(rules.into_iter().flatten().collect())
     }
 }
+
+/// A stored body a rule index names, read: the rule, or the rule's
+/// entity and why it is no rule here.
+type Found = Result<DeductiveRule, (Entity, RuleError)>;
+
+/// A rule a rule index names, read with how it was installed, or the
+/// rule's entity and why it is no rule here.
+type Resolved = Result<(DeductiveRule, Installed), (Entity, RuleError)>;
 
 #[dialog_capability::provider]
 impl Provider<SelectRules> for QueryEnv<'_> {
@@ -2013,18 +2058,27 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .sources
             .first()
             .map(|source| source.as_view().rule_cache());
-        if let Some((bundle, demanded)) =
+        if let Some((bundle, demanded, skipped)) =
             cache.as_ref().and_then(|cache| cache.bundle(&input, &key))
         {
             #[cfg(test)]
-            assert_eq!(
-                rule_spellings(&bundle),
-                rule_spellings(&self.isolated().assemble_bundle(&input).await?),
-                "a cached rule set must be the one its layers assemble"
-            );
+            {
+                let (assembled, assembled_skipped) =
+                    self.isolated().assemble_bundle(&input).await?;
+                assert_eq!(
+                    rule_spellings(&bundle),
+                    rule_spellings(&assembled),
+                    "a cached rule set must be the one its layers assemble"
+                );
+                assert_eq!(
+                    skipped, assembled_skipped,
+                    "a cached rule set must leave out what its layers leave out"
+                );
+            }
             if let Some(demand) = &self.demand {
                 demanded.record(demand);
             }
+            self.report_skipped(&skipped);
             return Ok(self.continuing(&concept, bundle));
         }
         let first_read = self
@@ -2032,13 +2086,15 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .len();
-        let bundle = self.assemble_bundle(&input).await?;
+        let (bundle, skipped) = self.assemble_bundle(&input).await?;
+        self.report_skipped(&skipped);
         if let Some(cache) = cache {
             cache.record_bundle(
                 input.clone(),
                 key,
                 bundle.clone(),
                 self.reads_since(first_read),
+                skipped,
             );
         }
         Ok(self.continuing(&concept, bundle))
@@ -2052,7 +2108,7 @@ impl QueryEnv<'_> {
     async fn assemble_bundle(
         &self,
         input: &ConceptDescriptor,
-    ) -> Result<ConceptRules, EvaluationError> {
+    ) -> Result<(ConceptRules, Vec<Entry>), EvaluationError> {
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
         // line, so it falls back to a private cache.
@@ -2061,15 +2117,24 @@ impl QueryEnv<'_> {
             .first()
             .map(|source| source.as_view().plan_cache())
             .unwrap_or_default();
-        let bundle = self.resolve_bundle(input, plan_cache).await?;
+        let mut skipped = Vec::new();
+        let bundle = self.resolve_bundle(input, plan_cache, &mut skipped).await?;
         let analysis = self.program_analysis(input, &bundle).await?;
         analysis.check(input)?;
+        for quarantine in analysis.quarantined() {
+            skipped.push(Entry::RuleSkipped {
+                rule: quarantine.rule.clone(),
+                concludes: quarantine.concept.clone(),
+                reason: RuleError::from(quarantine),
+            });
+        }
         let bundle = bundle.without(analysis.quarantined());
-        Ok(if analysis.is_recursive(&ProgramAnalysis::node(input)) {
+        let bundle = if analysis.is_recursive(&ProgramAnalysis::node(input)) {
             bundle.with_recursion(analysis)
         } else {
             bundle
-        })
+        };
+        Ok((bundle, skipped))
     }
 
     /// Every rule-discovery read noted since `first`: what an entry
@@ -2090,6 +2155,7 @@ impl QueryEnv<'_> {
     fn isolated(&self) -> Self {
         let mut isolated = self.clone();
         isolated.demand = None;
+        isolated.report = None;
         isolated.reads = Arc::default();
         isolated
     }
@@ -2340,7 +2406,9 @@ impl<'a> QueryEnv<'a> {
         let plan_cache = PlanCache::default();
         let mut quarantined: Vec<Quarantine> = Vec::new();
         for descriptor in &concluded {
-            let bundle = self.resolve_bundle(descriptor, plan_cache.clone()).await?;
+            let bundle = self
+                .resolve_bundle(descriptor, plan_cache.clone(), &mut Vec::new())
+                .await?;
             let analysis = self.program_analysis(descriptor, &bundle).await?;
             for quarantine in analysis.quarantined() {
                 if !quarantined.contains(quarantine) {
@@ -2438,8 +2506,9 @@ impl<'a> QueryEnv<'a> {
         &self,
         index: Index,
         key: &Entity,
+        skipped: &mut Vec<Entry>,
     ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
-        let mut rules: Vec<(DeductiveRule, Installed)> = Vec::new();
+        let mut rules: Vec<Resolved> = Vec::new();
         let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
@@ -2452,7 +2521,18 @@ impl<'a> QueryEnv<'a> {
         for layer in &self.layers {
             rules.extend(self.staged_rules(layer, index, key, manifest));
         }
-        Ok(rules)
+        let mut resolved = Vec::with_capacity(rules.len());
+        for rule in rules {
+            match rule {
+                Ok(rule) => resolved.push(rule),
+                Err((rule, reason)) => skipped.push(Entry::RuleSkipped {
+                    rule,
+                    concludes: key.clone(),
+                    reason,
+                }),
+            }
+        }
+        Ok(resolved)
     }
 
     /// The head of `rule` re-spelled onto the attribute concept
@@ -2535,6 +2615,7 @@ impl<'a> QueryEnv<'a> {
         &self,
         descriptor: &ConceptDescriptor,
         plan_cache: PlanCache,
+        skipped: &mut Vec<Entry>,
     ) -> Result<ConceptRules, EvaluationError> {
         let concept = descriptor.this();
 
@@ -2567,7 +2648,7 @@ impl<'a> QueryEnv<'a> {
                 field.descriptor().clone().plain(),
             ));
             if let Some(on) = derives_keys(&single).into_iter().next() {
-                for (rule, installed) in self.resolve_rules(Index::Deriving, &on).await? {
+                for (rule, installed) in self.resolve_rules(Index::Deriving, &on, skipped).await? {
                     if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
                         bundle.install_at(head, installed);
@@ -2615,7 +2696,7 @@ impl<'a> QueryEnv<'a> {
             let mut rules = builtins.clone();
             for on in derives_keys(&attribute) {
                 rules.extend(
-                    self.resolve_rules(Index::Deriving, &on)
+                    self.resolve_rules(Index::Deriving, &on, skipped)
                         .await?
                         .into_iter()
                         .map(|(rule, _)| rule),
@@ -2774,7 +2855,11 @@ impl<'a> QueryEnv<'a> {
                     // these bundles share the root's cache rather than
                     // allocating one each.
                     let bundle = self
-                        .resolve_bundle(&descriptor, root_bundle.plan_cache().clone())
+                        .resolve_bundle(
+                            &descriptor,
+                            root_bundle.plan_cache().clone(),
+                            &mut Vec::new(),
+                        )
                         .await?;
                     Ok::<_, EvaluationError>((entity, descriptor, bundle))
                 }))

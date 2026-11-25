@@ -69,7 +69,7 @@ use dialog_search_tree::nodes;
 
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
-use crate::{Ephemeral, RemoteSite, Staged};
+use crate::{Answered, Ephemeral, RemoteSite, Report, Staged};
 use dialog_corpus::{Changes, Statement as _};
 use dialog_query::DeductiveRule;
 use std::slice::from_ref;
@@ -166,8 +166,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     /// the line's stream (filtered by what the staged layers hide) with
     /// the metadata and the layers. The metadata is what keeps
     /// `Session` / `SessionBranch` / `BranchMetadata` visible
-    /// mid-transaction.
-    pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
+    /// mid-transaction. The rows come with the [`Report`] of what the
+    /// query left out, readable at any point.
+    pub fn perform<Env>(self, env: &'a Env) -> Answered<impl Output<Q::Conclusion> + 'a>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -195,7 +196,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             composite,
             query,
         } = self;
-        async_stream::try_stream! {
+        let report = Report::default();
+        let reporting = report.clone();
+        let rows = async_stream::try_stream! {
             let operator = Identify
                 .perform(env)
                 .await
@@ -224,7 +227,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // resolution all share one implementation.
             let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
             let sources = composite.sources.clone();
-            let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
+            let query_env = QueryEnv::over(composite, overlay, env)
+                .with_layers(layers)
+                .with_report(reporting);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
@@ -233,7 +238,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             for await result in driven {
                 yield result?;
             }
-        }
+        };
+        Answered::new(rows, report)
     }
 }
 

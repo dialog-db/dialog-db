@@ -14,6 +14,43 @@ says how to cut a release.
 
 ## Unreleased
 
+### A query reports the rules it left out, as it runs
+
+Pull request: to be linked when it opens.
+
+A rule a branch holds that did not compile here works as if it were not
+there (see the entry below on `dialog.rule/error`), and a query whose
+derivation reaches one answered without it and said nothing. A query
+now comes with a report of what it left out. The report is filled as
+the query runs and readable at any point: the rules of a concept are
+assembled before the first row that concept gives, so a report read
+when a row arrives already lists the rules left out of what produced
+it. Nothing has to be drained to read it, and dropping the query early
+loses nothing reported. Only rules the query's derivation reaches are
+reported.
+
+What this changes for you:
+
+- `SelectQuery::perform` (a branch's `query().select(..)`) and
+  `TransactionSelectQuery::perform` (a transaction's `query()`) return
+  `dialog_repository::Answered<S>`, a stream of the same rows as
+  before, so code that reads rows is unchanged. Code that named the
+  returned type as `impl Output<..>` still compiles; code that relied
+  on it being exactly the inner stream type does not.
+- New: `Answered::report()`, a `Report` handle; `Report::entries()`,
+  what was reported so far; `Report::stream()`, each entry as it is
+  reported, ending when the query's stream ends or is dropped; and
+  `Answered::try_report()`, which drains the rows and returns them with
+  the report.
+- New: `dialog_repository::Entry`, `#[non_exhaustive]`, with
+  `RuleSkipped { rule, concludes, reason: RuleError }`. `concludes` is
+  the `on:` entity of the relation the rule would have concluded.
+- A rule left out for closing a cycle is reported too, as
+  `RuleError::Cycle`.
+
+Why: a query that answers without a rule it would have used should say
+so, and say it while it runs, not only after every row is read.
+
 ### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
 
 Pull request: to be linked when it opens.
@@ -1561,6 +1598,8 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A query's report: nothing stored or synced changes. An embedder runs
+  nothing.
 - `dialog.rule/error`: nothing is stored under it and nothing stored
   changes; it is answered from the rule bodies a branch holds, as
   `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older
