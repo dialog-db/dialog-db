@@ -255,6 +255,18 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
 /// equal. [`Value::tiebreak`] hashes the number, not the type, so the
 /// tie between them must still elect one of the two whatever order the
 /// election meets them in, as it does for any other two values.
+///
+/// Fails today: the tie elects whichever claim it holds first. Not yet
+/// established, and to settle before a fix:
+///
+/// - Whether a tree a release before 0.3.0 wrote holds such a pair at
+///   equal standing: here neither claim has a revision or a cause.
+/// - Whether a stored read is order-dependent in practice: one scan
+///   meets a cell's rows in key order, where the natural's type byte
+///   sorts first, so one tree elects one claim each time; whether the
+///   entity scan and the value-known challenge meet them in one order
+///   is unchecked.
+/// - Which claim survives when `rekey` moves both onto one band key.
 #[dialog_common::test]
 async fn it_elects_one_of_a_number_held_as_two_types_in_either_order() -> anyhow::Result<()> {
     let item = Entity::new()?;
