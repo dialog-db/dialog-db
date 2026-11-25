@@ -1375,8 +1375,9 @@ async fn it_refuses_a_read_under_a_concept_the_document_declares_after_it() -> R
         let notebook = Notebook::open().await?;
         anyhow::Ok(notebook)
     };
-    // Read first, it read the stored `list/count`: refused by the
-    // mechanism this is about, saying to declare the concept above.
+    // Read first, it is read as an attribute's, before `list` is a
+    // concept: refused by the mechanism this is about, saying to declare
+    // the concept above.
     let mut notebook = open().await?;
     let refused = notebook
         .submit(&[kind, rule, declare].join("\n"))

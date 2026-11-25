@@ -43,6 +43,9 @@ What this changes for you:
   `(retract (todo todo:1))`, and the same in a rule with premises, are
   unchanged. One field is retracted through its relation,
   `(retract (xyz.todo/state of: todo:1 is: :open))`.
+- A view shows a case of a listing by its name: `:open` renders as
+  `open`, where it rendered as `open:`, its entity. An entity with more
+  after its colon, `todo:1`, renders as before.
 - Every error the crate gives is in the author's terms: `compile`
   called directly, and `LiveError`'s `Notation`, `Evaluation` and
   `Rule`, as `check` was. A head variable no premise binds is named as

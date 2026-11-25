@@ -205,12 +205,19 @@ type Kept = Vec<(String, Datum)>;
 /// the row it showed.
 type Before = BTreeMap<(usize, Chain), (bool, Option<Kept>)>;
 
-/// A value as text: text as it is, an entity by its URI, a number as
-/// written.
+/// A value as text: text as it is, an entity by its URI, a case of a
+/// listing by its name, `open` for `:open`, which is kept as the entity
+/// `open:`, and a number as written.
 pub fn text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
-        Value::Entity(entity) => entity.to_string(),
+        Value::Entity(entity) => {
+            let uri = entity.to_string();
+            match uri.strip_suffix(':') {
+                Some(name) if !name.is_empty() && !name.contains(':') => name.to_string(),
+                _ => uri,
+            }
+        }
         Value::Boolean(truth) => truth.to_string(),
         Value::UnsignedInt(number) => number.to_string(),
         Value::SignedInt(number) => number.to_string(),
