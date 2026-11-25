@@ -733,7 +733,15 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
             crate::select::Selection::compile(form)?,
         ))]);
     }
-    let rule = retracted(Rule::parse(form)?, form)?;
+    let mut steps = Vec::new();
+    for rule in retracted(Rule::parse(form)?, form)? {
+        steps.extend(ruled(rule, form)?);
+    }
+    Ok(steps)
+}
+
+/// The steps one rule of `form` compiles to.
+fn ruled(rule: Rule, form: &Syntax) -> Result<Vec<Step>, Error> {
     if rule.once {
         return Ok(vec![once(&rule, form)?]);
     }
@@ -1788,9 +1796,10 @@ impl Scope {
 /// A retract as the design decides it.
 ///
 /// - Through a concept by its entity alone, `(retract (todo todo:1))`,
-///   it "retracts every field of the concept on that entity": the rule
-///   reads the fields on the entity and retracts what it read. At the
-///   top level that read is a `when`, run once.
+///   it "retracts every field of the concept on that entity": a rule for
+///   each field reads that field on the entity and retracts what it
+///   read, so a field the entity holds nothing of leaves the others to
+///   go. At the top level each read is a `when`, run once.
 /// - Of one entry of a collection with the entity, the key and the value
 ///   written, it retracts that entry, as a retract of one attribute's
 ///   value retracts just that value (the managing agent's reading).
@@ -1800,9 +1809,9 @@ impl Scope {
 /// write that leaves fields out, refused as one. At the top level with
 /// no premise, a retract by a variable entity is refused as any write
 /// with no premise is: it needs its entity.
-fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
+fn retracted(mut rule: Rule, form: &Syntax) -> Result<Vec<Rule>, Error> {
     let Head::Retract(read) = &rule.head else {
-        return Ok(rule);
+        return Ok(vec![rule]);
     };
     let bound = rule.bound();
     let unnamed = |term: &Term| match term {
@@ -1824,14 +1833,7 @@ fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
     }
     let collection = read.fields.iter().any(|field| field.key.is_some());
     if !collection && !unnamed(&read.entity) && read.named(&bound).is_empty() {
-        // Every claim of each field is matched, and so retracted, not the
-        // one a read under `cardinality: :one` elects: two claims of one
-        // field are what two replicas make.
-        let mut every = read.clone();
-        for field in &mut every.fields {
-            field.cardinality = Some("many".into());
-            field.pick = None;
-        }
+        let read = read.clone();
         if rule.when.is_empty() && rule.unless.is_empty() {
             // With no premise its entity is written, as any write's is:
             // a variable there would retract every instance there is.
@@ -1843,9 +1845,33 @@ fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
             }
             rule.once = true;
         }
-        rule.when.push(Premise::Read(every));
+        // Each field is retracted by a rule of its own, reading that
+        // field alone: a read of every field is a join, which matches
+        // nothing once the entity holds nothing of one of them. Every
+        // claim of the field is matched, and so retracted, not the one a
+        // read under `cardinality: :one` elects: two claims of one field
+        // are what two replicas make.
+        return Ok(read
+            .fields
+            .iter()
+            .map(|field| {
+                let mut one = rule.clone();
+                let only = Read {
+                    fields: vec![field.clone()],
+                    ..read.clone()
+                };
+                let mut every = only.clone();
+                for field in &mut every.fields {
+                    field.cardinality = Some("many".into());
+                    field.pick = None;
+                }
+                one.head = Head::Retract(only);
+                one.when.push(Premise::Read(every));
+                one
+            })
+            .collect());
     }
-    Ok(rule)
+    Ok(vec![rule])
 }
 
 /// A Dialog-DB rule concluding `read` when the premises of `rule` hold.
@@ -2487,22 +2513,23 @@ mod tests {
         ));
     }
 
-    /// A retract through a concept by its entity alone reads every field
-    /// of it and retracts what it read: in a rule, among the premises;
-    /// at the top level, as a write that runs once.
+    /// A retract through a concept by its entity alone reads each field
+    /// of it apart and retracts what it read, a rule for each field: in
+    /// a rule, among the premises; at the top level, as a write that
+    /// runs once.
     #[test]
     fn it_retracts_every_field_of_a_concept_named_by_its_entity() {
         assert!(matches!(
             steps("(rule (retract (xyz.block ?b source: ?s.1 notebook: ?n.1)) (xyz.remove ?c subject: ?b))")
                 .unwrap()
                 .as_slice(),
-            [Step::Induce(_)]
+            [Step::Induce(_), Step::Induce(_)]
         ));
         assert!(matches!(
             steps("(rule (retract (xyz.block block:1 source: ?s.1 notebook: ?n.1)))")
                 .unwrap()
                 .as_slice(),
-            [Step::Write(_)]
+            [Step::Write(_), Step::Write(_)]
         ));
         // Some fields named and not others is a write that leaves fields
         // out.

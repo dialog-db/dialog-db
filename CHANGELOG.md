@@ -132,7 +132,11 @@ What this changes for you:
   or a rule's `(retract (p ?t))`, retracts every claim of each of the
   concept's fields on that entity, where it retracted only the claim a
   read under `cardinality: :one` or an elector picked, so an older claim,
-  another replica's, was left and read again.
+  another replica's, was left and read again. Each field is retracted
+  apart from the others, so an entity that holds nothing of one field
+  loses every claim of the rest, where it lost nothing. It compiles to a
+  step for each field, a `Step::Write` at the top level and a
+  `Step::Induce` in a rule, where it was one.
 - A view's attribute name is one a page can set, a letter or `_`, then
   letters, digits, `-`, `_`, `.`, with at most one `/` between two such
   parts: `{:a//b …}`, `{:a/ …}` and `{:-a …}` are refused naming the
