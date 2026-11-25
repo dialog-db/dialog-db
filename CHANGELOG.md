@@ -25,10 +25,21 @@ and queries and selects are answered after it.
 
 What this changes for you:
 
-- New: `apply(&branch, &checked, &env) -> Result<Applied, ApplyError>`,
-  with the `repository` feature, and the `Writer` bound it takes.
-  `Applied` holds the revision, the answers in document order, the
-  rendered views and the warnings. `ApplyError` is `Refused` (the first
+- New, with the `repository` feature: `stage(transaction, &checked,
+  &env) -> Result<(T, DocumentReport), ApplyError>` stages a document
+  into a transaction the caller holds, a `Transaction<&Branch>` or a
+  `StackTransaction<&Branch>` (the sealed trait `Stage`), and never
+  commits; its `DocumentReport` says per form whether it was refused
+  and what it did (`Did`: asserted, retracted, issued, installed, a
+  `when` read and then each match it wrote, asked, or the same as an
+  earlier form). `answer(&branch, &checked, &env)` answers the queries,
+  selects and views after the caller's commit. `apply(&branch, &checked,
+  &env) -> Result<Applied, ApplyError>` is the two on a branch, with the
+  `Writer` bound it takes. `Applied` holds the revision, the answers in
+  document order, the rendered views, the warnings and the report.
+- New on `Checked`: `repeats`, each form that came to a rule an earlier
+  form came to, with that form, and `whole`, whether a refusal of one
+  form refuses every form (`check`) or its own alone (`check_forms`). `ApplyError` is `Refused` (the first
   refusal; nothing applied), `Notation` and `Evaluation` (a write's
   `when` failed as it ran; nothing applied), `Commit`, and `Unanswered`
   (the document committed and a query, select or view of it failed).

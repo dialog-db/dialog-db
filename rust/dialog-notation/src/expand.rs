@@ -1296,6 +1296,10 @@ pub struct Expander {
     tree: usize,
     /// For each kernel rule of the last document, which tree it came of.
     origin: Vec<usize>,
+    /// Each tree of the last document a kernel rule of which is the same
+    /// as one an earlier tree came to, with that tree: the rule is kept
+    /// once, at the earlier tree.
+    repeats: Vec<(usize, usize)>,
     /// The parts of the tree being expanded that are being worked on,
     /// outermost first: what a refusal is about.
     blame: Vec<Syntax>,
@@ -1445,6 +1449,7 @@ impl Expander {
         self.documents += 1;
         self.asked.clear();
         self.origin.clear();
+        self.repeats.clear();
         self.defining.clear();
         self.twice.clear();
         self.misread.clear();
@@ -1580,9 +1585,17 @@ impl Expander {
         let mut kernel = Vec::new();
         for (at, rules) in done {
             for rule in rules {
-                if writes(&rule) || !kernel.contains(&rule) {
-                    kernel.push(rule);
-                    self.origin.push(at);
+                match kernel.iter().position(|kept| *kept == rule) {
+                    Some(first) if !writes(&rule) => {
+                        let earlier = self.origin[first];
+                        if earlier != at && !self.repeats.contains(&(at, earlier)) {
+                            self.repeats.push((at, earlier));
+                        }
+                    }
+                    _ => {
+                        kernel.push(rule);
+                        self.origin.push(at);
+                    }
                 }
             }
         }
@@ -1752,6 +1765,12 @@ impl Expander {
     /// trees the rule came of.
     pub fn origin(&self) -> &[usize] {
         &self.origin
+    }
+
+    /// Each tree the last document expanded to a rule an earlier tree
+    /// came to as well, with that earlier tree.
+    pub fn repeats(&self) -> &[(usize, usize)] {
+        &self.repeats
     }
 
     /// Keep a rule about syntax, and note what any other rule reads.

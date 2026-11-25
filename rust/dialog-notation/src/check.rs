@@ -32,6 +32,15 @@ pub struct Checked {
     /// For each of `steps`, the top-level form it came of, counted from
     /// 0 among the forms read.
     pub step_forms: Vec<usize>,
+    /// Each form that came to a rule an earlier form came to as well, a
+    /// rule, a concept or a query written again, with that earlier form:
+    /// its steps are the earlier form's, given once. A write written
+    /// again gives its steps again, in its place.
+    pub repeats: Vec<(usize, usize)>,
+    /// Whether the document was checked whole, by [`check`]: a refusal
+    /// of any form refuses every form. False for [`check_forms`], where
+    /// a refusal refuses its own form alone.
+    pub whole: bool,
     /// What the document declares, in the order written: its concepts
     /// and commands, and its queries. Given whenever analysis refused
     /// nothing, whatever Dialog-DB's compiler refuses, so a back end
@@ -60,6 +69,8 @@ impl Checked {
                 analyzed: Vec::new(),
                 steps: Vec::new(),
                 step_forms: Vec::new(),
+                repeats: Vec::new(),
+                whole: true,
                 declarations: Vec::new(),
                 declaration_forms: Vec::new(),
                 written: parsed.written,
@@ -175,6 +186,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         checked.analyzed = analyzed;
         checked.steps = steps;
         checked.step_forms = forms;
+        checked.repeats = analysis.repeats.clone();
         *analyzer = trial;
     }
     checked
@@ -207,6 +219,7 @@ fn compile_refusal(error: Error, shown: &str, trees: &[Syntax], origin: usize) -
 /// counted from where it would have been.
 pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
     let (mut checked, trees) = Checked::of(parse_document(text));
+    checked.whole = false;
     let analysis = analyzer.analyze_forms(&trees);
     checked
         .diagnostics
@@ -261,6 +274,12 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             .extend(std::iter::repeat_n(origin, steps.len()));
         checked.steps.extend(steps);
     }
+    checked.repeats = analysis
+        .repeats
+        .iter()
+        .filter(|(at, earlier)| !refused.contains(at) && !refused.contains(earlier))
+        .copied()
+        .collect();
     analyzer.forget(&refused);
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);

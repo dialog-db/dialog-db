@@ -154,7 +154,9 @@ mod written;
 
 pub use analyze::{Analysis, Analyzer};
 #[cfg(feature = "repository")]
-pub use apply::{Applied, ApplyError, apply};
+pub use apply::{
+    Answers, Applied, ApplyError, Did, DocumentReport, FormReport, Stage, answer, apply, stage,
+};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};

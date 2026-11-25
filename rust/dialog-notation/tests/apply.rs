@@ -4,7 +4,9 @@
 #![allow(deprecated)]
 
 use anyhow::Result;
-use dialog_notation::{Analyzer, Applied, ApplyError, Error, apply, check};
+use dialog_notation::{
+    Analyzer, Applied, ApplyError, Did, Error, apply, check, check_forms, stage,
+};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_repository::Branch;
@@ -254,5 +256,147 @@ async fn it_runs_a_write_written_again_in_its_place() -> Result<()> {
     let rule = r#"(rule (assert (m ?t tag: "seen")) (n ?t v: 3))"#;
     let checked = check(&mut document.analyzer, &format!("{rule} {rule}"));
     assert_eq!(checked.steps.len(), 1, "{:?}", checked.steps);
+    Ok(())
+}
+
+/// What each form staged, as `stage` reports it, the forms in order: a
+/// declaration stages nothing; an assert is `Asserted`; a write with a
+/// `when` is `Read`, then each match's `Asserted` in order, a match
+/// staged by an earlier form among them, and `Read` alone when nothing
+/// matched; a rule is `Installed` under its entity;
+/// a select is `Asked`. A rule written again is the `Same` as the form
+/// it repeats, installed once.
+#[dialog_common::test]
+async fn it_reports_what_each_form_staged() -> Result<()> {
+    let mut document = Document::open().await?;
+    let checked = check_forms(
+        &mut document.analyzer,
+        r#"(concept (q ?t v: ?v)
+             (xyz.q/v of: ?t is: ?v as: :integer cardinality: :many))
+           (assert (n x:1 v: 1))
+           (assert (m ?t tag: "seen") (when (n ?t v: 1)))
+           (assert (m ?t tag: "never") (when (n ?t v: 9)))
+           (select (m ?t tag: ?g))
+           (rule (assert (m ?t tag: "ruled")) (n ?t v: 2))
+           (rule (assert (m ?t tag: "ruled")) (n ?t v: 2))"#,
+    );
+    let transaction = document.branch.transaction();
+    let (transaction, report) = stage(transaction, &checked, &document.operator).await?;
+    let did: Vec<String> = report
+        .forms
+        .iter()
+        .map(|form| {
+            let did: Vec<String> = form
+                .did
+                .iter()
+                .map(|did| match did {
+                    Did::Asserted(statement) => format!("asserted {:?}", statement.this),
+                    Did::Retracted(statement) => format!("retracted {:?}", statement.this),
+                    Did::Issued(_) => "issued".into(),
+                    Did::Installed(entity) => format!("installed {}", entity.is_some()),
+                    Did::Read => "read".into(),
+                    Did::Asked => "asked".into(),
+                    Did::Same(earlier) => format!("same as {earlier}"),
+                })
+                .collect();
+            format!(
+                "{} {}: {}",
+                form.form,
+                form.refused.is_some(),
+                did.join(", ")
+            )
+        })
+        .collect();
+    assert_eq!(
+        did,
+        vec![
+            "0 false: ",
+            "1 false: asserted x:1",
+            "2 false: read, asserted x:1",
+            "3 false: read",
+            "4 false: asked",
+            "5 false: installed true",
+            "6 false: same as 5",
+        ],
+    );
+    // The third form's `when` matched `x:1`, which only the second
+    // form staged: it read through the transaction.
+    let _ = transaction;
+    Ok(())
+}
+
+/// `stage` never commits, and a document checked whole and refused
+/// stages nothing: every form is reported refused, and the transaction,
+/// committed, leaves the branch at its revision. A document checked
+/// form by form stages the forms that were not refused.
+#[dialog_common::test]
+async fn it_stages_nothing_of_a_refused_document_and_what_check_forms_kept() -> Result<()> {
+    let mut document = Document::open().await?;
+    let before = document.branch.revision();
+    let text = r#"(assert (k x:1 lvl: "a")) (assert (k x:2 nope: "b"))"#;
+    let checked = check(&mut document.analyzer, text);
+    let (transaction, report) =
+        stage(document.branch.transaction(), &checked, &document.operator).await?;
+    assert!(
+        report
+            .forms
+            .iter()
+            .all(|form| form.refused.is_some() && form.did.is_empty()),
+        "{report:?}"
+    );
+    transaction
+        .commit()
+        .publish()
+        .perform(&document.operator)
+        .await?;
+    document.branch.refresh(&document.operator).await?;
+    assert_eq!(document.branch.revision(), before);
+
+    let checked = check_forms(&mut document.analyzer, text);
+    let (transaction, report) =
+        stage(document.branch.transaction(), &checked, &document.operator).await?;
+    assert!(report.forms[0].refused.is_none() && report.forms[1].refused.is_some());
+    transaction
+        .commit()
+        .publish()
+        .perform(&document.operator)
+        .await?;
+    document.branch.refresh(&document.operator).await?;
+    assert_eq!(
+        document.answers("(select (k ?t lvl: ?l))").await?,
+        vec![r#"(xyz.k x:1 lvl: "a")"#]
+    );
+    Ok(())
+}
+
+/// A document staged into a stack's transaction reads its own writes
+/// as one staged on the branch does, and lands at the stack's commit.
+#[dialog_common::test]
+async fn it_stages_a_document_into_a_stacks_transaction() -> Result<()> {
+    let mut document = Document::open().await?;
+    let stack = document.branch.stack().perform(&document.operator).await?;
+    let checked = check(
+        &mut document.analyzer,
+        r#"(assert (n x:7 v: 1))
+           (assert (m ?t tag: "stacked") (when (n ?t v: 1)))"#,
+    );
+    let (transaction, report) = stage(stack.transaction(), &checked, &document.operator).await?;
+    assert!(
+        matches!(
+            report.forms[1].did.as_slice(),
+            [Did::Read, Did::Asserted(_)]
+        ),
+        "{report:?}"
+    );
+    transaction
+        .commit()
+        .publish()
+        .perform(&document.operator)
+        .await?;
+    document.branch.refresh(&document.operator).await?;
+    assert_eq!(
+        document.answers("(select (m ?t tag: ?g))").await?,
+        vec![r#"(xyz.m x:7 tag: "stacked")"#]
+    );
     Ok(())
 }

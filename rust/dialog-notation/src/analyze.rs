@@ -26,6 +26,11 @@ pub struct Analysis {
     pub analyzed: Vec<Syntax>,
     /// For each analyzed tree, which tree of the document it came of.
     pub origin: Vec<usize>,
+    /// Each tree of the document that came to a rule an earlier tree
+    /// came to as well, a rule, a concept or a query written again, with
+    /// that earlier tree: the rule is analyzed once, at the earlier tree.
+    /// A write written again is analyzed again, in its place.
+    pub repeats: Vec<(usize, usize)>,
     /// Everything there is to say about the document, each with the
     /// way to the form it is about: every refusal, in the order of
     /// their trees, and then what the definitions said without
@@ -79,12 +84,14 @@ impl Analyzer {
         let analysis = Analysis {
             analyzed,
             origin: trial.origin().to_vec(),
+            repeats: trial.repeats().to_vec(),
             diagnostics,
         };
         if analysis.refusals().next().is_some() {
             return Analysis {
                 analyzed: Vec::new(),
                 origin: Vec::new(),
+                repeats: Vec::new(),
                 ..analysis
             };
         }
@@ -100,6 +107,7 @@ impl Analyzer {
         Analysis {
             analyzed,
             origin: trial.origin().to_vec(),
+            repeats: trial.repeats().to_vec(),
             diagnostics,
         }
     }
@@ -130,6 +138,7 @@ impl Analyzer {
                 return Analysis {
                     analyzed,
                     origin: self.expander.origin().to_vec(),
+                    repeats: self.expander.repeats().to_vec(),
                     diagnostics,
                 };
             }
