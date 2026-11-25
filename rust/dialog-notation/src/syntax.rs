@@ -468,6 +468,16 @@ pub fn unkept(name: &str) -> Option<String> {
     }
 }
 
+/// The stored attribute a name of words joined by `/` would be written
+/// as, its domain dotted: `foo/x` as `xyz.foo/x`, `nb/blocks/count` as
+/// `xyz.nb.blocks/count`. What a refusal offers in its place.
+pub fn stored(name: &str) -> String {
+    match name.rsplit_once('/') {
+        Some((words, field)) => format!("xyz.{}/{field}", words.replace('/', ".")),
+        None => format!("xyz.{name}"),
+    }
+}
+
 /// Whether `name` may be declared: the name of a concept, a query or a
 /// command, `todo` or `notebook/blocks`. One with a `.` anywhere is a
 /// domain, `xyz.todo`, or an attribute in one, `xyz.todo/text`, read

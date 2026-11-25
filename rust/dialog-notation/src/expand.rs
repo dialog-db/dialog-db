@@ -1723,7 +1723,8 @@ impl Expander {
             return Err(Error::Refused(format!(
                 "{line} names `{name}`, a derived attribute of the concept `{concept}`, which \
                  rules conclude: a line of a concept or a command is a stored attribute, its \
-                 domain dotted, `xyz.{name}`"
+                 domain dotted, `{}`",
+                syntax::stored(&name)
             )));
         }
         // A concept written as lines is kept as the reads they are.
@@ -2547,9 +2548,10 @@ impl Expander {
                 && !self.concepts.contains(concept)
             {
                 let message = format!(
-                    "`{word}` names no attribute of a domain, which holds a `.`, \
-                     `xyz.{word}`, and no concept `{word}`, nor a concept `{concept}` it would \
-                     be derived under, is declared above what reads it"
+                    "`{word}` names no attribute of a domain, which holds a `.`, `{}`, and no \
+                     concept `{word}`, nor a concept `{concept}` it would be derived under, is \
+                     declared above what reads it",
+                    syntax::stored(word)
                 );
                 return self.about(&tree, |_| Err(Error::Refused(message)));
             }
@@ -4661,9 +4663,10 @@ mod tests {
                 format!("{concept} (select (t ?x name: ?n) (unless ({word}/x ?x ?n)))"),
             ] {
                 let says = format!(
-                    "`{word}/x` names no attribute of a domain, which holds a `.`, `xyz.{word}/x`, \
-                     and no concept `{word}/x`, nor a concept `{word}` it would be derived \
-                     under, is declared above what reads it"
+                    "`{word}/x` names no attribute of a domain, which holds a `.`, `{}`, and no \
+                     concept `{word}/x`, nor a concept `{word}` it would be derived under, is \
+                     declared above what reads it",
+                    syntax::stored(&format!("{word}/x"))
                 );
                 let refused = expanded("", &text).unwrap_err().to_string();
                 assert!(refused.contains(&says), "{text}: {refused}");

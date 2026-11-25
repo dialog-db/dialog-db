@@ -456,9 +456,10 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
             && let Some(label) = operand.terms.keys().next()
         {
             return Err(Error::Refused(format!(
-                "`{domain}/{label}` names no attribute of a domain, which holds a `.`, \
-                 `xyz.{domain}/{label}`, and no concept or derived attribute `{domain}/{label}` \
-                 is declared above what reads it"
+                "`{domain}/{label}` names no attribute of a domain, which holds a `.`, `{}`, and \
+                 no concept or derived attribute `{domain}/{label}` is declared above what reads \
+                 it",
+                syntax::stored(&format!("{domain}/{label}"))
             )));
         }
         return Err(Error::Refused(format!("{node} applies no relation")));
