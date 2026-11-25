@@ -796,6 +796,25 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
     })
 }
 
+/// Whether `part` is written as a line of a concept or a command, not a
+/// read: by a word only a line says, `as:`, `in:`, `cardinality:` or
+/// `by:`, or by the cardinality its value is wrapped in, `is: (:one ?v)`,
+/// which a line may say in place of `cardinality:`. (`of:` is read as the
+/// part with no label, so it says nothing a read does not.)
+fn is_line(part: &Syntax) -> bool {
+    let Some(operand) = part.operand() else {
+        return false;
+    };
+    let said = ["as", "in", "cardinality", "by"]
+        .iter()
+        .any(|word| operand.terms.contains_key(*word));
+    let value = operand.terms.get("is").or_else(|| operand.items.get(1));
+    let wrapped = value.is_some_and(|value| {
+        crate::kernel::wrapped(value).is_ok_and(|wrapped| wrapped.cardinality.is_some())
+    });
+    said || wrapped
+}
+
 /// `rule` with every variable an expansion named for itself, `?c.<site>`,
 /// written `_` in the premises where it occurs once in the whole rule: it
 /// joins nothing, and `_` is how one that joins nothing is written, so a
@@ -1681,8 +1700,8 @@ impl Expander {
             },
             _ => None,
         };
-        // A line of a concept or a command, which says its cardinality,
-        // is a stored attribute: one that names a derived attribute of a
+        // A line of a concept or a command, however it is written, is a
+        // stored attribute: one that names a derived attribute of a
         // declared concept, which rules conclude, is refused, naming it.
         if let Some(Answer::Syntax(template)) = &answer
             && let Some((line, name, concept)) =
@@ -1690,7 +1709,7 @@ impl Expander {
                     let name = member.applies()?.to_string();
                     let (concept, _) = name.rsplit_once('/')?;
                     let concept = concept.to_string();
-                    (member.operand()?.terms.contains_key("cardinality")
+                    (is_line(&member)
                         && syntax::declarable(&name)
                         && self.concepts.contains(&concept)
                         && !self.concepts.contains(&name))

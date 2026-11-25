@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     /// A line is a line however it says what it is: by `cardinality:`,
-    /// by `of:`, `as:`, `in:` or `by:`, or by the cardinality its value is
+    /// by `as:`, `in:` or `by:`, or by the cardinality its value is
     /// wrapped in, `is: (:one (:text ?v))`. One that names a derived
     /// attribute is refused at the declaration in each form, in a concept
     /// and a command, and never at a use that quotes what it expanded to.
@@ -1628,7 +1628,6 @@ mod tests {
                  (rule (a/x ?t ?n) (a ?t n: ?n))";
         for declaration in [
             "(concept (k ?t v: ?v) (a/x ?t is: (:one (:text ?v))))",
-            "(concept (k ?t v: ?v) (a/x of: ?t is: ?v))",
             "(concept (k ?t v: ?v) (a/x ?t is: ?v as: :text))",
             "(concept (k/go v: ?v) (a/x ?c is: (:one (:text ?v)) in: :control))",
             "(concept (k/go v: ?v) (a/x ?c is: (:many ?v) in: :control))",
@@ -1650,7 +1649,9 @@ mod tests {
                 "{declaration}: {refused:?}"
             );
         }
-        // A macro over a read of the derived attribute is not a line.
+        // A macro over a read of the derived attribute is not a line, and
+        // `of:` with nothing else a line says is the reader's way to
+        // write the entity, so `(a/x of: ?t is: ?v)` is that read too.
         let read = check(
             &mut Analyzer::new()?,
             &format!("{a} (concept (k ?t v: ?v) (a/x ?t is: ?v)) (select (k ?t v: ?v))"),

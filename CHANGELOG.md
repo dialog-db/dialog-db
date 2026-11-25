@@ -104,7 +104,9 @@ What this changes for you:
   a derived attribute, `(concept (list/go label: ?x) (list/label of: ?c
   is: ?x in: :control cardinality: :many))`, is refused at the
   declaration naming the line, where the concept was left undeclared and
-  its use refused as an attribute of `list`.
+  its use refused as an attribute of `list`. A line is told by
+  `cardinality:`, `as:`, `in:` or `by:`, or by the cardinality its value
+  is wrapped in, `is: (:one (:text ?v))`.
 - A name is a concept or a derived attribute of one, never both: with
   `list` and `list/open` both declared concepts, `(list/open ?l ?n)` or
   `(list/open ?l is: ?n)` is refused naming the declaration of
