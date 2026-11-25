@@ -4298,3 +4298,72 @@ async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result
     }
     Ok(())
 }
+
+/// A case a listed type does not list is refused wherever it is written
+/// as a constant, naming the listing: an assert at the top level, a
+/// write with a `when`, and a rule's head, one that writes and one that
+/// issues a command; nothing is written. A listed case is written as
+/// before, and a retract of an unlisted case is not refused, so a claim
+/// written before can be taken back. Through a variable the case is not
+/// known until the rule runs, and Dialog-DB writes what the variable was
+/// bound to: a command carrying `:huge` into a rule that asserts it
+/// stores `:huge` under the listed type. That is pinned here as it is.
+#[dialog_common::test]
+async fn it_refuses_a_case_the_listing_does_not_list() -> Result<()> {
+    let concept = r#"(concept (k ?t lvl: ?l)
+          (xyz.k/lvl of: ?t is: ?l as: [:low :mid :high] cardinality: :one))
+        (concept (k/set subject: ?t to: ?l)
+          (xyz.k.set/subject of: ?c is: ?t as: :entity in: :control cardinality: :many)
+          (xyz.k.set/to of: ?c is: ?l as: [:low :mid :high] in: :control cardinality: :many))
+        (concept (k/pass subject: ?t to: ?l)
+          (xyz.k.pass/subject of: ?c is: ?t as: :entity in: :control cardinality: :many)
+          (xyz.k.pass/to of: ?c is: ?l as: :entity in: :control cardinality: :many))
+        (concept (k/bump subject: ?t)
+          (xyz.k.bump/subject of: ?c is: ?t as: :entity in: :control cardinality: :many))
+        (rule (assert (k ?t lvl: ?l)) (k/pass subject: ?t to: ?l))"#;
+    let lvl = "(select (xyz.k x:1 lvl: ?v) (xyz.k x:1 lvl: ?v))";
+    for text in [
+        "(assert (k x:1 lvl: :huge))",
+        "(assert (k ?t lvl: :huge) (when (k ?t lvl: :low)))",
+        "(rule (assert (k ?t lvl: :huge)) (k/bump subject: ?t))",
+        "(assert (k/set subject: x:1 to: :huge))",
+        "(rule (assert (k/set subject: ?t to: :huge)) (k/bump subject: ?t))",
+    ] {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(concept).await?;
+        notebook.submit("(assert (k x:1 lvl: :low))").await?;
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("`:huge`") && why.contains("[:low :mid :high]")),
+            "{text}: {refused:?}"
+        );
+        notebook.submit("(assert (k/bump subject: x:1))").await?;
+        assert_eq!(
+            report(&mut notebook, lvl).await?,
+            vec!["(xyz.k x:1 lvl: :low)"],
+            "{text}"
+        );
+    }
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(concept).await?;
+    notebook.submit("(assert (k x:1 lvl: :mid))").await?;
+    assert_eq!(
+        report(&mut notebook, lvl).await?,
+        vec!["(xyz.k x:1 lvl: :mid)"]
+    );
+    // Written before through a variable, as Dialog-DB writes it.
+    notebook
+        .submit("(assert (k/pass subject: x:1 to: :huge))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, lvl).await?,
+        vec!["(xyz.k x:1 lvl: :huge)"]
+    );
+    // And taken back.
+    notebook.submit("(retract (k x:1 lvl: :huge))").await?;
+    assert_eq!(report(&mut notebook, lvl).await?, Vec::<String>::new());
+    Ok(())
+}
