@@ -384,3 +384,59 @@ fn it_refuses_in_check_forms_every_forgery_compile_refuses() -> Result<()> {
     }
     Ok(())
 }
+
+/// A hand-built tree is held to what a document may write: a derived
+/// attribute under a concept no document can declare, `count`, is no
+/// derived attribute; and a head into the record of descriptions written
+/// as its attribute, `(syntax.meta/description ?t is: ?n)`, is refused as
+/// the document is, as `Reserved`.
+#[test]
+fn it_holds_a_tree_built_by_hand_to_what_a_document_may_name() -> Result<()> {
+    use dialog_notation::Error;
+    for word in ["count", "select", "is"] {
+        let tree = ruled(None, &format!("dialog.n.c/{word}/x"), "is");
+        let compiled = compile(&tree);
+        assert!(
+            matches!(&compiled, Err(Error::Reserved(_))),
+            "{tree}: {:?}",
+            compiled.map(|steps| steps.len())
+        );
+    }
+    let document = dialog_notation::check(
+        &mut Analyzer::new()?,
+        "(rule (syntax.meta/description ?t is: ?n) (xyz.list ?t name: ?n))",
+    );
+    let said = document
+        .refusals()
+        .find_map(|said| said.refusal.clone())
+        .ok_or_else(|| anyhow::anyhow!("the document is not refused"))?;
+    let tree =
+        parse("(rule (syntax.meta/description ?t is: ?n) (xyz.list ?t name: ?n))")?.remove(0);
+    let compiled = compile(&tree);
+    assert!(
+        matches!((&compiled, &said), (Err(Error::Reserved(a)), Error::Reserved(b)) if a == b),
+        "{compiled:?} against {said:?}"
+    );
+    Ok(())
+}
+
+/// A pin of a split that is meant: a hand-built head may write a field
+/// labelled by another domain's attribute, `xyz.b/c:`, which writes that
+/// attribute of the entity, because the kernel reads a label with a `/`
+/// as the attribute it names, the form the analyzer joins the reads of
+/// one entity under `unless` into. A document may not write one: it
+/// reads and writes each domain by itself, and is refused saying so.
+#[test]
+fn it_pins_a_tree_built_by_hand_that_writes_another_domains_attribute() -> Result<()> {
+    let tree = ruled(Some("assert"), "xyz.a", "xyz.b/c");
+    assert!(compile(&tree).is_ok(), "{tree}");
+    let document = dialog_notation::check(&mut Analyzer::new()?, &tree.printed()?);
+    assert!(
+        document.refusals().any(|said| said
+            .message
+            .contains("names an attribute of another domain")),
+        "{:?}",
+        document.diagnostics
+    );
+    Ok(())
+}
