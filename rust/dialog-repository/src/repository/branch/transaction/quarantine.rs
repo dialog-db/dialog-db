@@ -305,8 +305,8 @@ async fn it_answers_a_rule_it_sets_aside_as_a_cycle_error() -> Result<()> {
     assert_eq!(*rule, closing.this());
     assert!(error.starts_with("cycle: "), "{error}");
     assert!(
-        error.contains(&closing.conclusion().this().to_string()),
-        "the error names the concept the rule concludes: {error}"
+        error.contains("test/q"),
+        "the error names what the rule concludes: {error}"
     );
 
     branch
