@@ -158,11 +158,10 @@ fn compare(a: &Value, b: &Value) -> Ordering {
         && let Some(order) = a.cmp_number(b)
     {
         // One number held as two types (the natural 3 and the float
-        // 3.0) orders by type, so which of the two a pick returns does
-        // not depend on the order it meets them in: their standing may
-        // be equal, and their hash ([`Value::tiebreak`]) is the band's
-        // identity, equal too.
-        return order.then_with(|| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        // 3.0) is one value: it falls to standing, and then to the
+        // election's tie, which takes the narrowest type
+        // ([`Cardinality::newer`]).
+        return order;
     }
     a.partial_cmp(b)
         .unwrap_or_else(|| a.tiebreak().cmp(&b.tiebreak()))

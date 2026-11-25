@@ -231,10 +231,35 @@ pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
 
 /// Whether `candidate` wins a tie `incumbent` stands equal in: the
 /// greater [`Value::tiebreak`], the hash of the value, not the value
-/// itself, so the outcome favours no value over another. Equal values
-/// never beat each other.
+/// itself, so the outcome favours no value over another. Two values hash
+/// alike only when they are one number in two representations (the
+/// natural `5` and the float `5.0`, or the two zeros), and then the
+/// narrowest type wins, as a read of the band yields: the natural over
+/// the integer over the float, and `0.0` over `-0.0`. Equal values never
+/// beat each other.
 pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
-    candidate.tiebreak() > incumbent.tiebreak()
+    match candidate.tiebreak().cmp(&incumbent.tiebreak()) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => narrower(candidate, incumbent),
+    }
+}
+
+/// Whether `a` is a narrower representation than `b` of the number both
+/// are: the natural over the integer over the float, and of two floats
+/// (the zeros) the positive one.
+fn narrower(a: &Value, b: &Value) -> bool {
+    fn width(value: &Value) -> u8 {
+        match value {
+            Value::UnsignedInt(_) => 0,
+            Value::SignedInt(_) => 1,
+            _ => 2,
+        }
+    }
+    match (a, b) {
+        (Value::Float(a), Value::Float(b)) => a.is_sign_positive() && b.is_sign_negative(),
+        _ => width(a) < width(b),
+    }
 }
 
 /// The write side of the triple store.
