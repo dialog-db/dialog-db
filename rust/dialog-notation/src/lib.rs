@@ -1,7 +1,95 @@
 #![warn(missing_docs)]
+// The crate docs link the driver, which only the `repository` feature
+// builds: without it those links have nothing to name.
+#![cfg_attr(not(feature = "repository"), allow(rustdoc::broken_intra_doc_links))]
 
 //! A notation for Dialog-DB: a small kernel, and the core forms defined
 //! in it as rules.
+//!
+//! ## A document
+//!
+//! A document is a text of forms, read top to bottom. A `concept`
+//! declares a record and the attributes it is stored as; `assert` and
+//! `retract` write, alone or with a `when` that says what they write of;
+//! a `rule` installs what Dialog-DB keeps deriving or writing; a `query`
+//! names an answer; a `select` asks one; a view is a select whose answer
+//! is markup.
+//!
+//! An author writes each attribute of a concept as a line: the
+//! attribute by its full name, its entity under `of:` and its value
+//! under `is:`, the value's type under `as:` and how many claims an
+//! entity holds under `cardinality:`. Reads and writes of the concept
+//! then name its fields alone.
+//!
+//! ```clj
+//! (concept (todo ?t title: ?x done: ?d)
+//!   (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one)
+//!   (xyz.todo/done of: ?t is: ?d as: :boolean cardinality: :one))
+//! (assert (todo todo:1 title: "Buy milk" done: false))
+//! (select (todo ?t title: ?x done: false))
+//! ```
+//!
+//! ## Checking and applying one
+//!
+//! [`check`](check()) reads a document and says everything wrong with
+//! it, each [`Diagnostic`] with where it is; a document with a refusal
+//! in it is refused whole ([`check_forms`] refuses form by form).
+//! With the `repository` feature, [`apply`](apply()) runs what `check`
+//! gave on a branch:
+//!
+//! ```
+//! # use dialog_notation::{Analyzer, Answer, apply, check};
+//! # use dialog_peer::helpers::{test_repo, test_session_with_peer};
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> anyhow::Result<()> {
+//! # let (operator, profile) = test_session_with_peer().await;
+//! # let repo = test_repo(&operator, &profile).await;
+//! # let branch = repo.branch("main").open().perform(&operator).await?;
+//! let mut analyzer = Analyzer::new()?;
+//! let checked = check(
+//!     &mut analyzer,
+//!     r#"(concept (todo ?t title: ?x done: ?d)
+//!          (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one)
+//!          (xyz.todo/done of: ?t is: ?d as: :boolean cardinality: :one))
+//!        (assert (todo todo:1 title: "Buy milk" done: false))
+//!        (assert (todo todo:2 title: "Call mom" done: false))
+//!        (assert (xyz.todo/done of: ?t is: true cardinality: :one)
+//!          (when (todo ?t title: "Call mom" ...)))
+//!        (select (todo ?t title: ?x done: false))"#,
+//! );
+//! assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics);
+//! let applied = apply(&branch, &checked, &operator).await?;
+//! let Ok(Answer::Rows(rows)) = &applied.answers.forms[0].answered else {
+//!     panic!("{:?}", applied.answers.forms[0].answered);
+//! };
+//! let rows: Vec<String> = rows.iter().map(ToString::to_string).collect();
+//! assert_eq!(rows, [r#"(xyz.todo todo:1 done: false title: "Buy milk")"#]);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! What applying promises, whichever layer an embedder calls:
+//!
+//! - [`stage`](stage()) stages a document into a transaction the caller
+//!   holds, on a branch or through a stack, and never commits. Its forms
+//!   are a sequence for what they read as for what they write: a write's
+//!   `when` reads, through the transaction, what the forms before it
+//!   wrote, and a form written twice writes twice. It reports what each
+//!   form did ([`DocumentReport`]).
+//! - A command a form issues, and what the rules it fires write, land at
+//!   commit: a later `when` does not see what a rule makes of it.
+//! - [`answer`](answer()) answers the queries, selects and views from
+//!   the branch after the commit, form by form: a form that fails says so
+//!   in its own entry and hides no other ([`Answers`]).
+//! - [`apply`](apply()) is the two on a branch: one transaction,
+//!   committed once and built again over the head that won when another
+//!   writer moves the branch first, then answered. A refusal or an error
+//!   before the commit writes nothing.
+//!
+//! An embedder that drives [`Step`]s itself keeps none of this; the
+//! [`apply`](mod@apply) module says each promise in full.
+//!
+//! ## How it works
 //!
 //! This crate is a proof of concept. It works in three phases, and what
 //! passes between them is the syntax tree ([`Syntax`]), which is kept
@@ -49,21 +137,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## Applying a document
-//!
-//! [`apply`](apply()), with the `repository` feature, takes what
-//! [`check`](check()) gave and runs it on a branch: every embedder runs
-//! a document with it, so a document means one thing wherever it runs.
-//! A document is one transaction, and its forms are a sequence for what
-//! they read as for what they write: a write's `when` reads what the
-//! forms before it wrote, through the transaction, and a form written
-//! twice runs twice. A command a form issues, and what the rules it
-//! fires write, land at commit, after every form: a later `when` does
-//! not see what a rule makes of it. Queries and selects are answered
-//! after the commit, from what the whole document left. A refusal or an
-//! error on the way writes nothing. The [`apply`](mod@apply) module says each of
-//! these in full.
 //!
 //! ## What a collection holds, and what is counted
 //!
