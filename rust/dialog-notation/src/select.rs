@@ -267,6 +267,9 @@ pub struct Selection {
     /// and its rows read with [`Folded::values`].
     pub folds: Vec<Folded>,
     defined: BTreeMap<String, Defined>,
+    /// The derived attributes the tree it was compiled of names, by
+    /// Dialog-DB's name for each: what is said of it is said by these.
+    names: BTreeMap<String, String>,
 }
 
 fn malformed(tree: &Syntax) -> Error {
@@ -292,6 +295,12 @@ fn names(tree: &Syntax) -> Result<Vec<String>, Error> {
 }
 
 impl Selection {
+    /// The derived attributes the selection names, by Dialog-DB's name
+    /// for each.
+    pub(crate) fn names(&self) -> &BTreeMap<String, String> {
+        &self.names
+    }
+
     /// The selection an analyzed `(dialog.n.select …)` tree says.
     pub fn compile(tree: &Syntax) -> Result<Selection, Error> {
         let [call, defined @ ..] = items(tree) else {
@@ -302,6 +311,7 @@ impl Selection {
             queries: Vec::new(),
             folds: Vec::new(),
             defined: BTreeMap::new(),
+            names: crate::syntax::derived_names(tree),
         };
         for query in defined {
             let [head, parts @ ..] = items(query) else {

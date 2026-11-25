@@ -1646,7 +1646,7 @@ impl Expander {
                     declared.name,
                     declared
                         .name
-                        .split_once('/')
+                        .rsplit_once('/')
                         .map_or("", |(concept, _)| concept),
                 )));
             }
@@ -2276,15 +2276,15 @@ impl Expander {
                 .as_deref()
                 .is_some_and(|word| self.concepts.contains(word));
             // The name read as an attribute's, and the concept it would be
-            // derived under, what comes before its `/`: either declared
-            // later would have made this read another relation.
+            // derived under, what comes before its last `/`: either
+            // declared later would have made this read another relation.
             if !declared
                 && let Some(word) = word
                     .as_deref()
                     .filter(|word| Kind::of(word) == Kind::Attribute && syntax::declarable(word))
             {
                 self.misread.push((self.tree, word.to_string()));
-                if let Some((concept, _)) = word.split_once('/')
+                if let Some((concept, _)) = word.rsplit_once('/')
                     && !self.concepts.contains(concept)
                 {
                     self.misread.push((self.tree, concept.to_string()));
@@ -2298,7 +2298,7 @@ impl Expander {
                     Kind::of(word) == Kind::Attribute
                         && !syntax::declarable(word)
                         && word
-                            .split_once('/')
+                            .rsplit_once('/')
                             .is_some_and(|(concept, _)| self.concepts.contains(concept))
                 })
             {
@@ -2309,15 +2309,19 @@ impl Expander {
             }
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
+            // The concept is all before the last `/`, as a field's label
+            // holds none: `nb/blocks/count` is `count` of `nb/blocks`.
+            // The tree names it by what was written, and Dialog-DB's name
+            // for it is made where it is compiled.
             if !declared
                 && let Some((concept, name)) = word.as_deref().and_then(|word| {
                     (Kind::of(word) == Kind::Attribute && syntax::declarable(word))
-                        .then(|| word.split_once('/'))
+                        .then(|| word.rsplit_once('/'))
                         .flatten()
                 })
                 && self.concepts.contains(concept)
             {
-                let domain = syntax::derived(concept, name)?;
+                let domain = syntax::derived_read(concept, name);
                 let form = self
                     .document
                     .get(self.tree)
@@ -3863,8 +3867,10 @@ mod tests {
                      (concept (todo ?t list: ?l state: ?s)
                        (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
                        (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))";
-        let open = syntax::derived("list", "count-open").unwrap();
-        let count = syntax::derived("list", "count").unwrap();
+        // Named by what was written; Dialog-DB's name for it is made
+        // where it is compiled.
+        let open = syntax::derived_read("list", "count-open");
+        let count = syntax::derived_read("list", "count");
         let concluded = expanded(
             lists,
             "(rule (list/count-open ?l (count ?t))

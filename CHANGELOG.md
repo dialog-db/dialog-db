@@ -46,15 +46,24 @@ What this changes for you:
 - A view shows a case of a listing by its name: `:open` renders as
   `open`, where it rendered as `open:`, its entity. An entity with more
   after its colon, `todo:1`, renders as before.
+- An analyzed tree names a derived attribute by what was written,
+  `dialog.n.c/list/count-open`, and no longer by the hash Dialog-DB
+  knows it by, which `compile` makes from that name: a tree analyzed in
+  one process compiles in any other. `compile` refuses as
+  `Error::Reserved` any `dialog.n.c.<hash>` text, a malformed derived
+  name, and a tree that asserts, retracts or issues into the notation's
+  namespace. A tree analyzed by an earlier release holds hashes and is
+  refused: analyze its document again. `nb/blocks/count` is the field
+  `count` of the concept `nb/blocks`, split at the last `/`.
 - Every error the crate gives is in the author's terms: `compile`
-  called directly, and `LiveError`'s `Notation`, `Evaluation` and
-  `Rule`, as `check` was. A head variable no premise binds is named as
-  written, `?z`. `Error::Clash` no longer shows the relation; it names
-  the two sites, and from `Live` "a selection another document laid on
-  this branch" for the one it has no form of. `compile` refuses as
-  `Error::Reserved` a tree that asserts, retracts or issues into the
-  notation's namespace, or derives a `dialog.n.c.<hash>` this process
-  did not name.
+  called directly, and `LiveError`'s `Notation` and `Rule`, as `check`
+  was. `LiveError::Evaluation` shows Dialog-DB's own text, which may
+  name a derived attribute by its hash; `Standing::told` and
+  `Watched::told` say it in the author's terms. A head variable no
+  premise binds is named as written, `?z`. `Error::Clash` no longer
+  shows the relation; it names the two sites, and from `Live` "a
+  selection another document laid on this branch" for the one it has
+  no form of.
 - No concept, query, command or derived attribute is named with a `.`
   anywhere: `xyz.memo/note`, `a.b/c`, `a/b.c` and `my/list.count` are
   refused as `xyz.memo` was. A name with a `.` is stored, read directly.

@@ -30,6 +30,14 @@
 //! number's digits, which bracket. A [`Syntax`] keeps what was said. The
 //! reader can change and the tree does not.
 //!
+//! A tree read from what an author wrote makes a value and reads back
+//! from it, and prints as text that reads back as it. A tree the
+//! analyzer gives does not: it names what the notation names itself,
+//! `dialog.n.select`, `dialog.n.query.row` and a derived attribute as
+//! `dialog.n.c/list/count-open`, which no document may write, so reading
+//! it back from text or a value refuses it as `Error::Reserved`. Such a
+//! tree is kept as it is, or its document is analyzed again.
+//!
 //! Nothing here knows what a name refers to. An operator is a node like
 //! any other, most often a [`Syntax::Reference`]; `todo` is a name until
 //! it is resolved.
@@ -44,7 +52,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
-use std::sync::{Mutex, PoisonError};
 
 use base58::ToBase58;
 use dialog_corpus::{Composite, Entity, Value};
@@ -90,91 +97,102 @@ const DERIVED_BYTES: usize = 16;
 /// How many bytes a derived attribute's domain has: the prefix, a dot,
 /// and 128 bits in base 32, 26 characters.
 pub const DERIVED_LENGTH: usize = DERIVED.len() + 1 + (DERIVED_BYTES * 8).div_ceil(5);
-
 /// The domain of the attribute `name` derived under the concept
 /// `concept`, as each is written: the prefix and 128 bits of the
 /// reference of the list of the two, in lowercase base 32. A list of two
 /// texts is one value for one pair, so no other concept and attribute
 /// make it, whatever either holds, dots included; and it is one length,
 /// 37 bytes, so a label has 26 of the 64 the engine allows a relation.
+/// A function of the two alone: the same in every process, and nothing
+/// is kept.
 pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
-    let hash = hashed(concept, name)?;
-    MADE.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(hash.clone());
-    WRITTEN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(hash.clone(), format!("{concept}/{name}"));
-    Ok(hash)
+    hashed(concept, name)
 }
 
-/// How many derived attributes' names [`WRITTEN`] keeps: the latest
-/// made, 4096 of them, a few hundred kilobytes at most. A name made
-/// earlier than that and asked for again is made again by [`derived`];
-/// one only answered with is shown as its hash.
-pub const WRITTEN_KEPT: usize = 4096;
+/// The prefix of a derived attribute as the analyzer names it in the
+/// trees it gives, `dialog.n.c/list/count-open`: by what was written,
+/// under a name no document can write.
+pub const DERIVED_READ: &str = concat!(namespaced!("c"), "/");
 
-/// The name each derived attribute's domain this process made lately was
-/// made of, `list/count-open`: what a person is shown in its place. A
-/// hash is made only by [`derived`]. It is filled before a document is
-/// known to be refused, so it is bounded, the oldest name let go first.
-static WRITTEN: Mutex<Made> = Mutex::new(Made {
-    names: BTreeMap::new(),
-    order: std::collections::VecDeque::new(),
-});
-
-/// The names [`WRITTEN`] keeps, and the order they were made in.
-struct Made {
-    names: BTreeMap<String, String>,
-    order: std::collections::VecDeque<String>,
+/// A derived attribute as the analyzer names it: `dialog.n.c/` and the
+/// concept and the field as written, `dialog.n.c/list/count-open`.
+pub fn derived_read(concept: &str, field: &str) -> String {
+    format!("{DERIVED_READ}{concept}/{field}")
 }
 
-impl Made {
-    fn insert(&mut self, hash: String, name: String) {
-        if self.names.insert(hash.clone(), name).is_none() {
-            self.order.push_back(hash);
+/// The concept and the field a derived attribute's name as the analyzer
+/// writes it holds, split at its last `/`: `dialog.n.c/nb/blocks/count`
+/// is `nb/blocks` and `count`. None where the name is no such one: the
+/// concept a declarable name, the field a label of one, neither empty.
+pub fn derived_parts(name: &str) -> Option<(&str, &str)> {
+    let (concept, field) = name.strip_prefix(DERIVED_READ)?.rsplit_once('/')?;
+    let label =
+        |part: &str| !part.is_empty() && !part.contains('/') && named(part) == Named::Declarable;
+    (!concept.is_empty()
+        && !concept.starts_with('/')
+        && !concept.ends_with('/')
+        && !concept.contains("//")
+        && named(concept) == Named::Declarable
+        && label(field))
+    .then_some((concept, field))
+}
+
+/// Each derived attribute `tree` names as the analyzer writes them, by
+/// the domain Dialog-DB knows it by: what a refusal or an answer about
+/// what was compiled of `tree` is spelled by. A table of the tree's own,
+/// so nothing is kept between trees.
+pub fn derived_names(tree: &Syntax) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    let mut note = |name: &str| {
+        let relation = match derived_parts(name) {
+            Some(_) => name,
+            None => match name.rsplit_once('/') {
+                Some((relation, _)) if derived_parts(relation).is_some() => relation,
+                _ => return,
+            },
+        };
+        if let Some((concept, field)) = derived_parts(relation)
+            && let Ok(domain) = derived(concept, field)
+        {
+            names.insert(domain, format!("{concept}/{field}"));
         }
-        while self.order.len() > WRITTEN_KEPT {
-            if let Some(oldest) = self.order.pop_front() {
-                self.names.remove(&oldest);
+    };
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Reference(name) => note(name),
+            Syntax::Application(operator, operand) => {
+                operand.terms.keys().for_each(|label| note(label));
+                open.extend(operand.terms.values());
+                open.extend(operand.items.iter());
+                open.push(operator);
             }
+            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                open.push(key);
+                open.push(value);
+            }),
+            Syntax::Tuple(items) => open.extend(items.iter()),
+            _ => {}
         }
     }
+    names
 }
 
-/// Every derived attribute's domain this process made, whenever: what
-/// [`crate::compile`] lets a tree derive into. Unlike the names kept for
-/// showing, none is let go, since whether a tree compiles must not hang
-/// on how many names came after it. It grows by one domain, 37 bytes, for
-/// each derived attribute named, not for each document or answer.
-static MADE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-
-/// Whether this process made `domain` as a derived attribute's.
-pub fn made_derived(domain: &str) -> bool {
-    MADE.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(domain)
-}
-
-/// The name a derived attribute's domain was made of, `list/count-open`,
-/// where this process made it lately.
-pub fn written_derived(domain: &str) -> Option<String> {
-    WRITTEN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .names
-        .get(domain)
-        .cloned()
+/// `text` as an author is told it, by [`told_with`] with no derived
+/// attribute's domain known: what the analyzer names is spelled, and
+/// variables are untagged.
+pub fn told(text: &str) -> String {
+    told_with(text, &BTreeMap::new())
 }
 
 /// `text` as an author is told it, in one pass: each derived attribute's
-/// domain written as the name it was made of, `list/count-open` for its
-/// `/is` and `list/count status:` for a label; each variable the
-/// notation tagged as the author wrote it, `?t[0]` as `?t`, and one it
-/// made for none of theirs, `?[2]`, as `_`. Every error an embedder is
-/// given passes through this.
-pub fn told(text: &str) -> String {
+/// domain `names` holds written as the name it was made of,
+/// `list/count-open` for its `/is` and `list/count status:` for a label;
+/// a derived attribute as the analyzer names it, `dialog.n.c/list/label`,
+/// as `list/label`; each variable the notation tagged as the author wrote
+/// it, `?t[0]` and `?[q1]t` as `?t`, and one it made for none of theirs,
+/// `?[2]`, as `_`. Every error an embedder is given passes through this.
+pub fn told_with(text: &str, names: &BTreeMap<String, String>) -> String {
     let mut said = String::with_capacity(text.len());
     let mut rest = text;
     loop {
@@ -184,22 +202,30 @@ pub fn told(text: &str) -> String {
             (Some(at), variable) if variable.is_none_or(|variable| at < variable) => {
                 said.push_str(&rest[..at]);
                 let tail = &rest[at..];
+                if let Some(written) = tail.strip_prefix(DERIVED_READ) {
+                    let end = written
+                        .find(|c: char| !(c.is_alphanumeric() || "-_/*+!<>=".contains(c)))
+                        .unwrap_or(written.len());
+                    said.push_str(&written[..end]);
+                    rest = &written[end..];
+                    continue;
+                }
                 let end = tail
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
                     .unwrap_or(tail.len());
                 let domain = &tail[..end];
-                match written_derived(domain) {
+                match names.get(domain) {
                     Some(written) => {
                         let after = &tail[end..];
                         match after.strip_prefix('/') {
                             Some(after) => {
                                 let label_end = after
-                                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                                    .find(|c: char| !(c.is_alphanumeric() || c == '-'))
                                     .unwrap_or(after.len());
                                 match &after[..label_end] {
-                                    "is" => said.push_str(&written),
+                                    "is" => said.push_str(written),
                                     label => {
-                                        said.push_str(&written);
+                                        said.push_str(written);
                                         said.push(' ');
                                         said.push_str(label);
                                         said.push(':');
@@ -208,7 +234,7 @@ pub fn told(text: &str) -> String {
                                 rest = &after[label_end..];
                             }
                             None => {
-                                said.push_str(&written);
+                                said.push_str(written);
                                 rest = after;
                             }
                         }
@@ -335,10 +361,17 @@ pub enum Named {
     /// A name a document may declare, a concept's, a query's, a command's
     /// or a derived attribute's: no `.`, `todo`, `notebook/blocks`.
     Declarable,
+    /// A derived attribute as the analyzer names it in the trees it
+    /// gives, `dialog.n.c/list/count-open`, its parts well formed
+    /// ([`derived_parts`]). A document never writes one.
+    Derived,
 }
 
 /// What `name` names. See [`Named`].
 pub fn named(name: &str) -> Named {
+    if derived_parts(name).is_some() {
+        return Named::Derived;
+    }
     let relation = name.split_once('/').map_or(name, |(relation, _)| relation);
     if relation
         .strip_prefix(NAMESPACE)
@@ -378,14 +411,6 @@ pub fn undeclarable(form: &dyn std::fmt::Display, what: &str, name: &str) -> Err
 /// The variable the notation names `name` with `tag`: `x[3]`.
 pub fn tagged(name: &str, tag: &str) -> String {
     format!("{name}[{tag}]")
-}
-
-/// Whether a domain is a concept's own, which rules conclude and nothing
-/// writes.
-pub fn is_derived(domain: &str) -> bool {
-    domain
-        .strip_prefix(DERIVED)
-        .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// A node of the syntax tree.
@@ -809,7 +834,7 @@ impl Syntax {
     /// Whether this applies a relation: its operator is a domain.
     pub fn is_read(&self) -> bool {
         self.applies()
-            .is_some_and(|name| Kind::of(name) == Kind::Domain)
+            .is_some_and(|name| Kind::of(name) == Kind::Domain || named(name) == Named::Derived)
     }
 
     /// Whether this applies a formula: its operator is a keyword or an
@@ -1274,25 +1299,6 @@ mod tests {
     use super::*;
     use crate::form::read;
 
-    /// The names of derived attributes kept are the latest made, no more
-    /// than the bound: the oldest is let go first, and one made again is
-    /// not counted twice.
-    #[test]
-    fn it_keeps_the_latest_names_of_derived_attributes_to_a_bound() {
-        let mut made = Made {
-            names: BTreeMap::new(),
-            order: std::collections::VecDeque::new(),
-        };
-        for at in 0..WRITTEN_KEPT + 10 {
-            made.insert(format!("h{at}"), format!("c/n{at}"));
-            made.insert("h0".into(), "c/n0".into());
-        }
-        assert!(made.names.len() <= WRITTEN_KEPT);
-        assert_eq!(made.names.len(), made.order.len());
-        assert!(!made.names.contains_key("h1"));
-        assert!(made.names.contains_key(&format!("h{}", WRITTEN_KEPT + 9)));
-    }
-
     /// A variable the notation tagged in front, `?[q1]x`, is the
     /// author's `?x`, as one tagged behind, `?x[1]`, is; one tagged with
     /// no name of the author's after it, `?[2]`, is `_`. A name of any
@@ -1311,13 +1317,28 @@ mod tests {
     fn it_tells_a_text_in_the_authors_terms_in_one_pass() {
         let open = derived("list", "count-open").unwrap();
         let count = derived("list", "count").unwrap();
+        // A tree as the analyzer gives it, which no reader reads.
+        let read = |relation: &str| {
+            Syntax::Application(
+                Box::new(Syntax::Reference(relation.into())),
+                Parameters::default(),
+            )
+        };
+        let names = derived_names(&Syntax::Tuple(vec![
+            read("dialog.n.c/list/count-open"),
+            read("dialog.n.c/list/count"),
+        ]));
         assert_eq!(
-            told(&format!(
-                "{open}/is and {count}/status beside ?t[0], ?[2] and {open}"
-            )),
+            told_with(
+                &format!("{open}/is and {count}/status beside ?t[0], ?[2] and {open}"),
+                &names
+            ),
             "list/count-open and list/count status: beside ?t, _ and list/count-open"
         );
-        assert_eq!(told("dialog.n.c.unknown/is"), "dialog.n.c.unknown/is");
+        // A hash no table holds is shown as it is; a derived attribute as
+        // the analyzer names it is spelled with none.
+        assert_eq!(told(&format!("{open}/is")), format!("{open}/is"));
+        assert_eq!(told("(dialog.n.c/list/label ?l)"), "(list/label ?l)");
     }
 
     fn one(text: &str) -> Syntax {

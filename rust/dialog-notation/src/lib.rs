@@ -145,7 +145,9 @@ impl Error {
             Error::Ambiguous(a, b) => Error::Ambiguous(say(&a), say(&b)),
             Error::Refused(a) => Error::Refused(say(&a)),
             Error::Unsupported(a) => Error::Unsupported(say(&a)),
-            Error::Reserved(a) => Error::Reserved(say(&a)),
+            // A reserved name is what the document or the tree wrote,
+            // and is shown as it wrote it.
+            Error::Reserved(a) => Error::Reserved(a),
             Error::Clash(a, b, c) => Error::Clash(say(&a), say(&b), say(&c)),
             Error::Unsafe(a) => Error::Unsafe(say(&a)),
             Error::Twice(a, b, c) => Error::Twice(say(&a), say(&b), say(&c)),

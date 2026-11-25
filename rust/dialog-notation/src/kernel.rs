@@ -137,8 +137,12 @@ pub struct Field {
 /// An application of a relation: one entity and the fields named.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Read {
-    /// The domain applied.
+    /// The domain applied: for a derived attribute, the one Dialog-DB
+    /// knows it by, `dialog.n.c.<hash>`.
     pub domain: String,
+    /// For a derived attribute, the name it was written by,
+    /// `list/count-open`.
+    pub written: Option<String>,
     /// The entity.
     pub entity: Term,
     /// The fields, in the order written.
@@ -417,10 +421,15 @@ fn field(domain: &str, label: &str, node: &Syntax) -> Result<Field, Error> {
     let wrapped = wrapped(node)?;
     Ok(Field {
         label: label.to_string(),
-        attribute: if label.contains('/') {
-            label.to_string()
-        } else {
-            format!("{domain}/{label}")
+        // A label with a `/` names another relation's field, as the
+        // notation joins reads of one entity: that relation's domain, a
+        // derived attribute's as Dialog-DB knows it.
+        attribute: match label.rsplit_once('/') {
+            Some((relation, name)) => match syntax::derived_parts(relation) {
+                Some((concept, field)) => format!("{}/{name}", syntax::derived(concept, field)?),
+                None => label.to_string(),
+            },
+            None => format!("{domain}/{label}"),
         },
         term: term(wrapped.inner)?,
         kind: wrapped.kind.map(|(kind, _)| kind),
@@ -457,6 +466,16 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
             )));
         }
     };
+    // A derived attribute is named by what was written, and Dialog-DB
+    // knows it by the hash of that, made here.
+    let (domain, written) = match syntax::derived_parts(domain) {
+        Some((concept, field)) => (
+            syntax::derived(concept, field)?,
+            Some(format!("{concept}/{field}")),
+        ),
+        None => (domain.to_string(), None),
+    };
+    let domain = domain.as_str();
     let fields = operand
         .terms
         .iter()
@@ -472,6 +491,7 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     }
     Ok(Read {
         domain: domain.to_string(),
+        written,
         entity,
         fields,
     })
@@ -523,7 +543,7 @@ fn head(node: &Syntax) -> Result<Head, Error> {
         Some([inner]) => read(inner)?,
         _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
     };
-    if matches!(node.applies(), Some("assert" | "retract")) && syntax::is_derived(&inner.domain) {
+    if matches!(node.applies(), Some("assert" | "retract")) && inner.written.is_some() {
         return Err(Error::Refused(format!(
             "{node} writes an attribute in a concept's domain, which rules conclude and nothing \
              writes: derive it with a rule, `(rule (list/count-open ?l ?n) …)`"
@@ -799,9 +819,9 @@ mod tests {
     fn it_refuses_a_write_in_a_concepts_domain() {
         let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
         for text in [
-            "(rule (assert (dialog.n.c.listcountopen list:home is: 3)))",
-            "(rule (assert (dialog.n.c.listcountopen ?l is: ?n)) (xyz.n ?l n: ?n))",
-            "(rule (retract (dialog.n.c.listcountopen ?l is: ?n)) (xyz.n ?l n: ?n))",
+            "(rule (assert (dialog.n.c/list/count-open list:home is: 3)))",
+            "(rule (assert (dialog.n.c/list/count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
+            "(rule (retract (dialog.n.c/list/count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
         ] {
             assert!(
                 matches!(head(text), Err(Error::Refused(why)) if why.contains("rules conclude and nothing writes")),

@@ -178,7 +178,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     }
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
-        spell(diagnostic, &trial);
+        spell(diagnostic, &names(&analysis.analyzed));
     }
     if checked.refusals().next().is_none() {
         checked.analyzed = analyzed;
@@ -256,24 +256,28 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
     analyzer.forget(&refused);
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
-        spell(diagnostic, analyzer);
+        spell(diagnostic, &names(&analysis.analyzed));
     }
     checked
 }
 
 /// `diagnostic` as a person reads it: a derived attribute it names is
-/// written as the name it is written by, never the hash of it.
-fn spell(diagnostic: &mut Diagnostic, analyzer: &Analyzer) {
-    diagnostic.message = said(&diagnostic.message, analyzer);
+/// written as the name it is written by, `names` holding Dialog-DB's
+/// name for each the document's trees wrote, never the hash of it.
+fn spell(diagnostic: &mut Diagnostic, names: &BTreeMap<String, String>) {
+    diagnostic.message = crate::syntax::told_with(&diagnostic.message, names);
     diagnostic.refusal = diagnostic
         .refusal
         .take()
-        .map(|error| error.said(&|text| said(text, analyzer)));
+        .map(|error| error.said(&|text| crate::syntax::told_with(text, names)));
 }
 
-/// `text` as an author is given it.
-fn said(text: &str, _analyzer: &Analyzer) -> String {
-    crate::syntax::told(text)
+/// The derived attributes `trees` name, by Dialog-DB's name for each.
+fn names(trees: &[Syntax]) -> BTreeMap<String, String> {
+    trees
+        .iter()
+        .flat_map(crate::syntax::derived_names)
+        .collect()
 }
 
 /// Each form of `steps` whose report relation is named as one of an
@@ -420,6 +424,14 @@ mod tests {
                 "dialog.n.concept.list.count-open",
             ),
             ("(select (dialog.n ?x))", "dialog.n"),
+            (
+                "(select (dialog.n.c/list/label ?l ?n))",
+                "dialog.n.c/list/label",
+            ),
+            (
+                "(rule (dialog.n.c/list/label ?l ?n) (xyz.a ?l n: ?n))",
+                "dialog.n.c/list/label",
+            ),
             ("(select (dialog.n.anything ?x))", "dialog.n.anything"),
             (
                 r#"(assert (syntax.meta rule:1 description: "mine"))"#,
@@ -466,12 +478,14 @@ mod tests {
             assert!(!checked.steps.is_empty(), "{text}");
         }
         // A derived attribute's domain is told by whole segments.
-        assert!(!crate::syntax::is_derived("dialog.node.probe"));
-        assert!(!crate::syntax::is_derived("dialog.n.cx"));
-        assert!(crate::syntax::is_derived(&crate::syntax::derived(
-            "list",
-            "count-open"
-        )?));
+        use crate::syntax::{Named, named};
+        assert_ne!(named("dialog.node.probe"), Named::Reserved);
+        assert_eq!(named("dialog.n.cx"), Named::Reserved);
+        assert_eq!(named("dialog.n.c/list/count-open"), Named::Derived);
+        assert_eq!(
+            named(&crate::syntax::derived("list", "count-open")?),
+            Named::Reserved
+        );
         // An author's `?a.b` is the author's variable: named only where
         // it must not hold, it is refused as any such variable is, and
         // not taken for one an expansion made.

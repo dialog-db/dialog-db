@@ -210,6 +210,7 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
         .collect();
     let row = Read {
         domain: ONCE_WRITE.into(),
+        written: None,
         entity,
         fields,
     };
@@ -267,6 +268,8 @@ pub struct Query {
     pub rule: Option<DeductiveRule>,
     /// What to select.
     pub select: ConceptQuery,
+    /// The relation a row is answered as: a derived attribute by the name
+    /// it was written by.
     domain: String,
     entity: Slot,
     /// Each field's label, what its key is where it is an entry of a
@@ -423,11 +426,10 @@ impl Query {
             operand.terms.insert(label, fill(slot)?);
         }
         // A derived attribute is answered by the name it is written by,
-        // `list/count-open`, never the hash its relation is named by.
-        let shown =
-            crate::syntax::written_derived(&self.domain).unwrap_or_else(|| self.domain.clone());
+        // `list/count-open`, never the hash its relation is named by: that
+        // is what the query keeps.
         Ok(Syntax::Application(
-            Box::new(Syntax::Reference(shown)),
+            Box::new(Syntax::Reference(self.domain.clone())),
             operand,
         ))
     }
@@ -518,12 +520,15 @@ pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
+    // What is said of the tree is said by the names it was written with.
+    let names = crate::syntax::derived_names(form);
+    let told = |text: &str| crate::syntax::told_with(text, &names);
     match writes_reserved(form) {
         Some(Ok(reserved)) => return Err(Error::Reserved(reserved)),
-        Some(Err(refused)) => return Err(refused.said(&crate::syntax::told)),
+        Some(Err(refused)) => return Err(refused.said(&told)),
         None => {}
     }
-    compiled(form).map_err(|error| error.said(&crate::syntax::told))
+    compiled(form).map_err(|error| error.said(&told))
 }
 
 /// The relation under the notation's namespace a kernel rule `form`
@@ -532,16 +537,52 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
 /// did not name. A tree the notation analyzed derives only what it made
 /// and writes nothing there; a tree built otherwise may name anything.
 fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
-    use crate::syntax::{Named, named};
+    use crate::syntax::{DERIVED, Named, named};
+    // A hash of the notation's is no name a tree holds: a derived
+    // attribute is named by what was written, `dialog.n.c/list/label`,
+    // and Dialog-DB's name for it is made here. Nor is a malformed name of
+    // one.
+    let mut open = vec![form];
+    while let Some(part) = open.pop() {
+        let mut names: Vec<&str> = Vec::new();
+        match part {
+            Syntax::Reference(name) => names.push(name),
+            Syntax::Application(operator, operand) => {
+                names.extend(operand.terms.keys().map(String::as_str));
+                open.extend(operand.terms.values());
+                open.extend(operand.items.iter());
+                open.push(operator);
+            }
+            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                open.push(key);
+                open.push(value);
+            }),
+            Syntax::Tuple(items) => open.extend(items.iter()),
+            _ => {}
+        }
+        for name in names {
+            let relation = match name.rsplit_once('/') {
+                Some((relation, _)) if named(name) != Named::Derived => relation,
+                _ => name,
+            };
+            if relation.starts_with(DERIVED) && named(relation) != Named::Derived {
+                return Some(Ok(name.to_string()));
+            }
+        }
+    }
     let rule = Rule::parse(form).ok()?;
-    let reserved = |name: &str| named(name) == Named::Reserved;
     let read = match &rule.head {
         Head::Assert(read) | Head::Retract(read) | Head::Hold(read) | Head::Derive(read) => read,
         Head::Report(_) => return None,
     };
-    let derives = matches!(rule.head, Head::Derive(_));
-    if reserved(&read.domain) && !(derives && crate::syntax::made_derived(&read.domain)) {
-        return Some(Ok(read.domain.clone()));
+    // A rule derives a derived attribute it names, and writes nothing
+    // into one; it writes nothing into the rest of the namespace.
+    let derives = matches!(rule.head, Head::Derive(_)) && read.written.is_some();
+    if !derives && (read.written.is_some() || named(&read.domain) == Named::Reserved) {
+        return Some(Ok(read.written.as_ref().map_or_else(
+            || read.domain.clone(),
+            |written| format!("{DERIVED}/{written}"),
+        )));
     }
     // A field is written as an attribute of the head's domain, or, where
     // its label holds a `/`, as the attribute the label names: that must
@@ -551,7 +592,7 @@ fn writes_reserved(form: &Syntax) -> Option<Result<String, Error>> {
             return None;
         }
         match named(&field.attribute) {
-            Named::Reserved => Some(Ok(field.attribute.clone())),
+            Named::Reserved | Named::Derived => Some(Ok(field.label.clone())),
             Named::Attribute => None,
             _ => Some(Err(Error::Refused(format!(
                 "{form} writes `{}:`, which is no attribute of a domain: a field is written as \
@@ -638,6 +679,7 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
     if let (Some(description), Some(entity)) = (&rule.description, kept) {
         steps.push(Step::Assert(statement(&Read {
             domain: DESCRIBED.into(),
+            written: None,
             entity: Term::Entity(entity.as_str().to_string()),
             fields: vec![Field {
                 label: "description".into(),
@@ -1933,7 +1975,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 return Ok(Step::Query(Box::new(Query {
                     rule: None,
                     select,
-                    domain: read.domain.clone(),
+                    domain: read.written.clone().unwrap_or_else(|| read.domain.clone()),
                     entity,
                     fields,
                     derives: None,
@@ -2090,6 +2132,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     scope.body(rule)?;
     let head = Read {
         domain: relation,
+        written: None,
         entity: read.entity.clone(),
         fields: columns,
     };
@@ -2117,7 +2160,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             read,
         )?),
         select: serde_json::from_value(select).map_err(|error| refused("the query", error))?,
-        domain: read.domain.clone(),
+        domain: read.written.clone().unwrap_or_else(|| read.domain.clone()),
         entity,
         fields: slots,
         derives,
@@ -2275,7 +2318,7 @@ mod tests {
     #[test]
     fn it_says_a_fold_in_a_head_that_derives_is_not_supported() {
         // A derived attribute the notation named: it is shown as written.
-        let domain = crate::syntax::derived("list", "count-open").unwrap();
+        let domain = crate::syntax::derived_read("list", "count-open");
         assert!(matches!(
             steps(&format!(
                 "(rule ({domain} ?l is: (count ?t))

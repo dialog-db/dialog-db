@@ -640,7 +640,8 @@ async fn it_tells_an_evaluation_error_in_the_authors_terms() -> Result<()> {
         "(concept (list ?l name: ?n)
            (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
          (rule (list/label ?l ?n) (list ?l name: ?n))
-         (select (list/label ?l ?n))",
+         (query (list/card ?l is: ?card) (list/label ?l ?n) (is ?card {:label ?n}))
+         (select (list/card ?l is: ?card))",
     );
     let selection = checked
         .steps

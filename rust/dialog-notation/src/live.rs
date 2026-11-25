@@ -108,8 +108,11 @@ pub enum LiveError {
     /// The notation refused what it was given.
     #[error("{}", crate::syntax::told(&.0.to_string()))]
     Notation(#[from] Error),
-    /// Dialog-DB failed to evaluate a query.
-    #[error("{}", crate::syntax::told(&.0.to_string()))]
+    /// Dialog-DB failed to evaluate a query. What it says is shown as
+    /// it said it, and may name a derived attribute by the hash
+    /// Dialog-DB knows it by: [`Standing::told`] and [`Watched::told`]
+    /// say it in the author's terms, from the names of what they hold.
+    #[error(transparent)]
     Evaluation(#[from] EvaluationError),
     /// A rule could not be laid on the branch's overlay.
     #[error("a rule could not be laid on the branch: {}", crate::syntax::told(.0))]
@@ -604,6 +607,15 @@ pub struct Standing {
 }
 
 impl Standing {
+    /// `error` in the author's terms: a derived attribute it names by
+    /// Dialog-DB's hash is named as it was written, by the names of what
+    /// this holds, and the notation's variables are untagged. For an
+    /// [`LiveError::Evaluation`], whose own text is Dialog-DB's.
+    pub fn told(&self, error: &LiveError) -> String {
+        let names: std::collections::BTreeMap<String, String> = self.selection.names().clone();
+        crate::syntax::told_with(&error.to_string(), &names)
+    }
+
     /// The selection kept.
     pub fn selection(&self) -> &Selection {
         &self.selection
@@ -735,6 +747,21 @@ struct Taken {
 }
 
 impl Watched {
+    /// `error` in the author's terms: a derived attribute it names by
+    /// Dialog-DB's hash is named as it was written, by the names of what
+    /// this holds, and the notation's variables are untagged. For an
+    /// [`LiveError::Evaluation`], whose own text is Dialog-DB's.
+    pub fn told(&self, error: &LiveError) -> String {
+        let names: std::collections::BTreeMap<String, String> = self
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.conditions)
+            .flat_map(|condition| crate::syntax::derived_names(&condition.premise))
+            .collect();
+        crate::syntax::told_with(&error.to_string(), &names)
+    }
+
     /// The plan watched.
     pub fn plan(&self) -> &Plan {
         &self.plan
