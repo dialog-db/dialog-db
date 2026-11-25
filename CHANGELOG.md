@@ -14,6 +14,30 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule can be laid over one query of a transaction
+
+[#873](https://github.com/dialog-db/dialog-db/pull/873)
+
+`TransactionQuery::with_rule` lays a deductive rule over a single query
+of a transaction's view: the rule reads the claims the branch holds and
+the ones the transaction stages, a staged cardinality-one replace as the
+commit will leave the cell, and nothing of it is staged or written. A
+transaction's view stays closed to more fact sources; a rule adds no
+fact, only a way of reading the facts there are.
+
+What this changes for you:
+
+- New: `TransactionQuery::with_rule(DeductiveRule)`, chainable before
+  `select`. Each `Transaction::query()` starts with no rule laid over
+  it, so one query's rules are never another's.
+- Nothing else: a transaction query with no rule laid over it reads as
+  before.
+
+Why: a write computed from a read in the middle of a transaction, such
+as a notation document's `when`, may read through a rule of its own, a
+query of several premises. It had to read the branch without the
+transaction's own writes, or stage the rule and take it back before the
+commit.
 ### A rule whose head declares a type its body binds none of is refused
 
 [#869](https://github.com/dialog-db/dialog-db/pull/869)
