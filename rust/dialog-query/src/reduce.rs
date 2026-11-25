@@ -851,6 +851,61 @@ mod tests {
         Value::String(name.to_string())
     }
 
+    /// One number held as two types is one distinct value, and one
+    /// group, whatever order its rows arrive in; the group's key reads
+    /// as the narrowest type, the natural.
+    #[dialog_common::test]
+    async fn it_counts_and_groups_one_number_of_two_types_as_one() {
+        for (first, second) in [
+            (Value::UnsignedInt(3), Value::Float(3.0)),
+            (Value::Float(3.0), Value::UnsignedInt(3)),
+        ] {
+            let distinct = Reduce::new(
+                vec!["dept".to_string()],
+                vec![ReduceEntry::new(
+                    "n",
+                    Aggregator::CountDistinct,
+                    Term::var("x"),
+                )],
+            );
+            let rows = distinct
+                .fold(selection(vec![
+                    row(&[("dept", Some(dept("eng"))), ("x", Some(first.clone()))]),
+                    row(&[("dept", Some(dept("eng"))), ("x", Some(second.clone()))]),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(
+                present(&rows[0], "n"),
+                Value::UnsignedInt(1),
+                "{first:?} first"
+            );
+
+            let grouped = Reduce::new(
+                vec!["g".to_string()],
+                vec![ReduceEntry::new("n", Aggregator::Count, Term::var("x"))],
+            );
+            let rows = grouped
+                .fold(selection(vec![
+                    row(&[("g", Some(first.clone())), ("x", Some(dept("a")))]),
+                    row(&[("g", Some(second.clone())), ("x", Some(dept("b")))]),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{first:?} first: one group");
+            assert_eq!(
+                present(&rows[0], "g"),
+                Value::UnsignedInt(3),
+                "{first:?} first"
+            );
+            assert_eq!(
+                present(&rows[0], "n"),
+                Value::UnsignedInt(2),
+                "{first:?} first"
+            );
+        }
+    }
+
     #[dialog_common::test]
     async fn it_groups_and_folds_multiple_entries() {
         let reduce = Reduce::new(

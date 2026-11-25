@@ -294,3 +294,26 @@ impl Recall {
 fn encode(value: &Value) -> Result<Vec<u8>, EvaluationError> {
     serde_ipld_dagcbor::to_vec(value).map_err(|error| EvaluationError::Store(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A bound lookup finds the free run's rows of `this` when `this` is
+    /// one number held as another type.
+    #[dialog_common::test]
+    fn it_recalls_a_row_whose_this_is_one_number_of_another_type() -> anyhow::Result<()> {
+        let memo = Memo::default();
+        let mut row = Match::new();
+        row.bind(&Term::<Any>::var("this"), Value::Float(3.0))?;
+        memo.remember(b"rule".to_vec(), Vec::new(), Arc::new(vec![row]));
+        let rows = memo
+            .recall(b"rule", &encode(&Value::UnsignedInt(3))?)
+            .expect("the free run is remembered");
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+}

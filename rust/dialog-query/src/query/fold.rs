@@ -270,6 +270,21 @@ mod tests {
 
     type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
+    /// Two rows whose group field holds one number in two types are of
+    /// one group.
+    #[dialog_common::test]
+    fn it_keys_one_number_of_two_types_as_one_group() -> Result<()> {
+        let groups = vec!["g".to_string()];
+        let keyed = |value: Value| -> Result<Vec<u8>> {
+            let mut row = Match::new();
+            row.bind(&Term::<Any>::var("g"), value)?;
+            Ok(key(&row, &groups)?)
+        };
+        assert_eq!(keyed(Value::UnsignedInt(3))?, keyed(Value::Float(3.0))?);
+        assert_ne!(keyed(Value::UnsignedInt(3))?, keyed(Value::Float(3.5))?);
+        Ok(())
+    }
+
     /// To-do 1 tagged `errand` and `home`, to-do 2 with no tag.
     async fn todos() -> Result<(Operator, dialog_repository::Branch, Entity, Entity)> {
         let (operator, profile) = test_session_with_peer().await;

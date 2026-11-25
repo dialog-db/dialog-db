@@ -915,6 +915,49 @@ mod tests {
     use super::*;
     use crate::corpus::Value;
 
+    /// A variable bound to one number in two types, in either order,
+    /// holds the narrowest of them, so a join answers one
+    /// representation whichever premise binds it first.
+    #[dialog_common::test]
+    fn a_rebind_of_one_number_keeps_the_narrowest_type() {
+        let term: Term<Any> = Term::var("n");
+        for (first, second) in [
+            (Value::Float(3.0), Value::UnsignedInt(3)),
+            (Value::UnsignedInt(3), Value::Float(3.0)),
+            (Value::SignedInt(-3), Value::Float(-3.0)),
+        ] {
+            let mut row = Match::new();
+            row.bind(&term, first.clone()).expect("binds");
+            row.bind(&term, second.clone()).expect("agrees");
+            let narrow = if matches!(first, Value::Float(_)) {
+                second.clone()
+            } else {
+                first.clone()
+            };
+            assert_eq!(
+                row.lookup(&term)
+                    .expect("bound")
+                    .content()
+                    .expect("present"),
+                narrow,
+                "{first:?} then {second:?}"
+            );
+        }
+        // A rebind the lens agrees with but that is another number keeps
+        // the first binding.
+        let mut row = Match::new();
+        row.bind(&term, Value::SignedInt(4)).expect("binds");
+        row.bind(&term, Value::Float(4.3))
+            .expect("agrees through the lens");
+        assert_eq!(
+            row.lookup(&term)
+                .expect("bound")
+                .content()
+                .expect("present"),
+            Value::SignedInt(4)
+        );
+    }
+
     /// A typed variable only accepts values inhabiting its kind:
     /// the contract check behind every merge and propagation.
     #[dialog_common::test]
