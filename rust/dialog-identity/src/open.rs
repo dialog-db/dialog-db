@@ -206,6 +206,57 @@ mod tests {
         }
     }
 
+    /// A store whose first load misses: what an opener sees when it reads
+    /// just before another opener's create lands.
+    struct StaleFirstLoad {
+        inner: CredentialStore<VolatileSpace>,
+        missed: AtomicBool,
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Load> for StaleFirstLoad {
+        async fn execute(&self, input: Capability<Load>) -> Result<Credential, StorageError> {
+            if !self.missed.swap(true, Ordering::SeqCst) {
+                return Err(StorageError::NotFound("not there yet".into()));
+            }
+            input.perform(&self.inner).await
+        }
+    }
+
+    #[dialog_capability::provider]
+    impl Provider<Create> for StaleFirstLoad {
+        async fn execute(&self, input: Capability<Create>) -> Result<Credential, StorageError> {
+            input.perform(&self.inner).await
+        }
+    }
+
+    /// Opening a credential that another opener creates between this
+    /// opener's load and its create opens the one the other created:
+    /// two opens of one name racing end with one key, not a failure.
+    ///
+    /// The store here misses on the first load, as a load that ran just
+    /// before the other opener's create does, and holds the credential by
+    /// the time this opener creates it, so the create is refused as
+    /// already there.
+    #[dialog_common::test]
+    async fn it_opens_the_credential_another_opener_created_first() -> Result<(), IdentityError> {
+        let inner = CredentialStore::<VolatileSpace>::new();
+        let created = OpenCredential::create("raced").perform(&inner).await?;
+        let storage = StaleFirstLoad {
+            inner,
+            missed: AtomicBool::new(false),
+        };
+
+        let opened = OpenCredential::open("raced").perform(&storage).await?;
+
+        assert_eq!(
+            opened.did(),
+            created.did(),
+            "the open takes the credential the other opener created"
+        );
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_opens_a_credential() {
         let storage = CredentialStore::<VolatileSpace>::new();
