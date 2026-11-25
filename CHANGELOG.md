@@ -83,6 +83,13 @@ What this changes for you:
   `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
   is a document's macro, whatever its template. The refusal names the
   name and why.
+- A declared name is spelled as a stored name's part is: each part
+  between `/` starts with a lowercase letter, holds lowercase letters,
+  digits and `-` only, and does not end with `-`. A concept, query,
+  command, document macro or derived attribute named otherwise, `café`,
+  `Todo`, `to_do`, `a#b`, a name with a zero-width space, is refused naming
+  the part and the character, where it was declared and read under
+  exactly what was written.
 - A write under `dialog.` that Dialog-DB refuses to commit, `(assert
   (dialog.meta x:1 description: "z"))`, is refused when it is checked, in
   the author's terms, once per form, where it was accepted and the commit

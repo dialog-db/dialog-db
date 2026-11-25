@@ -1809,11 +1809,14 @@ impl Expander {
             _ => false,
         };
         // A document's macro, whatever its template, does not take a word
-        // of the notation's own: the prelude's own are its. A concept or
-        // a command is said as one.
+        // of the notation's own, the prelude's own are its, nor a name
+        // spelled as no stored name is. A concept or a command is said as
+        // one.
         if let Some(name) = pattern.applies()
             && self.prelude_read
-            && syntax::FORMS.contains(&name)
+            && (syntax::FORMS.contains(&name)
+                || syntax::named(name) == syntax::Named::Declarable
+                    && syntax::unspelled(name).is_some())
         {
             let what = match (shaped, items(&pattern).is_empty()) {
                 (true, true) => "command",
@@ -2571,6 +2574,14 @@ impl Expander {
                     .or_default();
                 if !uses.contains(&used) {
                     uses.push(used);
+                }
+                // A derived attribute's name is spelled as a declared one.
+                if let Some(why) = syntax::unspelled(name) {
+                    let message = format!(
+                        "{tree} names the derived attribute `{concept}/{name}`, which is spelled \
+                         as no stored name is: {why}"
+                    );
+                    return self.about(&tree, |_| Err(Error::Refused(message)));
                 }
                 return self.about(&tree, |_| derived(&tree, concept, name, &domain));
             }

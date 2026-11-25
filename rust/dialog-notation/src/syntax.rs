@@ -532,8 +532,27 @@ pub const FORMS: [&str; 30] = [
 /// digits and `-` only, and does not end with `-`, as Dialog-DB's rule
 /// for an attribute's name (`The::validate` in dialog-query). `None` for
 /// a name spelled so.
-pub fn unspelled(_name: &str) -> Option<String> {
-    None
+pub fn unspelled(name: &str) -> Option<String> {
+    name.split('/').find_map(|part| {
+        let first = part.chars().next()?;
+        let why = if !first.is_ascii_lowercase() {
+            format!("`{part}` starts with `{first}`")
+        } else if let Some(other) = part
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            format!("`{part}` holds `{other}`")
+        } else if part.ends_with('-') {
+            format!("`{part}` ends with `-`")
+        } else {
+            return None;
+        };
+        Some(format!(
+            "{why}: each part of a name starts with a lowercase letter and holds only \
+             lowercase letters, digits and `-`, not ending with one, as a stored name's does, \
+             `count-open`, `notebook/blocks`"
+        ))
+    })
 }
 
 /// Whether a document may declare a concept, a command or a query under
@@ -541,7 +560,10 @@ pub fn unspelled(_name: &str) -> Option<String> {
 /// [`FORMS`], and no longer than it is kept in, [`limit`]. Every place a
 /// document declares a name asks this.
 pub fn declares(name: &str) -> bool {
-    declarable(name) && !FORMS.contains(&name) && name.len() <= limit(name)
+    declarable(name)
+        && !FORMS.contains(&name)
+        && name.len() <= limit(name)
+        && unspelled(name).is_none()
 }
 
 /// The refusal of `form`, which declares `name` as `what` though it
@@ -552,6 +574,10 @@ pub fn undeclarable(form: &dyn std::fmt::Display, what: &str, name: &str) -> Err
                           query or a command, `todo` or `notebook/blocks`"
             .to_string(),
         Named::Declarable if name.len() > limit(name) => long(name),
+        Named::Declarable if unspelled(name).is_some() => format!(
+            "which is spelled as no stored name is: {}",
+            unspelled(name).unwrap_or_default()
+        ),
         Named::Declarable => format!(
             "which is one of the notation's own words: declared, it would shadow what \
              `({name} …)` means; declare it under another name"
