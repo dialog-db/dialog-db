@@ -19,6 +19,10 @@ use crate::source::test::TestEnv;
 use crate::the;
 use crate::{ConceptDescriptor, ConceptQuery, Entity, Match, Parameters, Term, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
+use dialog_repository::Branch;
+use dialog_storage::provider::storage::VolatileSpace;
+
+type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
 /// The cardinalities each read is made under.
 const CARDINALITIES: [Option<&str>; 3] = [None, Some("many"), Some("one")];
@@ -65,11 +69,8 @@ async fn bound(
 /// Commits each of `values` under `note/value` of an entity of its own.
 /// The entities, in that order.
 async fn store(
-    branch: &dialog_repository::Branch,
-    operator: &dialog_peer::Peer<
-        dialog_storage::provider::storage::VolatileSpace,
-        dialog_peer::Session,
-    >,
+    branch: &Branch,
+    operator: &Operator,
     values: &[Value],
 ) -> anyhow::Result<Vec<Entity>> {
     let mut entities = Vec::new();
