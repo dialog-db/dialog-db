@@ -14,10 +14,15 @@ pub use fs::*;
 mod flaky;
 pub use flaky::*;
 
-/// Returns a name unique within this process, formed as `{prefix}-{ts}-{seq}`.
+/// Returns a name unique across the processes of a test run, formed as
+/// `{prefix}-{ts}-{process}-{seq}`.
 ///
-/// Uses a high-resolution timestamp combined with a process-local counter so
-/// tests can run concurrently without colliding on database / directory names.
+/// The test runner starts one process per test, so every test draws its
+/// first name with sequence 0, and two tests whose first draw reads one
+/// clock value (a coarse clock, or the millisecond clock a browser has)
+/// would share a database or directory and find each other's data in it.
+/// The process part names them apart: the process id on native, random
+/// bytes drawn once per module on wasm, which has no process id.
 pub fn unique_name(prefix: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -27,13 +32,26 @@ pub fn unique_name(prefix: &str) -> String {
 /// The name [`unique_name`] forms from its parts: the clock reading
 /// `timestamp`, the part naming this process, `process`, and the
 /// process-local `sequence`.
-pub fn name_of(prefix: &str, timestamp: u128, _process: &str, sequence: u64) -> String {
-    format!("{prefix}-{timestamp}-{sequence}")
+pub fn name_of(prefix: &str, timestamp: u128, process: &str, sequence: u64) -> String {
+    format!("{prefix}-{timestamp}-{process}-{sequence}")
 }
 
-/// The part of a [`unique_name`] that names this process.
+/// The part of a [`unique_name`] that names this process: its id on
+/// native, random bytes drawn once on wasm.
 pub fn process_part() -> &'static str {
-    ""
+    static PART: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PART.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::process::id().to_string()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `Math.random` has 53 bits; two draws give the part 64.
+            let draw = || (js_sys::Math::random() * (1u64 << 32) as f64) as u64;
+            format!("{:016x}", (draw() << 32) | draw())
+        }
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
