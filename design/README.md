@@ -99,3 +99,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
+- [A replica cannot step over a value whose type it does not know](unknown-value-type.md):
+  **Directing.** A key's value ends where a table of known types says;
+  four approaches for an unknown type byte, among them framing by tag
+  range, with what each costs in stored keys and order.
