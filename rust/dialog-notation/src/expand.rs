@@ -2125,6 +2125,10 @@ impl Expander {
             let rules = self.top(tree.clone())?;
             choices = std::mem::take(&mut self.choices);
             for rule in rules {
+                if rule.applies() != Some("rule") {
+                    self.each(&rule, primitive)?;
+                    continue;
+                }
                 if let Some(rule) = self.install(rule)?
                     && !primitive.contains(&rule)
                 {
@@ -3182,6 +3186,12 @@ impl Expander {
         retired(&tree)?;
         let written = tree.clone();
         while tree.applies() != Some("rule") {
+            // A macro's use that stands for a query, or for several
+            // definitions, is handed back to the top level, each part
+            // as if it were written there.
+            if tree != written && matches!(tree.applies(), Some("query" | "all")) {
+                return Ok(members(tree));
+            }
             // A call stands in a rule, a query or a write. Alone at the
             // top level it says nothing to do.
             if tree.is_read()

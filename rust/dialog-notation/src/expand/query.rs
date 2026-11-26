@@ -90,6 +90,29 @@ fn collects_in(tree: &Syntax) -> Vec<&Syntax> {
     found
 }
 
+/// The `(distinct …)` forms of `tree` that no `(query …)` within it holds.
+fn collects_outside_queries(tree: &Syntax) -> Vec<&Syntax> {
+    fn walk<'a>(tree: &'a Syntax, found: &mut Vec<&'a Syntax>) {
+        match tree {
+            Syntax::Application(..) if tree.applies() == Some("query") => {}
+            Syntax::Application(operator, operand) if tree.applies() != Some(DISTINCT) => {
+                walk(operator, found);
+                operand.items.iter().for_each(|item| walk(item, found));
+                operand.terms.values().for_each(|term| walk(term, found));
+            }
+            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                walk(key, found);
+                walk(value, found);
+            }),
+            Syntax::Tuple(items) => items.iter().for_each(|item| walk(item, found)),
+            _ => found.extend(collects_in(tree)),
+        }
+    }
+    let mut found = Vec::new();
+    walk(tree, &mut found);
+    found
+}
+
 /// Every variable of `trees`, each once, in the order they first stand.
 fn variables<'a>(trees: impl IntoIterator<Item = &'a Syntax>) -> Vec<String> {
     let mut all = Vec::new();
@@ -210,7 +233,15 @@ impl Expander {
                         )))
                     });
                 }
-                if let Some(found) = collects_in(tree).first() {
+                // A query a macro's template holds is checked where the
+                // macro is expanded: it is syntax there, not a conclusion.
+                let syntax = word == "rule" && head.and_then(Syntax::applies) == Some("syntax");
+                let collected = if syntax {
+                    collects_outside_queries(tree)
+                } else {
+                    collects_in(tree)
+                };
+                if let Some(found) = collected.first() {
                     let found = (*found).clone();
                     let why = if word == "concept" {
                         "a concept maps facts both ways, and the whole of a field is no fact"
