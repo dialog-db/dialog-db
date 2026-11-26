@@ -96,6 +96,10 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [Writers on separate branches wait on one another in the file archive](file-writers.md):
   **Building.** One file, an extent per writer: processes on separate
   branches write without waiting on one another, as they do on main.
+- [A release reads every spelling of a rule, a concept or an attribute that any earlier release stored](stored-format.md):
+  **Directing.** Format 5 for everything, and what a live space and an
+  older replica go through on the way: an inventory, who names an
+  identity, two releases in one space, five approaches and a matrix.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
