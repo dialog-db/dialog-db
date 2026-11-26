@@ -11,6 +11,7 @@ use crate::formula::math::{Difference, Floor, Modulo, Product, Quotient, Round, 
 use crate::formula::number::Numeric;
 use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
 use crate::selection::{Match, Selection};
+use crate::supplied::{self, NotationReadQuery, READ, READ_CELLS};
 use crate::term::Term;
 use crate::types::Any;
 use crate::{Binding, Environment, Formula, Parameters, Schema, Value, try_stream};
@@ -55,22 +56,34 @@ macro_rules! define_formulas {
                 #[serde(rename = $name)]
                 $variant($q),
             )*
+            /// Formula `notation/read`: declared here, its implementation
+            /// supplied by the notation through the environment
+            /// ([`crate::supplied`]). No rule may hold it.
+            #[serde(rename = "notation/read")]
+            NotationRead(NotationReadQuery),
         }
 
         impl FormulaQuery {
             /// Returns the formal notation name (e.g. `"math/sum"`).
             pub fn name(&self) -> &'static str {
-                match self { $( Self::$variant(_) => $name, )* }
+                match self { $( Self::$variant(_) => $name, )* Self::NotationRead(_) => READ }
             }
 
             /// Returns the static cell definitions for this formula.
             pub(crate) fn cells(&self) -> &'static Cells {
-                match self { $( Self::$variant(_) => <$ty>::cells(), )* }
+                match self { $( Self::$variant(_) => <$ty>::cells(), )* Self::NotationRead(_) => &READ_CELLS }
             }
 
             /// Runs the formula's resolve logic against the given bindings.
             fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* }
+                match self {
+                    $( Self::$variant(_) => <$ty>::resolve(bindings), )*
+                    // Asked of its implementation, which only the
+                    // environment holds: `evaluate` finds it there.
+                    Self::NotationRead(_) => Err(EvaluationError::Unsupplied {
+                        formula: READ.into(),
+                    }),
+                }
             }
 
             /// Runs the formula's resolve logic against the given bindings,
@@ -80,23 +93,33 @@ macro_rules! define_formulas {
                 bindings: &mut Bindings,
                 cache: &FormulaCache,
             ) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::resolve_with(bindings, cache), )* }
+                match self {
+                    $( Self::$variant(_) => <$ty>::resolve_with(bindings, cache), )*
+                    Self::NotationRead(_) => Err(EvaluationError::Unsupplied {
+                        formula: READ.into(),
+                    }),
+                }
             }
 
             /// Returns the base cost of evaluating this formula.
             pub fn cost(&self) -> usize {
-                match self { $( Self::$variant(_) => <$ty>::cost(), )* }
+                match self { $( Self::$variant(_) => <$ty>::cost(), )* Self::NotationRead(_) => NotationReadQuery::cost() }
             }
 
             /// Returns the parameters for this formula application.
             pub fn parameters(&self) -> Parameters {
-                match self { $( Self::$variant(q) => q.clone().into(), )* }
+                match self { $( Self::$variant(q) => q.clone().into(), )* Self::NotationRead(q) => q.terms().clone() }
             }
 
             /// This formula applied to `terms` instead of its own: the
             /// same formula, re-bound, validated as a fresh application.
             pub fn with_parameters(&self, terms: Parameters) -> Result<Self, crate::error::TypeError> {
-                match self { $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )* }
+                match self {
+                    $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )*
+                    Self::NotationRead(_) => {
+                        Ok(Self::NotationRead(NotationReadQuery::new(terms)?))
+                    }
+                }
             }
         }
 
@@ -283,7 +306,23 @@ impl FormulaQuery {
     ) -> impl Selection {
         let formula = self;
         let cache = FormulaCache::of(env);
+        let reader = supplied::reader(env);
         try_stream! {
+            // A declared formula whose implementation another crate
+            // supplies is asked of what the environment holds, and a
+            // query asking one where none is held fails before it reads a
+            // row: it is never a query that answers nothing.
+            if let FormulaQuery::NotationRead(query) = &formula {
+                let reader = reader.ok_or_else(|| EvaluationError::Unsupplied {
+                    formula: READ.into(),
+                })?;
+                for await candidate in selection {
+                    for row in query.expand(candidate?, reader.as_ref())? {
+                        yield row;
+                    }
+                }
+                return;
+            }
             for await candidate in selection {
                 for extension in formula.expand_with(candidate?, &cache)? {
                     yield extension;

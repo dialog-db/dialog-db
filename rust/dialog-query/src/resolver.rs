@@ -79,6 +79,7 @@ use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::supplied::{ANALYZE, ANALYZE_CELLS, NotationAnalyzeQuery};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -302,11 +303,16 @@ pub enum ResolverQuery {
     /// Resolver `tree/value`.
     #[serde(rename = "tree/value")]
     TreeValue(TreeValueQuery),
+    /// Resolver `notation/analyze`: declared here, its implementation
+    /// supplied by the notation through the environment
+    /// ([`crate::supplied`]). No rule may hold it.
+    #[serde(rename = "notation/analyze")]
+    NotationAnalyze(NotationAnalyzeQuery),
 }
 
 /// One slot of a row a resolver yields: the term it binds, and its
 /// value, or `None` when the slot does not apply to the row.
-type Slot<'a> = (&'a Term<Any>, Option<Value>);
+pub(crate) type Slot<'a> = (&'a Term<Any>, Option<Value>);
 
 impl ResolverQuery {
     /// Returns the formal notation name (e.g. `"tree/node"`).
@@ -317,6 +323,7 @@ impl ResolverQuery {
             Self::TreeEntry(_) => "tree/entry",
             Self::TreeBlock(_) => "tree/block",
             Self::TreeValue(_) => "tree/value",
+            Self::NotationAnalyze(_) => ANALYZE,
         }
     }
 
@@ -328,6 +335,7 @@ impl ResolverQuery {
             Self::TreeEntry(_) => &TREE_ENTRY_CELLS,
             Self::TreeBlock(_) => &TREE_BLOCK_CELLS,
             Self::TreeValue(_) => &TREE_VALUE_CELLS,
+            Self::NotationAnalyze(_) => &ANALYZE_CELLS,
         }
     }
 
@@ -344,6 +352,7 @@ impl ResolverQuery {
             Self::TreeEntry(query) => &query.of,
             Self::TreeBlock(query) => &query.of,
             Self::TreeValue(query) => &query.of,
+            Self::NotationAnalyze(query) => query.forms(),
         }
     }
 
@@ -368,6 +377,7 @@ impl ResolverQuery {
             Self::TreeEntry(query) => query.parameters(),
             Self::TreeBlock(query) => query.parameters(),
             Self::TreeValue(query) => query.parameters(),
+            Self::NotationAnalyze(query) => query.terms().clone(),
         }
     }
 
@@ -381,6 +391,7 @@ impl ResolverQuery {
             Self::TreeEntry(query) => query.replace(terms),
             Self::TreeBlock(query) => query.replace(terms),
             Self::TreeValue(query) => query.replace(terms),
+            Self::NotationAnalyze(query) => query.replace(terms),
         }
         renamed
     }
@@ -425,6 +436,14 @@ impl ResolverQuery {
     {
         let resolver = self;
         try_stream! {
+            // A declared resolver whose implementation another crate
+            // supplies reads no node: it is asked of that implementation.
+            if let ResolverQuery::NotationAnalyze(query) = &resolver {
+                for await row in query.clone().evaluate(env, selection) {
+                    yield row?;
+                }
+                return;
+            }
             for await candidate in selection {
                 let mut base = candidate?;
                 // Every row this one extends into shares its bindings.
@@ -616,6 +635,8 @@ impl ResolverQuery {
                 .unwrap_or_default(),
             // Read through the blob store in `evaluate`, not as a node.
             Self::TreeValue(_) => Vec::new(),
+            // Asked of its implementation in `evaluate`, never a node.
+            Self::NotationAnalyze(_) => Vec::new(),
         };
         rows(base, projected)
     }
@@ -651,7 +672,10 @@ fn placed(scheme: &str, node: &[u8; 32], at: u64) -> Result<Entity, DialogCorpus
 /// when a constant slot disagrees with its value or a variable it would
 /// bind is already bound otherwise — the membership-test semantics
 /// shared with formulas; any other bind failure is a genuine error.
-fn rows(base: &Match, projected: Vec<Vec<Slot<'_>>>) -> Result<Vec<Match>, EvaluationError> {
+pub(crate) fn rows(
+    base: &Match,
+    projected: Vec<Vec<Slot<'_>>>,
+) -> Result<Vec<Match>, EvaluationError> {
     let mut rows = Vec::with_capacity(projected.len());
     'row: for slots in projected {
         let mut row = base.clone();
