@@ -1037,6 +1037,15 @@ impl<'a> QueryEnv<'a> {
         }
     }
 
+    /// `rows`, counted into the demand's rows read when a subscription
+    /// records this read, and as they are otherwise.
+    fn counted(&self, rows: FactStream<'a>) -> FactStream<'a> {
+        match &self.demand {
+            Some(demand) => demand.counting(rows),
+            None => rows,
+        }
+    }
+
     /// Note a rule-discovery read: recorded as rule demand when
     /// recording is on, and kept so a rule set assembled from it can
     /// replay it for a later subscription.
@@ -1563,8 +1572,16 @@ impl<'a> QueryEnv<'a> {
                         .collect()
                 };
             if !A::NAMED {
-                return Ok(A::rows(merge_grouped(streams, manifest, format.keys)));
+                let merged = merge_grouped(streams, manifest, format.keys);
+                return Ok(A::rows(self.counted(merged)));
             }
+            let streams = match &self.demand {
+                Some(_) => streams
+                    .into_iter()
+                    .map(|stream| self.counted(stream))
+                    .collect(),
+                None => streams,
+            };
             // The layers in the streams' order: the groups are gathered in
             // another order than they are merged in.
             layers.sort_by_key(|(group, _)| *group);

@@ -74,7 +74,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
@@ -157,6 +157,9 @@ pub struct Demand {
     /// `head` permanently and silently disable incremental
     /// maintenance for the subscription.
     metadata: Arc<Mutex<BTreeSet<Entity>>>,
+    /// The rows that the fact scans of this cover's subscription gave to its
+    /// evaluations so far, whichever cover recorded them.
+    rows: Arc<AtomicUsize>,
 }
 
 /// The overlay-injected attributes whose values change whenever the
@@ -221,6 +224,30 @@ impl Demand {
     /// An empty cover.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `rows`, a stream of a fact scan that this cover recorded, counting each
+    /// row that it gives.
+    pub(crate) fn counting<'a>(
+        &self,
+        rows: dialog_corpus::FactStream<'a>,
+    ) -> dialog_corpus::FactStream<'a> {
+        let count = Arc::clone(&self.rows);
+        Box::pin(futures_util::StreamExt::inspect(rows, move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }))
+    }
+
+    /// The rows that a fact scan gave so far.
+    pub(crate) fn rows_read(&self) -> usize {
+        self.rows.load(Ordering::Relaxed)
+    }
+
+    /// Takes the count of rows from `earlier`, the cover that this one
+    /// replaces, so that the count goes on across evaluations.
+    fn counting_on(mut self, earlier: &Demand) -> Self {
+        self.rows = Arc::clone(&earlier.rows);
+        self
     }
 
     /// Record a fact scan's demanded range. The range covers
@@ -716,6 +743,13 @@ where
         &self.demand
     }
 
+    /// The rows that the evaluations of this subscription read so far, from
+    /// each fact scan. A host can compare it across two polls, to measure what
+    /// one evaluation costs.
+    pub fn rows_read(&self) -> usize {
+        self.demand.rows_read()
+    }
+
     /// Full evaluations performed so far (the first poll plus every
     /// fallback from incremental maintenance).
     pub fn recomputes(&self) -> usize {
@@ -850,7 +884,7 @@ where
             }
         }
 
-        let demand = Demand::new();
+        let demand = Demand::new().counting_on(&self.demand);
         let results = self.evaluate(env, &demand, &self.query).await?;
         self.recomputes += 1;
 
