@@ -48,6 +48,43 @@ a number happened to be read as; computing at the wider precision and
 letting a narrower reader truncate the result is what a stored float
 already gets.
 
+### A query reports the rules it left out, as it runs
+
+[#889](https://github.com/dialog-db/dialog-db/pull/889)
+
+A rule a branch holds that did not compile here works as if it were not
+there (see the entry below on `dialog.rule/error`), and a query whose
+derivation reaches one answered without it and said nothing. A query
+now comes with a report of what it left out. The report is filled as
+the query runs and readable at any point: the rules of a concept are
+assembled before the first row that concept gives, so a report read
+when a row arrives already lists the rules left out of what produced
+it. A report read before the rows are first polled is empty, since
+the query has not run yet. Nothing has to be drained to read it, and
+dropping the query early loses nothing reported. Only rules the
+query's derivation reaches are reported.
+
+What this changes for you:
+
+- `SelectQuery::perform` (a branch's `query().select(..)`) and
+  `TransactionSelectQuery::perform` (a transaction's `query()`) return
+  `dialog_repository::Answered<S>`, a stream of the same rows as
+  before, so code that reads rows is unchanged. Code that named the
+  returned type as `impl Output<..>` still compiles; code that relied
+  on it being exactly the inner stream type does not.
+- New: `Answered::report()`, a `Report` handle; `Report::entries()`,
+  what was reported so far; `Report::stream()`, each entry as it is
+  reported, ending when the query's stream ends or is dropped; and
+  `Answered::try_report()`, which drains the rows and returns them with
+  the report.
+- New: `dialog_repository::Entry`, `#[non_exhaustive]`, with
+  `RuleSkipped { rule, concludes, reason: RuleError }`. `concludes` is
+  the `on:` entity of the relation the rule would have concluded.
+- A rule left out for closing a cycle is reported too, as
+  `RuleError::Cycle`.
+
+Why: a query that answers without a rule it would have used should say
+so, and say it while it runs, not only after every row is read.
 ### One number held as two types groups, counts and joins as one
 
 [#888](https://github.com/dialog-db/dialog-db/pull/888)
@@ -1687,6 +1724,8 @@ and names the rule.
   an older release still drops them, so a mixed fleet differs in what
   such a rule derives until every replica upgrades.
 
+- A query's report: nothing stored or synced changes. An embedder runs
+  nothing.
 - One number held as two types groups, counts and joins as one: nothing
   stored or synced changes, no identity moves and nothing is rewritten.
   A fold's groups, a distinct count and a join's binding are computed
