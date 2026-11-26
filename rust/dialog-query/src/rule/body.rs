@@ -51,6 +51,8 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// The latest rule body format this release reads and writes: the one
 /// a rule that holds a pattern is written in.
@@ -119,6 +121,29 @@ pub(crate) fn check_pattern(bytes: &[u8], held: Option<String>) -> Result<(), St
         _ => Ok(()),
     }
 }
+
+/// Why a stored body gives no rule: its bytes are no body this release
+/// reads, or they are one whose descriptor does not compile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BodyError {
+    /// The bytes decode to no descriptor: not dag-cbor, a format this
+    /// release does not read, a spelling it refuses, or a pattern the
+    /// body's format does not write.
+    Undecodable(String),
+    /// The descriptor decodes and does not compile: the analysis refuses
+    /// it, for a type error or a binding it cannot make.
+    IllTyped(String),
+}
+
+impl Display for BodyError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            BodyError::Undecodable(reason) | BodyError::IllTyped(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl Error for BodyError {}
 
 /// The descriptor a stored body holds, in [`FORMAT`] or any earlier.
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {

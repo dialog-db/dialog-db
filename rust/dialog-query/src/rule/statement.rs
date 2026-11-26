@@ -94,6 +94,16 @@ pub fn invalid_attr() -> CorpusRelation {
     the!("dialog.rule/invalid").into()
 }
 
+/// The `dialog.rule/error` attribute: a rule a branch holds and does not
+/// evaluate, valued with the diagnostic, its kind first (`older`,
+/// `newer`, `forged`, `undecodable`, `ill-typed`, `cycle`). It answers
+/// every rule `dialog.rule/invalid` and `dialog.rule/quarantined` answer,
+/// as one kind of thing: a rule that did not compile here. Never stored:
+/// a branch answers it from the rules its layers hold.
+pub fn error_attr() -> CorpusRelation {
+    the!("dialog.rule/error").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
