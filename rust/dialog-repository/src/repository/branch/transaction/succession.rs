@@ -618,13 +618,17 @@ impl Cell {
             Change::Assert(value, Cardinality::One) => {
                 // The claim a read returns, the newest, among the live
                 // claims (the written value's own claim included, when
-                // the cell holds it) and the derived candidates.
+                // the cell holds it) and the derived candidates, of the
+                // written value's stratum: a claim of another is a claim
+                // of another relation, which the write succeeds none of.
+                let stratum = value.stratum();
                 let pool: Vec<&Candidate> = self
                     .live
                     .iter()
                     .chain(derived.iter().filter(|candidate| {
                         !self.live.iter().any(|claim| claim.value == candidate.value)
                     }))
+                    .filter(|candidate| candidate.value.stratum() == stratum)
                     .collect();
                 let elected = Cardinality::One
                     .elect(

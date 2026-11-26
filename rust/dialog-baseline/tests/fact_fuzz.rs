@@ -92,15 +92,17 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     is: value(&mut rng),
                     cause: None,
                 };
-                // A `last` write retires the one claim the read elects,
-                // which the model can name only while the cell holds at
-                // most one; a fuller cell takes an append instead.
-                let held = live
-                    .iter()
-                    .filter(|held| held.the == the && held.of == of)
-                    .count();
+                // A `last` write retires the one claim the read elects
+                // among the claims of its own stratum, which the model can
+                // name only while the cell holds at most one of them; a
+                // fuller cell takes an append instead. Claims of another
+                // stratum stand beside it.
+                let stratum = fact.is.stratum();
+                let rival =
+                    |held: &Fact| held.the == the && held.of == of && held.is.stratum() == stratum;
+                let held = live.iter().filter(|held| rival(held)).count();
                 if held <= 1 {
-                    live.retain(|held| !(held.the == the && held.of == of));
+                    live.retain(|held| !rival(held));
                     live.push(fact.clone());
                     Instruction::Assert(fact, dialog_corpus::Cardinality::One)
                 } else {
