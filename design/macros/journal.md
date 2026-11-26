@@ -2042,3 +2042,11 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Open.** "A formula per type" is asked of the maintainer and not built.
 
+## 2026-11-26, Designing: a constraint per type
+
+**Asked.** By the maintainer, relayed: a formula `(integer of: ?n is: ?m)`, unified as `==` is, narrower for a wider `?n` and an error for an incompatible one, and a short form `(integer ?t)` in a body. And, of where inference cannot place it: "I would pretend it does at runtime by which I mean it filters out other types."
+
+**Learned.** From the code, in [design-type-constraint](design-type-constraint.md): a type on a scan is a lens that floors 2.5 under integer, while the engine's type constraint filters by the value's own kind; inference carries a constraint's type into the attribute scans of its rule, and the notation inlines concepts, so the maintainer's `stuff` example reaches the `demo.a/total` scan (H1, untested); integer and natural conflict where his words have one narrow the other; the constraint's kind has no stable stored spelling, and a body that holds one belongs in format 5, which is unreleased.
+
+**Decided.** Not decided. What the short form does where no scan binds its variable is the open matrix: filtering by kind or by the type's reading each make compile time and run time disagree on numbers; refusing there, or lowering every short form to the long one, do not. For the maintainer.
+
