@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A body variable used once is a blank in a rule's identity
 
-Pull request: to be linked when it opens.
+[#893](https://github.com/dialog-db/dialog-db/pull/893)
 
 A rule's identity hashes its canonical spelling, which already ignores
 how its variables are named and the order its premises are listed in.
