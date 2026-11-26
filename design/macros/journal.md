@@ -2058,3 +2058,17 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Decided.** Not decided. The agent recommends an extension point in dialog-query, a registered formula, in queries only, pure; branch-dependent diagnostics and completions as joins with definitions on the branch, a later step. For the maintainer.
 
+## 2026-11-26, Decided: a bare name is the repository's, and a namespace is a layer
+
+**Asked.** The maintainer came back to the entry of 2026-11-20, "whose a bare name is", and decided it: "repository subject is canonical name meaning names without qualifier ... So hierarchical references and root is the repo itself", and "yes I think this should be a decision, if we revisit it we do revisit it." Of a qualified name resolving its first part to a subject, an account DID say: "Scratch this we should do the layer based approach." Of who may define under a namespace: "maybe solution here is to bring namespace as a layer instead that way all assertions can only be done by whoever can write into that layer", and then: "You can assert into layers, but those won't propagate unless you have upstream you can write to." Of pasting between two spaces: "there is no guarantee that same references even exist, so that's fine." Of completion: "if I type todo autocomplete can offer todos across all the namespaces not just over the canonical one."
+
+**Decided.** By the maintainer:
+
+- A bare name is the repository's own namespace: the repository's subject is the root.
+- A namespace is a layer. A qualified reference names a layer and a name defined in it. No binding in the root maps a qualifier to a subject.
+- Who may define under a namespace is whoever may write the layer, and the enforcement is at propagation: anyone may assert into any layer on their own replica, and the layer's claims reach others only through an upstream that accepts the writer.
+- An upstream's or another author's definitions are reached by their layer's name, and never appear under the bare name.
+- Unchanged from 2026-11-20: many definitions under one name, told apart by signature, else `#hash`. Completion offers matches in every layer and inserts the qualified form. Text pasted between two spaces need not mean the same.
+
+**Learned.** Read in the engine for this entry, at `a79de3d2f` ([gaps](gaps.md) row 58): a durable layer has no upstream of its own, the primary's carry it, so propagation decides per repository, not per layer; and a claim names no writer, so a reader cannot tell a layer's propagated claims from ones written locally. Both are what the decision needs and the engine does not have yet.
+

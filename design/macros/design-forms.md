@@ -384,6 +384,10 @@ Not built:
 - **The walker reading the branch.** The definitions the expander resolves against are the ones it holds in memory. The branch holds the same thing, and is not asked (H3).
 - **A concept's entity.** Nothing ties a definition to the `concept:` entity its attributes make. `list-item` has none: its entity is the value of the attribute it reads, so it is a rule that concludes a concept.
 
+### Decided 2026-11-26: whose a name is
+
+By the maintainer (journal, 2026-11-26, "Decided: a bare name is the repository's, and a namespace is a layer"): a bare name is the repository's own, its subject the root; a namespace is a layer, and a qualified reference names a layer and a name defined in it; who may define in a namespace is whoever may write its layer, enforced where the layer's claims propagate, not where they are asserted; another author's or an upstream's definitions are reached by their layer's name and never under the bare name. Many definitions under one name, told apart by signature else `#hash`, stands. What it takes, and what is open, is [gaps](gaps.md) row 58.
+
 ## What to store, and how
 
 Superseded for forms: what is kept is the syntax tree, above, in maps and lists, and not a record of positions. What stands of this advice is that no domain is the special domain, and that a name and a label are symbols of none.
