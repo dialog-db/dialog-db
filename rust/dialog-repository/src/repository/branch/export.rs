@@ -73,7 +73,15 @@ impl<E: Exporter> Export<'_, E> {
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
                 let spilled = fetch_spilled(&raw_store, &archive, &entry.key).await?;
-                let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)?;
+                let fact = match Fact::from_key_datum_with_value(&entry.key, datum, spilled) {
+                    Ok(fact) => fact,
+                    // A claim this replica cannot read yet is not exported.
+                    Err(dialog_corpus::DialogCorpusError::CorruptEntry(reason)) => {
+                        dialog_corpus::pass_over(Some(entry.key.as_ref()), reason);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 exporter.write(&fact).await?;
             }
         }

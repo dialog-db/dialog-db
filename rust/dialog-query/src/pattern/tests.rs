@@ -1803,6 +1803,47 @@ fn it_refuses_a_pattern_in_a_body_of_an_earlier_format() {
     );
 }
 
+/// A bare body, the descriptor with no envelope that the release before
+/// formats wrote, reads as format 0: one that holds a pattern is refused
+/// when it is read, deductive or inductive, and so is an inductive body
+/// that holds one under any format below 5.
+#[dialog_common::test]
+fn it_refuses_a_pattern_in_a_bare_body_and_in_an_earlier_inductive_body() {
+    use crate::rule::InductiveRule;
+    let rule = card_rule([0, 1, 2]).expect("compiles");
+    let bare = serde_ipld_dagcbor::to_vec(&rule.canonical_descriptor()).expect("a body");
+    let error = DeductiveRule::decode(&bare).expect_err("refused");
+    assert!(error.contains("writes no pattern"), "{error}");
+
+    let premises = vec![
+        reading(
+            the!("note/title"),
+            Term::var("this"),
+            Term::var("title"),
+            None,
+        ),
+        reading(
+            the!("note/body"),
+            Term::var("this"),
+            Term::var("body"),
+            None,
+        ),
+        Pattern::Map(shape(&[("title", var("title")), ("body", var("body"))]))
+            .is(Term::<Any>::var("card")),
+    ];
+    let inductive = InductiveRule::new(card(), premises).expect("compiles");
+    let bare = serde_ipld_dagcbor::to_vec(&inductive.canonical_descriptor()).expect("a body");
+    let error = InductiveRule::decode(&bare).expect_err("refused");
+    assert!(error.contains("writes no pattern"), "bare: {error}");
+    for format in [0, 3, 4] {
+        let stamped = body::encode_as(format, &inductive.canonical_descriptor()).expect("a body");
+        let error = InductiveRule::decode(&stamped).expect_err("refused");
+        assert!(error.contains("writes no pattern"), "{format}: {error}");
+    }
+    let stamped = body::encode_as(5, &inductive.canonical_descriptor()).expect("a body");
+    assert!(InductiveRule::decode(&stamped).is_ok());
+}
+
 /// `geo(this, at) :- lat(this, lat), at == {geo/lat: lat}`: a rule that
 /// builds a record keyed by a symbol.
 fn symbol_rule() -> DeductiveRule {
