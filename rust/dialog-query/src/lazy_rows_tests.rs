@@ -331,14 +331,13 @@ async fn values(
         .collect())
 }
 
-/// A stored entity value another writer left uncanonical reads the same
-/// to a scan binding in place as to one binding eagerly. The eager read
-/// (`to_owned`, `decode_value`) parses an entity value and normalizes
-/// it; `checked` requires the canonical rendering and calls the row
-/// `CorruptEntry`, which the in-place scan passes over. So the same
-/// stored row reads in one scan of a query and is missing from another.
+/// A stored entity value another writer left uncanonical is a claim this
+/// dialog cannot read: a scan binding in place and one binding eagerly
+/// both pass it over, so the same stored row is missing from every scan
+/// of a query alike, and neither reads it as the entity it would parse
+/// to.
 #[dialog_common::test]
-async fn an_uncanonical_entity_value_reads_alike_in_place_and_eagerly() -> anyhow::Result<()> {
+async fn an_uncanonical_entity_value_is_passed_over_in_place_and_eagerly() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -353,8 +352,8 @@ async fn an_uncanonical_entity_value_reads_alike_in_place_and_eagerly() -> anyho
     let eager = values(&source, "link/to", Match::eager()).await;
     let lazy = values(&source, "link/to", Match::new()).await;
     assert!(
-        matches!(&eager, Ok(values) if values.len() == 1),
-        "the eager scan reads the row, got {eager:?}"
+        matches!(&eager, Ok(values) if values.is_empty()),
+        "the eager scan passes the row over, got {eager:?}"
     );
     assert_eq!(
         format!("{lazy:?}"),
@@ -364,12 +363,12 @@ async fn an_uncanonical_entity_value_reads_alike_in_place_and_eagerly() -> anyho
     Ok(())
 }
 
-/// A stored entity value that is not a URI at all fails an eager scan
-/// (`decode_value` refuses it: `InvalidValue`, not `CorruptEntry`) and,
-/// as `checked` claims to classify as `to_owned` does, fails the scan
-/// binding in place too, rather than being passed over by it.
+/// A stored entity value that is not a URI at all is a claim this dialog
+/// cannot read: a scan binding eagerly and one binding in place both pass
+/// it over, and neither fails on it.
 #[dialog_common::test]
-async fn an_entity_value_that_is_no_uri_fails_in_place_as_it_fails_eagerly() -> anyhow::Result<()> {
+async fn an_entity_value_that_is_no_uri_is_passed_over_in_place_and_eagerly() -> anyhow::Result<()>
+{
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -384,12 +383,12 @@ async fn an_entity_value_that_is_no_uri_fails_in_place_as_it_fails_eagerly() -> 
     let eager = values(&source, "link/to", Match::eager()).await;
     let lazy = values(&source, "link/to", Match::new()).await;
     assert!(
-        matches!(eager, Err(EvaluationError::Store(_))),
-        "the eager scan fails on the row, got {eager:?}"
+        matches!(&eager, Ok(values) if values.is_empty()),
+        "the eager scan passes the row over, got {eager:?}"
     );
     assert!(
-        matches!(lazy, Err(EvaluationError::Store(_))),
-        "expected the in-place scan to fail as the eager scan fails ({eager:?}), got {lazy:?}"
+        matches!(&lazy, Ok(values) if values.is_empty()),
+        "the in-place scan passes the row over, got {lazy:?}"
     );
     Ok(())
 }

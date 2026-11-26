@@ -1137,7 +1137,7 @@ mod tests {
     /// scheme instantiates per row), and a row whose inputs cannot
     /// share a single type is a non-match — no promotion, no error.
     #[dialog_common::test]
-    async fn it_sums_signed_integers_and_filters_mixed_rows() -> anyhow::Result<()> {
+    async fn it_sums_signed_integers_and_mixed_rows_as_floats() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1149,8 +1149,7 @@ mod tests {
             .assert(the!("game/score").of(alice.clone()).is(-5i64))
             .assert(the!("game/bonus").of(alice.clone()).is(-3i64))
             .assert(the!("game/score").of(bob.clone()).is(2i64))
-            // Bob's bonus is a float: his row cannot instantiate the
-            // scheme to one type.
+            // Bob's bonus is a float: his row computes as floats.
             .assert(the!("game/bonus").of(bob.clone()).is(0.5f64))
             .commit()
             .publish()
@@ -1191,11 +1190,24 @@ mod tests {
 
         assert_eq!(
             results.len(),
-            1,
-            "Alice computes within one type; Bob's mixed row is a non-match"
+            2,
+            "Alice computes within one type; Bob's mixed row as floats"
         );
+        let total = |player: &Entity| -> anyhow::Result<Value> {
+            let row = results
+                .iter()
+                .find(|row| {
+                    row.lookup(&Term::var("player"))
+                        .ok()
+                        .and_then(|binding| binding.content().ok())
+                        == Some(Value::Entity(player.clone()))
+                })
+                .ok_or_else(|| anyhow::anyhow!("no row for {player:?}"))?;
+            Ok(row.lookup(&Term::var("total"))?.content()?)
+        };
+        assert_eq!(total(&bob)?, Value::Float(2.5), "2 + 0.5 as floats");
         assert_eq!(
-            results[0].lookup(&Term::var("total"))?.content()?,
+            total(&alice)?,
             Value::SignedInt(-8),
             "signed arithmetic, previously inexpressible, just works"
         );

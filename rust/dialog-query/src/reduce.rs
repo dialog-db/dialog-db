@@ -36,12 +36,13 @@
 //!   checked arithmetic and errors loudly on overflow, including an
 //!   unsigned input beyond `i128::MAX`. The result is the narrowest
 //!   fitting variant: non-negative sums come back `UnsignedInt`,
-//!   negative sums `SignedInt`. Floats accumulate in `f64`. Mixing
-//!   the integer band with floats in one group is an error: the
-//!   numeric machinery (formula arithmetic, the range predicates in
-//!   `constraint/compare.rs`) is strictly no-promotion between
-//!   integers and floats for data, and a fold input is always data.
-//!   The empty (all-absent) group returns the identity
+//!   negative sums `SignedInt`. Floats accumulate in `f64`, and a
+//!   group mixing whole numbers with floats sums as floats, as formula
+//!   arithmetic computes a whole number and a float: its whole numbers
+//!   sum exactly first (and overflow as above), and their total is read
+//!   once as the float nearest it, so a total past `2^53` loses what a
+//!   float cannot hold. Floats sum in `total_cmp` order, so the order
+//!   rows reach the fold does not move the result. The empty (all-absent) group returns the identity
 //!   `UnsignedInt(0)`.
 //! - **`min`/`max`** use the range-predicate ordering: same-variant
 //!   comparison via [`Numeric::compare`] for numeric values —
@@ -752,7 +753,8 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
     }
 }
 
-/// Checked sum: integers in `i128`, floats in `f64`, never mixed.
+/// Checked sum: integers in `i128`, and floats, or whole numbers mixed
+/// with floats, in `f64`.
 /// Folds in sorted order so overflow behavior and float rounding are
 /// independent of row order.
 fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, EvaluationError> {
@@ -771,30 +773,28 @@ fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, Evaluation
             }
         }
     }
-    if !integers.is_empty() && !floats.is_empty() {
-        return Err(fault(
-            entry,
-            "mixed integer and float inputs in one group; \
-             the numeric machinery does not promote between them",
-        ));
+    integers.sort_unstable();
+    let mut total: i128 = 0;
+    for value in integers {
+        total = total
+            .checked_add(value)
+            .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
     }
     if floats.is_empty() {
-        integers.sort_unstable();
-        let mut total: i128 = 0;
-        for value in integers {
-            total = total
-                .checked_add(value)
-                .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
-        }
-        if total >= 0 {
-            Ok(Value::UnsignedInt(total as u128))
+        return Ok(if total >= 0 {
+            Value::UnsignedInt(total as u128)
         } else {
-            Ok(Value::SignedInt(total))
-        }
-    } else {
-        floats.sort_unstable_by(|a, b| a.total_cmp(b));
-        Ok(Value::Float(floats.into_iter().sum()))
+            Value::SignedInt(total)
+        });
     }
+    // Whole numbers and floats in one group sum as floats, as formula
+    // arithmetic computes them. The whole numbers sum exactly first, and
+    // their total is read as the float nearest it, once: `2^53 + 1` and
+    // `-(2^53)` are `1` before they meet a float. The floats sum in
+    // `total_cmp` order, so the rows' order does not move the rounding.
+    floats.push(total as f64);
+    floats.sort_unstable_by(|a, b| a.total_cmp(b));
+    Ok(Value::Float(floats.into_iter().sum()))
 }
 
 /// `f64` mean of the present numeric values; `None` (Absent) over an
@@ -1154,23 +1154,65 @@ mod tests {
         );
     }
 
-    /// Integer and float inputs in one group do not promote — same
-    /// strictness as formula arithmetic and the range predicates.
+    /// Integer and float inputs in one group sum as floats, as formula
+    /// arithmetic computes a whole number and a float.
     #[dialog_common::test]
-    async fn it_errors_on_mixed_integer_and_float_sum() {
+    async fn it_sums_mixed_integer_and_float_inputs_as_a_float() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt(1)))]),
+                row(&[("x", Some(Value::Float(1.5)))]),
+                row(&[("x", Some(Value::SignedInt(-3)))]),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(-0.5));
+    }
+
+    /// The whole numbers of a mixed group sum exactly before their total
+    /// meets the floats: `2^53 + 1` and `-(2^53)` are `1`, and `1` plus
+    /// `0.5` is `1.5`. Read as floats one by one, `2^53 + 1` is `2^53`
+    /// and the sum is `0.5`.
+    #[dialog_common::test]
+    async fn it_sums_the_whole_numbers_of_a_mixed_group_exactly() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt((1 << 53) + 1)))]),
+                row(&[("x", Some(Value::SignedInt(-(1 << 53))))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(1.5));
+    }
+
+    /// A mixed group whose whole numbers overflow the exact total fails
+    /// as a group of whole numbers alone does, rather than summing them
+    /// as floats.
+    #[dialog_common::test]
+    async fn it_errors_on_a_mixed_group_whose_whole_numbers_overflow() {
         let reduce = Reduce::new(
             vec![],
             vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
         );
         let result = reduce
             .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt(i128::MAX as u128)))]),
                 row(&[("x", Some(Value::UnsignedInt(1)))]),
-                row(&[("x", Some(Value::Float(1.5)))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
             ]))
             .await;
         assert!(
             matches!(result, Err(EvaluationError::Reduce { .. })),
-            "mixed int/float must error, got {result:?}"
+            "the whole numbers overflow the exact total, got {result:?}"
         );
     }
 
