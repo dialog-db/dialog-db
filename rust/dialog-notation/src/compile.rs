@@ -2495,6 +2495,71 @@ mod tests {
         }
     }
 
+    /// A compiled rule as Dialog-DB reads it, written out.
+    fn written(step: &Step) -> Json {
+        match step {
+            Step::Deduce(rule) => serde_json::to_value(rule).unwrap(),
+            Step::Induce(rule) => serde_json::to_value(rule).unwrap(),
+            other => panic!("not a rule: {other:?}"),
+        }
+    }
+
+    /// Whether `rule` ties `operand` to a value with an equality among
+    /// its premises.
+    fn ties(rule: &Json, operand: &str) -> bool {
+        rule.to_string()
+            .contains(&format!(r#""assert":"==","where":{{"is":"#))
+            && rule
+                .to_string()
+                .contains(&format!(r#""this":{{"?":{{"name":"{operand}"}}}}"#))
+    }
+
+    /// A head's key and layer operands, `block/key` and `v/in`, are bound
+    /// as its fields are: the variable written in their place is named
+    /// after the operand, so the rule holds no equality to tie them, and
+    /// two rules that differ only in the name written there are one rule,
+    /// written out alike and of one identity. A deriving head and a
+    /// writing one alike.
+    #[test]
+    fn it_binds_a_heads_key_and_layer_as_it_binds_its_fields() {
+        for (head, read) in [
+            (
+                "(xyz.nb ?n block: (:entry ?b key: ?KEY by: :position))",
+                "(xyz.src ?n block: ?b at: ?KEY)",
+            ),
+            (
+                "(assert (xyz.nb ?n block: (:entry ?b key: ?KEY by: :position)))",
+                "(xyz.src ?n block: ?b at: ?KEY)",
+            ),
+            (
+                "(assert (xyz.seen ?n v: (:in ?b at: ?KEY)))",
+                "(xyz.src ?n v: (:in ?b at: ?KEY))",
+            ),
+        ] {
+            let operand = if head.contains(":entry") {
+                "block/key"
+            } else {
+                "v/in"
+            };
+            let compiled = |name: &str| {
+                let text = format!("(rule {head} {read})").replace("KEY", name);
+                let steps = steps(&text).unwrap();
+                let [step] = steps.as_slice() else {
+                    panic!("one rule: {text}");
+                };
+                written(step)
+            };
+            let k = compiled("k");
+            assert!(!ties(&k, operand), "{head}: {k}");
+            assert!(
+                k.to_string()
+                    .contains(&format!(r#"{{"?":{{"name":"{operand}"}}}}"#)),
+                "{head}: the premise binds {operand} itself: {k}"
+            );
+            assert_eq!(k, compiled("position"), "{head}");
+        }
+    }
+
     #[test]
     fn it_compiles_a_write_with_no_premise_to_a_statement() {
         let steps =
