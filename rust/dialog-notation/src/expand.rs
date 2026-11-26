@@ -41,7 +41,7 @@ use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::primitive::QUOTE;
 use crate::primitive::{
-    AMONG, CARDINALITIES, CONTROL, ELECTORS, Head, Keyed, LAYERS, PICKS, RETIRED, Rule, TYPES,
+    AMONG, CARDINALITIES, CONTROL, ELECTORS, Head, IN, Keyed, PICKS, RETIRED, Rule, TYPES,
 };
 use crate::syntax::{self, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
@@ -547,7 +547,9 @@ pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
 /// Either may be left out; with no cardinality the read takes every
 /// claim. An elector on the value, `is: (max ?s)`, chooses one claim of
 /// many, as one in the concept's head does. `in:`
-/// is the layer, and the one taken is a command's, `:control`.
+/// is the layer: a command's, `:control`, any other a stack declares,
+/// `:session`, or a variable, `?layer`, which a read binds to the layer
+/// each row is in and a write must have bound.
 ///
 /// `None` when `tree` applies no attribute.
 pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
@@ -674,13 +676,17 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
         value = wrap(&elector, value)?;
     }
     if let Some(layer) = terms.remove("in") {
-        if layer.keyword() != Some(CONTROL) {
-            return Err(Error::Unsupported(format!(
-                "{tree} names the layer {layer}, and Dialog-DB has no layers yet: the one \
-                 taken is a command's, `:control`"
-            )));
-        }
-        value = wrap(CONTROL, value)?;
+        crate::primitive::layer(&layer)?;
+        value = match layer.keyword() {
+            Some(CONTROL) => wrap(CONTROL, value)?,
+            _ => Syntax::Application(
+                Box::new(Syntax::Constant(syntax::entity(&format!("{IN}:"))?)),
+                Parameters {
+                    items: vec![value],
+                    terms: BTreeMap::from([("at".into(), layer)]),
+                },
+            ),
+        };
     }
     if let Some((key, by)) = key {
         value = Syntax::Application(
@@ -1036,11 +1042,16 @@ fn wrapper(tree: &Syntax) -> bool {
                     && operand.terms.len() == 1
                     && operand.terms.contains_key("cases")
             }
+            Some(IN) => {
+                operand.items.len() == 1
+                    && operand.terms.len() == 1
+                    && operand.terms.contains_key("at")
+            }
             Some(word) => {
                 (TYPES.contains(&word)
                     || PICKS.contains(&word)
                     || CARDINALITIES.contains(&word)
-                    || LAYERS.contains(&word))
+                    || word == CONTROL)
                     && operand.items.len() == 1
                     && operand.terms.is_empty()
             }
@@ -1055,7 +1066,8 @@ struct Peeled<'a> {
     kind: Option<&'a str>,
     pick: Option<&'a str>,
     cardinality: Option<&'a str>,
-    layer: Option<&'a str>,
+    /// The layer as a line writes it after `in:`: `:control`, `?l`.
+    layer: Option<String>,
     cases: Option<&'a Syntax>,
     inner: &'a Syntax,
 }
@@ -1082,6 +1094,13 @@ impl<'a> Peeled<'a> {
                 node = inner;
                 continue;
             }
+            if word == IN {
+                peeled.layer = peeled
+                    .layer
+                    .or_else(|| operand.terms.get("at").map(ToString::to_string));
+                node = inner;
+                continue;
+            }
             let slot = if TYPES.contains(&word) {
                 &mut peeled.kind
             } else if PICKS.contains(&word) {
@@ -1089,7 +1108,9 @@ impl<'a> Peeled<'a> {
             } else if CARDINALITIES.contains(&word) {
                 &mut peeled.cardinality
             } else {
-                &mut peeled.layer
+                peeled.layer.get_or_insert_with(|| format!(":{word}"));
+                node = inner;
+                continue;
             };
             slot.get_or_insert(word);
             node = inner;
@@ -1127,8 +1148,8 @@ impl<'a> Peeled<'a> {
         if let Some(cardinality) = self.cardinality() {
             line.push_str(&format!(" cardinality: :{cardinality}"));
         }
-        if let Some(layer) = self.layer {
-            line.push_str(&format!(" in: :{layer}"));
+        if let Some(layer) = &self.layer {
+            line.push_str(&format!(" in: {layer}"));
         }
         line.push(')');
         line
@@ -2075,10 +2096,10 @@ impl Expander {
                 peeled.value()
             );
         }
-        if let Some(layer) = peeled.layer {
+        if let Some(layer) = &peeled.layer {
             return format!(
                 "{refused}: `{name}` is a derived attribute, concluded and read on the default \
-                 layer only, not on the {layer} layer"
+                 layer only, not in: {layer}"
             );
         }
         let kind = match (peeled.cases, peeled.kind) {
@@ -4203,8 +4224,8 @@ mod tests {
     /// A command's head names no entity, and its lines are on the
     /// control layer. A concept that is one and not the other, and one
     /// whose lines are about several entities it does not name, are
-    /// what the design does not decide, and are unsupported. A layer
-    /// other than `:control` is unsupported, since Dialog-DB has none.
+    /// what the design does not decide, and are unsupported. A head that
+    /// names no entity over lines on another layer is no command.
     #[test]
     fn it_refuses_what_is_not_decided_of_a_command() {
         for (text, why) in [
@@ -4236,7 +4257,7 @@ mod tests {
             ),
             (
                 "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?x in: :draft cardinality: :many))",
-                "no layers yet",
+                "its lines are not on the control layer",
             ),
         ] {
             assert!(
@@ -4254,6 +4275,30 @@ mod tests {
             ),
             Err(Error::Refused(why)) if why.contains("every variable in it is a parameter")
         ));
+    }
+
+    /// A line's `in:` is the layer its value is on: `:control` a
+    /// command's, any other keyword a layer a stack declares, a variable
+    /// the layer a read binds.
+    #[test]
+    fn it_reads_a_line_on_any_layer() {
+        for (layer, wrapped) in [
+            (":control", "(:control ?t)"),
+            (":session", "(:in ?t at: :session)"),
+            ("?l", "(:in ?t at: ?l)"),
+        ] {
+            assert_eq!(
+                expanded(
+                    "",
+                    &format!("(select (xyz.todo/title of: ?i is: ?t in: {layer}))")
+                )
+                .unwrap(),
+                vec![format!(
+                    "(rule (report (xyz.todo ?i title: {wrapped})) (xyz.todo ?i title: {wrapped}))"
+                )],
+                "{layer}"
+            );
+        }
     }
 
     #[test]
@@ -4460,7 +4505,7 @@ mod tests {
     }
 
     /// What a line does not say as a line is refused, each with what
-    /// it is, and a layer is what Dialog-DB has not got.
+    /// it is: a layer is a keyword or a variable.
     #[test]
     fn it_refuses_a_line_that_is_not_one() {
         let refused = |line: &str, why: &str| {
@@ -4494,10 +4539,10 @@ mod tests {
             "(xyz.todo/title of: ?i is: ?t pick: :last)",
             "says `pick:`, which a line does not take",
         );
-        assert!(matches!(
-            expanded("", "(select (xyz.todo/title of: ?i is: ?t in: :draft))"),
-            Err(Error::Unsupported(said)) if said.contains("layer")
-        ));
+        refused(
+            r#"(xyz.todo/title of: ?i is: ?t in: "draft")"#,
+            "is not a layer",
+        );
     }
 
     /// A concept is its lines. Kept, the lines of one entity under one

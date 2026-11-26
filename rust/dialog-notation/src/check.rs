@@ -1583,8 +1583,8 @@ mod tests {
     }
 
     /// A derived attribute is what rules conclude, on the default layer:
-    /// one concluded or read on a layer, `in: :control`, the only layer
-    /// there is (`primitive::LAYERS`), is refused naming the attribute, in a
+    /// one concluded or read on a layer, a command's, another a stack
+    /// declares or a variable's, is refused naming the attribute, in a
     /// head, a select, a premise and `unless`, and in the primitive
     /// spelling, which no document writes.
     #[test]
@@ -1592,17 +1592,21 @@ mod tests {
         let list = "(concept (list ?l name: ?n) \
                     (xyz.list/name of: ?l is: ?n as: :text cardinality: :one)) \
                     (rule (list/label ?l ?n) (list ?l name: ?n))";
-        for layer in crate::primitive::LAYERS {
+        for (layer, primitive) in [
+            (":control", "(:control ?n)"),
+            (":session", "(:in ?n at: :session)"),
+            ("?layer", "(:in ?n at: ?layer)"),
+        ] {
             for form in [
-                format!("(rule (list/label of: ?l is: ?n in: :{layer}) (list ?l name: ?n))"),
-                format!("(select (list/label of: ?l is: ?n in: :{layer}))"),
-                format!("(rule (xyz.out ?l v: ?n) (list/label of: ?l is: ?n in: :{layer}))"),
+                format!("(rule (list/label of: ?l is: ?n in: {layer}) (list ?l name: ?n))"),
+                format!("(select (list/label of: ?l is: ?n in: {layer}))"),
+                format!("(rule (xyz.out ?l v: ?n) (list/label of: ?l is: ?n in: {layer}))"),
                 format!(
                     "(select (list ?l name: ?n) (list ?l name: ?n) \
-                     (unless (list/label of: ?l is: ?q in: :{layer})))"
+                     (unless (list/label of: ?l is: ?q in: {layer})))"
                 ),
                 // The primitive spelling is refused as every wrapper is.
-                format!("(select (list/label ?l (:{layer} ?n)))"),
+                format!("(select (list/label ?l {primitive}))"),
             ] {
                 let text = format!("{list} {form}");
                 let checked = check(&mut Analyzer::new()?, &text);
@@ -1614,7 +1618,7 @@ mod tests {
                     refused
                         .iter()
                         .any(|message| message.contains("`list/label`")
-                            && message.contains(&format!("the {layer} layer"))
+                            && message.contains(&format!("in: {layer}"))
                             && message.contains("default layer")),
                     "{form}: {refused:?}"
                 );
@@ -1753,7 +1757,7 @@ mod tests {
             assert!(
                 refused
                     .iter()
-                    .any(|message| message.contains("a derived attribute, on the control layer")),
+                    .any(|message| message.contains("a derived attribute, in: :control")),
                 "{form}: {refused:?}"
             );
             assert!(checked.steps.is_empty(), "{form}");

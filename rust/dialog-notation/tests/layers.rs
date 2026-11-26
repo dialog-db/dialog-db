@@ -10,7 +10,7 @@ use anyhow::Result;
 use dialog_notation::apply::Writer;
 use dialog_notation::{Analyzer, Answer, Error, apply, check, stage};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
-use dialog_repository::Branch;
+use dialog_repository::{Branch, Stack};
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -40,14 +40,14 @@ async fn answers<E: Writer>(
     Ok(rows)
 }
 
-/// `text` staged into a transaction of `branch`'s stack and committed.
+/// `text` staged into a transaction of `stack` and committed.
 async fn staged<E: Writer>(
     analyzer: &mut Analyzer,
     branch: &Branch,
+    stack: &Stack,
     operator: &E,
     text: &str,
 ) -> Result<()> {
-    let stack = branch.stack().perform(operator).await?;
     let checked = check(analyzer, text);
     if let Some(refused) = checked.refusals().next() {
         anyhow::bail!("{text} was refused: {refused:?}");
@@ -69,10 +69,14 @@ async fn writes_into_a_named_layer_and_reads_the_layer_back<E: Writer>(
 ) -> Result<()> {
     let mut analyzer = Analyzer::new()?;
     answers(&mut analyzer, branch, operator, CONCEPTS).await?;
+    // One stack: the session layer is the stack's own, minted when it
+    // opens and gone with it.
+    let stack = branch.stack().perform(operator).await?;
 
     staged(
         &mut analyzer,
         branch,
+        &stack,
         operator,
         r#"(assert (note x:1 text: "kept"))
            (assert (xyz.note/text of: x:2 is: "for now" in: :session))
@@ -88,7 +92,7 @@ async fn writes_into_a_named_layer_and_reads_the_layer_back<E: Writer>(
             "(select (xyz.note/text of: ?t is: ?x))"
         )
         .await?,
-        vec![r#"(xyz.note/text x:1 "kept")"#],
+        vec![r#"(xyz.note x:1 text: "kept")"#],
         "the primary holds the note written with no layer, and not the session's"
     );
     assert_eq!(
@@ -108,6 +112,7 @@ async fn writes_into_a_named_layer_and_reads_the_layer_back<E: Writer>(
     staged(
         &mut analyzer,
         branch,
+        &stack,
         operator,
         "(assert (xyz.seen/in of: ?t is: ?l) (xyz.note/text of: ?t is: ?x in: ?l))
          (assert (xyz.seen/in of: ?t is: ?l) (xyz.draft/text of: ?t is: ?x in: ?l))",
@@ -122,9 +127,9 @@ async fn writes_into_a_named_layer_and_reads_the_layer_back<E: Writer>(
         )
         .await?,
         vec![
-            "(xyz.seen/in x:1 memory:)".to_string(),
-            "(xyz.seen/in x:2 session:)".to_string(),
-            "(xyz.seen/in x:3 session:)".to_string(),
+            "(xyz.seen x:1 in: :memory)".to_string(),
+            "(xyz.seen x:2 in: :session)".to_string(),
+            "(xyz.seen x:3 in: :session)".to_string(),
         ],
         "each row's layer, bound by in: ?l"
     );
@@ -161,8 +166,8 @@ mod support {
 
 /// A write whose layer is a variable nothing binds is refused when the
 /// document is checked, naming the variable, for a write with no
-/// premise and for one whose premises bind other variables; nothing is
-/// written.
+/// premise and for one whose premises bind other variables; staging it
+/// stages nothing.
 #[dialog_common::test]
 async fn it_refuses_a_write_into_a_layer_nothing_binds() -> Result<()> {
     let (operator, peer) = test_session_with_peer().await;
@@ -170,10 +175,10 @@ async fn it_refuses_a_write_into_a_layer_nothing_binds() -> Result<()> {
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut analyzer = Analyzer::new()?;
     answers(&mut analyzer, &branch, &operator, CONCEPTS).await?;
-    let before = branch.revision();
     for text in [
         r#"(assert (xyz.note/text of: x:1 is: "x" in: ?l))"#,
         r#"(assert (xyz.note/text of: ?t is: ?x in: ?l) (note ?t text: ?x))"#,
+        r#"(rule (assert (xyz.note/text of: ?t is: ?x in: ?l)) (note ?t text: ?x))"#,
     ] {
         let checked = check(&mut analyzer, text);
         let refused: Vec<_> = checked.refusals().collect();
@@ -186,13 +191,11 @@ async fn it_refuses_a_write_into_a_layer_nothing_binds() -> Result<()> {
             "{text}: {refused:?}"
         );
         let stack = branch.stack().perform(&operator).await?;
+        let (_, report) = stage(stack.transaction(), &checked, &operator).await?;
         assert!(
-            stage(stack.transaction(), &checked, &operator)
-                .await
-                .is_err()
+            report.forms[0].refused.is_some() && report.forms[0].did.is_empty(),
+            "{text}: {report:?}"
         );
     }
-    branch.refresh(&operator).await?;
-    assert_eq!(branch.revision(), before, "nothing was written");
     Ok(())
 }

@@ -40,13 +40,15 @@ pub const CARDINALITIES: [&str; 2] = ["one", "many"];
 /// `(:among ?x cases: [:open :done])`.
 pub const AMONG: &str = "among";
 
-/// The layers a term may be read on: `(:control ?x)`. A claim on the
-/// control layer holds for the tick it is asserted in and is gone after
-/// it, which is a command's lifetime. Dialog-DB has no other layer yet.
-pub const LAYERS: [&str; 1] = ["control"];
-
-/// The layer a command's claims are on.
+/// The layer a command's claims are on: `(:control ?x)`. A claim on it
+/// holds for the tick it is asserted in and is gone after it, which is a
+/// command's lifetime.
 pub const CONTROL: &str = "control";
+
+/// The wrapper of a value on any other layer a stack declares, or on the
+/// layer a variable binds: `(:in ?x at: :session)`, `(:in ?x at: ?l)`.
+/// A line spells it `in:`.
+pub const IN: &str = "in";
 
 /// The folds a term may be: `(count ?t)`. Each makes one value of the
 /// many a variable is bound to, a group at a time.
@@ -126,8 +128,10 @@ pub struct Field {
     /// name of the entity it is: empty unless the term was written under
     /// `(:among …)`.
     pub listed: Vec<String>,
-    /// The layer, when the term was written on one.
-    pub layer: Option<String>,
+    /// The layer, when the term was written on one: the entity of a
+    /// layer, `control:` or `session:`, or a variable, which a read binds
+    /// to the layer each row is in and a write must have bound.
+    pub layer: Option<Term>,
     /// Where the field is every entry of a collection: the term its key
     /// stands under, and what a key is. Its attribute is then the
     /// collection's domain and `[symbol]` or `[position]`.
@@ -318,7 +322,7 @@ pub(crate) struct Wrapped<'a> {
     /// The cases of a variant, by name, and as written.
     pub listed: Vec<String>,
     pub cases: Option<Syntax>,
-    pub layer: Option<String>,
+    pub layer: Option<Term>,
     /// The key's term and what a key is, by name and as read.
     pub key: Option<(&'a Syntax, String, Keyed)>,
     /// The value under every wrapper.
@@ -381,6 +385,21 @@ pub(crate) fn wrapped(mut node: &Syntax) -> Result<Wrapped<'_>, Error> {
             node = inner;
             continue;
         }
+        if let (Some(IN), [inner], Some(at), 1) = (
+            operator.keyword(),
+            operand.items.as_slice(),
+            operand.terms.get("at"),
+            operand.terms.len(),
+        ) {
+            if wrapped.layer.is_some() {
+                return Err(Error::Refused(format!(
+                    "{node} is written under two layers: a value has one"
+                )));
+            }
+            wrapped.layer = Some(layer(at)?);
+            node = inner;
+            continue;
+        }
         let (Some(word), [inner], true) = (
             operator.keyword(),
             operand.items.as_slice(),
@@ -405,9 +424,9 @@ pub(crate) fn wrapped(mut node: &Syntax) -> Result<Wrapped<'_>, Error> {
         } else if CARDINALITIES.contains(&word) {
             twice(wrapped.cardinality.is_some(), "cardinalitie")?;
             wrapped.cardinality = Some(word.to_string());
-        } else if LAYERS.contains(&word) {
+        } else if word == CONTROL {
             twice(wrapped.layer.is_some(), "layer")?;
-            wrapped.layer = Some(word.to_string());
+            wrapped.layer = Some(Term::Entity(format!("{CONTROL}:")));
         } else {
             break;
         }
@@ -415,6 +434,37 @@ pub(crate) fn wrapped(mut node: &Syntax) -> Result<Wrapped<'_>, Error> {
     }
     wrapped.inner = node;
     Ok(wrapped)
+}
+
+/// The layer `at` names: a keyword, the entity of a layer a stack
+/// declares, or a variable.
+pub(crate) fn layer(at: &Syntax) -> Result<Term, Error> {
+    match term(at)? {
+        layer @ (Term::Entity(_) | Term::Variable(_)) => Ok(layer),
+        _ => Err(Error::Refused(format!(
+            "{at} is not a layer: a layer is named by a keyword, `in: :session`, or a \
+             variable, `in: ?layer`"
+        ))),
+    }
+}
+
+/// How a layer is written after `in:`: `:session`, `?layer`.
+pub(crate) fn written_layer(layer: &Term) -> String {
+    match layer {
+        Term::Variable(name) => format!("?{name}"),
+        Term::Entity(entity) => match entity.strip_suffix(':') {
+            Some(word) if !word.contains(':') => format!(":{word}"),
+            _ => entity.clone(),
+        },
+        other => format!("{other:?}"),
+    }
+}
+
+impl Field {
+    /// Whether the field's claims are on the control layer, a command's.
+    pub fn on_control(&self) -> bool {
+        matches!(&self.layer, Some(Term::Entity(layer)) if layer.strip_suffix(':') == Some(CONTROL))
+    }
 }
 
 fn field(domain: &str, label: &str, node: &Syntax) -> Result<Field, Error> {
@@ -508,22 +558,23 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     // a command is a concept of its own.
     // `in:` names a layer wherever it is written, on a derived attribute
     // as anywhere else: it is no field of one.
-    let named_in = operand.terms.get("in").map(|layer| {
-        layer
-            .keyword()
-            .map_or_else(|| layer.to_string(), str::to_string)
-    });
+    let named_in = operand.terms.get("in").map(ToString::to_string);
     if let Some(written) = &written
         && let Some(layer) = fields
             .iter()
-            .find_map(|field| field.layer.clone())
+            .find_map(|field| field.layer.as_ref().map(written_layer))
             .or(named_in)
     {
+        let command = match layer == format!(":{CONTROL}") {
+            true => format!(
+                "; a command is a concept of its own, its lines in: {layer}, \
+                 `(concept ({written}-go …) (xyz.… in: {layer} …))`"
+            ),
+            false => String::new(),
+        };
         return Err(Error::Refused(format!(
-            "{node} has `{written}`, a derived attribute, on the {layer} layer: a derived \
-             attribute is what rules conclude, on the default layer, and is read there; a \
-             command is a concept of its own, its lines on the {layer} layer, \
-             `(concept ({written}-go …) (xyz.… in: :{layer} …))`"
+            "{node} has `{written}`, a derived attribute, in: {layer}: a derived attribute is \
+             what rules conclude, on the default layer, and is read there{command}"
         )));
     }
     Ok(Read {
@@ -551,7 +602,7 @@ fn control(node: &Syntax, read: &Read) -> Result<bool, Error> {
     let on = read
         .fields
         .iter()
-        .filter(|field| field.layer.as_deref() == Some(CONTROL))
+        .filter(|field| field.on_control())
         .count();
     match on {
         0 => Ok(false),
@@ -656,7 +707,7 @@ impl Rule {
         // entity is derived from what it says.
         let bound = rule.bound();
         if let Head::Hold(read) | Head::Derive(read) = &mut rule.head
-            && read.fields.iter().all(|field| field.layer.is_some())
+            && read.fields.iter().all(Field::on_control)
             && match &read.entity {
                 Term::Variable(name) => !bound.contains(name),
                 Term::Blank => true,
@@ -704,6 +755,9 @@ impl Rule {
                         term(&field.term, &mut names);
                         if let Some((key, _)) = &field.key {
                             term(key, &mut names);
+                        }
+                        if let Some(layer) = &field.layer {
+                            term(layer, &mut names);
                         }
                     }
                 }

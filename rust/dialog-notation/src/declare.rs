@@ -70,7 +70,8 @@ pub struct Line {
     /// and is `many`, since such a read takes every claim.
     /// None only where the line does not compile.
     pub cardinality: Option<String>,
-    /// `in:`, the layer, as written.
+    /// `in:`, the layer: a keyword's name, `control` for `:control`, or
+    /// a variable as written, `?layer`.
     pub layer: Option<String>,
     /// The key, where the line is over a collection.
     pub key: Option<Key>,
@@ -145,7 +146,11 @@ fn lines_of(part: &Syntax, description: Option<String>) -> Result<Vec<Line>, Err
             is,
             kind: operand.terms.get("as").cloned(),
             cardinality: keyword(operand.terms.get("cardinality")),
-            layer: keyword(operand.terms.get("in")),
+            layer: operand.terms.get("in").map(|layer| {
+                layer
+                    .keyword()
+                    .map_or_else(|| layer.to_string(), str::to_string)
+            }),
             key,
             description,
             label: None,
@@ -178,7 +183,11 @@ fn lines_of(part: &Syntax, description: Option<String>) -> Result<Vec<Line>, Err
                 is: wrapped.inner.clone(),
                 kind: wrapped.cases.or(wrapped.kind.map(|(_, written)| written)),
                 cardinality,
-                layer: wrapped.layer,
+                layer: wrapped.layer.as_ref().map(|layer| {
+                    crate::primitive::written_layer(layer)
+                        .trim_start_matches(':')
+                        .to_string()
+                }),
                 key: wrapped.key.map(|(at, by, _)| Key {
                     term: at.clone(),
                     by,

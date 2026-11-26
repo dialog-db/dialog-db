@@ -14,6 +14,41 @@ says how to cut a release.
 
 ## Unreleased
 
+### A line names any layer: `in: :session`, and `in: ?layer`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). `in:` on a line,
+which took `:control` alone, takes any layer a stack declares, by its
+keyword, and a variable. A write `in: :session` lands in that layer and
+not in the primary. A read `in: ?layer` reads every layer and binds
+`?layer` to the one each row is in: `:memory` for the primary,
+`:session` for the stack's own. The layer is compiled into the
+attribute's descriptor, `"in"`, as the engine reads it.
+
+What this changes for you:
+
+- `in: :session`, or a layer a schema declares, which was refused as
+  `Error::Unsupported` ("Dialog-DB has no layers yet"), is accepted, on a
+  concept's line as on a premise's or a write's.
+- `in: ?layer` on a write is refused with `Error::Refused`, naming the
+  variable, when nothing the write reads binds it: a write with no
+  premise, a write whose premises do not read it, a rule likewise.
+- A layer written as anything but a keyword or a variable, `in: "draft"`,
+  is refused, saying a layer is one of the two.
+- A derived attribute is still concluded and read on the default layer
+  only, whatever layer is named; the refusal now says `in: <layer>`.
+- `primitive::LAYERS` is gone; `primitive::IN` names the new wrapper and
+  `primitive::Field::layer` is a `Term` (the layer's entity, or a
+  variable) instead of a keyword's name. `Line::layer` keeps a keyword's
+  name and gives a variable as written, `?layer`.
+- A select is still answered over the branch, not the stack, so a
+  select reads the primary alone; reading a stack's layers through
+  `apply` and `answer` waits on the driver reading through the stack.
+
+Why: the maintainer, reviewing #773, expected a line to name any layer
+and a variable to name one. The engine has read and written layers by a
+descriptor's `in` since the stack landed; the notation's limit to
+`:control` predated it (`design/macros/journal.md`, 2026-11-26).
+
 ### A write at the top level reads its premises as a rule does: `when` is gone
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). A write at the

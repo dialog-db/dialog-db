@@ -136,6 +136,9 @@ impl Write {
         head.entity = bound(&head.entity, &values)?;
         for field in &mut head.fields {
             field.term = bound(&field.term, &values)?;
+            if let Some(layer) = &mut field.layer {
+                *layer = bound(layer, &values)?;
+            }
             if let Some((key, _)) = &mut field.key {
                 *key = bound(key, &values)?;
             }
@@ -236,6 +239,9 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
         variables(&field.term, &mut held);
         if let Some((key, _)) = &field.key {
             variables(key, &mut held);
+        }
+        if let Some(layer) = &field.layer {
+            variables(layer, &mut held);
         }
     }
     if let Some(name) = held.iter().find(|name| !bound.contains(*name)) {
@@ -1265,7 +1271,42 @@ fn attribute(field: &Field, role: Role) -> Result<Json, Error> {
     if let (Role::Field, Some(pick)) = (role, pick) {
         attribute.insert("pick".into(), json!(pick));
     }
+    // A command's claims are the control layer's by the concept they
+    // are of, which is transient, not by `in:`.
+    match &field.layer {
+        Some(_) if field.on_control() => {}
+        Some(Term::Entity(layer)) => {
+            attribute.insert("in".into(), json!(layer));
+        }
+        Some(Term::Variable(_)) => {
+            attribute.insert("in".into(), variable(&layered(field)));
+        }
+        Some(_) | None => {}
+    }
     Ok(Json::Object(attribute))
+}
+
+/// The operand a field's layer variable stands under: `title/in`.
+fn layered(field: &Field) -> String {
+    format!("{}/in", field.label)
+}
+
+/// A field whose layer is a variable, beside a field named as that
+/// variable's operand, `title/in`: the two would be one operand.
+fn layer_operand(read: &Read) -> Result<(), Error> {
+    for field in &read.fields {
+        let operand = layered(field);
+        if matches!(field.layer, Some(Term::Variable(_)))
+            && read.fields.iter().any(|other| other.label == operand)
+        {
+            return Err(Error::Refused(format!(
+                "{} has a field named {operand}, which is the layer of its field {}: the two \
+                 would be one",
+                read.domain, field.label
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Facts with nothing left to bind: what a head with no premise says.
@@ -1286,6 +1327,13 @@ fn statement(read: &Read) -> Result<ConceptStatement, Error> {
     let mut with = Vec::new();
     whole(read, &BTreeSet::new())?;
     for field in &read.fields {
+        if let Some(Term::Variable(layer)) = &field.layer {
+            return Err(Error::Refused(format!(
+                "{} is written in: ?{layer}, and a write with no premise binds nothing: name \
+                 its layer, `in: :session`, or read ?{layer} in the write's premises",
+                field.attribute
+            )));
+        }
         let value = value(&field.term, field.kind.as_deref())?.ok_or_else(|| {
             Error::Refused(format!(
                 "a write with no premise needs a value for {}",
@@ -1606,6 +1654,7 @@ impl Scope {
     }
 
     fn read(&mut self, read: &Read) -> Result<Json, Error> {
+        layer_operand(read)?;
         let mut with = Map::new();
         let mut terms = Map::new();
         terms.insert("this".into(), self.term(&read.entity, None)?);
@@ -1624,6 +1673,9 @@ impl Scope {
                 )));
             }
             terms.insert(field.label.clone(), term);
+            if let Some(layer @ Term::Variable(_)) = &field.layer {
+                terms.insert(layered(field), self.term(layer, None)?);
+            }
         }
         Ok(json!({ "assert": { "with": with }, "where": terms }))
     }
@@ -1781,6 +1833,11 @@ impl Scope {
                 }
                 let value = self.term(key, None)?;
                 self.when.push(tie(&format!("{}/key", field.label), value));
+            }
+            if let Some(layer @ Term::Variable(_)) = &field.layer {
+                layer_operand(read)?;
+                let layer = self.term(layer, None)?;
+                self.when.push(tie(&layered(field), layer));
             }
             match &field.term {
                 Term::Variable(name) if self.name(name) == field.label => {}
