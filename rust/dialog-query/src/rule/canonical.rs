@@ -134,10 +134,25 @@ pub(crate) fn canonicalize(
             field: field.to_string(),
         });
     }
+    // A body reading an attribute through a raw scan, as a concept's
+    // implicit rule does, has no encoding (see `encode_premise`): it keeps
+    // the spelling it was given, and nothing below is worth building.
+    if premises.iter().any(unencodable) {
+        return Ok(None);
+    }
     // A body variable used once matches what a blank matches and binds
-    // nothing anything else reads, so it is spelled as one.
-    let blanked = blank_premises(premises, &once_used(conclusion, premises, reduce))?;
-    let premises = blanked.as_slice();
+    // nothing anything else reads, so it is spelled as one. Most rules
+    // have none, and keep their premises and their variables as given.
+    let named = variables(premises);
+    let once = once_used(conclusion, premises, reduce, &named);
+    let blanked;
+    let (premises, named) = if once.is_empty() {
+        (premises, named)
+    } else {
+        blanked = blank_premises(premises, &once)?;
+        let named = variables(&blanked);
+        (blanked.as_slice(), named)
+    };
     let fields: Vec<(String, Option<String>)> = conclusion
         .with()
         .iter()
@@ -150,7 +165,7 @@ pub(crate) fn canonicalize(
         })
         .collect();
 
-    let mut locals: BTreeSet<String> = variables(premises);
+    let mut locals: BTreeSet<String> = named;
     for (_, spec) in reduce {
         if let Some(name) = spec.of.name() {
             locals.insert(name.to_string());
@@ -283,16 +298,19 @@ pub(crate) fn canonicalize(
 
 /// The variables other than `this` that a rule concluding
 /// `conclusion` uses exactly once: in one place of one premise, and
-/// nowhere in the head or the reduce clause.
+/// nowhere in the head or the reduce clause. `named` is every variable
+/// the premises name; the uses are counted beside it, so a rule with
+/// none used once builds nothing but the count.
 fn once_used(
     conclusion: &ConceptDescriptor,
     premises: &[Premise],
     reduce: &[(String, ReduceSpec)],
+    named: &BTreeSet<String>,
 ) -> BTreeSet<String> {
-    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    let mut uses = vec![0usize; named.len()];
     let mut count = |name: &str| {
-        if name != "this" {
-            *uses.entry(name.to_string()).or_default() += 1;
+        if let Some(at) = named.iter().position(|known| known == name) {
+            uses[at] += 1;
         }
     };
     for premise in premises {
@@ -309,10 +327,11 @@ fn once_used(
                 .for_each(&mut count);
         }
     }
-    let mut used: BTreeSet<String> = uses
-        .into_iter()
-        .filter(|(_, uses)| *uses == 1)
-        .map(|(name, _)| name)
+    let mut used: BTreeSet<String> = named
+        .iter()
+        .zip(uses)
+        .filter(|(name, uses)| *uses == 1 && name.as_str() != "this")
+        .map(|(name, _)| name.clone())
         .collect();
     for (name, field) in conclusion.with().iter() {
         used.remove(name);
@@ -621,6 +640,21 @@ fn without_descriptions(premise: &Premise) -> Premise {
 /// premise and of nothing else, and that orders it and tells it apart
 /// here. Its polarity is tagged apart from an encoded premise's, so the
 /// two never read as one another.
+/// Whether `premise` reads an attribute through a raw scan, which the
+/// formal notation cannot express: [`encode_premise`] gives it no
+/// encoding.
+fn unencodable(premise: &Premise) -> bool {
+    let proposition = match premise {
+        Premise::Assert(proposition) => proposition,
+        Premise::Unless(negation) => &negation.0,
+    };
+    !pattern::holds_shape(proposition)
+        && matches!(
+            proposition,
+            Proposition::Attribute(_) | Proposition::OptionalAttribute(_)
+        )
+}
+
 fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
     let (tag, proposition) = match premise {
         Premise::Assert(proposition) => (0u8, proposition),
