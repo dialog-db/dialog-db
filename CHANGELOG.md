@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### One number held as two types groups, counts and joins as one
 
+[#888](https://github.com/dialog-db/dialog-db/pull/888)
+
 A fold grouped its rows by the encoding of their key values, counted
 distinct values by their encoding, and a rule's memo of rows looked a
 bound entity up by its encoding, and each encoding tells the types of a
@@ -45,6 +47,44 @@ What this changes for you:
 
 Why: an answer must not depend on the type a number happened to be read
 as, or on the order a plan ran its premises in.
+
+### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
+
+[#883](https://github.com/dialog-db/dialog-db/pull/883)
+
+A rule that does not compile reaches a branch only from elsewhere (a
+replica on another release, another implementation, a writer of raw
+`dialog.rule/*` facts), and works there as if it were not there. Why
+was answered by two relations: `dialog.rule/invalid` for a body this
+release does not read, and `dialog.rule/quarantined` for a rule the
+program analysis sets aside for closing a cycle. Both now come from one
+judgment, `RuleError`, and one more relation answers every such rule:
+`dialog.rule/error`, valued with a diagnostic that begins with its kind.
+A body that decodes and does not type-check is now told apart from
+bytes that are no body.
+
+What this changes for you:
+
+- New: `dialog.rule/error`, answered for every rule a branch holds and
+  does not evaluate, never stored. Its value is `<kind>: <message>`,
+  the kind one of `older`, `newer`, `forged`, `undecodable`,
+  `ill-typed` or `cycle`.
+- New: `dialog_repository::RuleError`, with `code()` and
+  `depends_on_other_rules()` (true for a cycle only, which lifts once a
+  rule of it is retracted).
+- New: `DeductiveRule::read` and `InductiveRule::read`, which return
+  `dialog_query::rule::body::BodyError` (`Undecodable` or `IllTyped`).
+  `decode` is unchanged and returns the same strings.
+- `dialog.rule/invalid` and `dialog.rule/quarantined` answer as before,
+  with one difference: an inductive body stored under an entity it does
+  not hash to is now listed under `dialog.rule/invalid` as forged.
+  Induction already left it out; the relation did not say so.
+- A body that is no rule is judged once per process and remembered, as
+  a body that is one always was. Before, every query that met it
+  decoded it again.
+
+Why: a rule that did not compile is one kind of thing whatever the
+reason, and an embedder should find it, and why, in one place.
 
 ### A cardinality-one write succeeds only the claims of its own type
 
@@ -1612,6 +1652,12 @@ and names the rule.
   A fold's groups, a distinct count and a join's binding are computed
   as a query runs; an older release still splits them, so a mixed fleet
   differs in what such a query answers until every replica upgrades.
+
+- `dialog.rule/error`: nothing is stored under it and nothing stored
+  changes; it is answered from the rule bodies a branch holds, as
+  `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older
+  release answers nothing under it. An embedder runs nothing.
+
 - A cardinality-one write succeeds only its own type's claims: nothing
   stored changes shape, no identity moves and nothing is rewritten on
   upgrade. Every replica already holds at most one live claim per cell,

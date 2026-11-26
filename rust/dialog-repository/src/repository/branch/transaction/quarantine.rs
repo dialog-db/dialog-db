@@ -201,6 +201,19 @@ async fn replicas_installing_a_cycle_concurrently_set_aside_the_same_rule() -> R
         on_a == (vec![true], vec![]) || on_a == (vec![], vec![]),
         "exactly one rule of the cycle is set aside: {on_a:?}"
     );
+
+    let set_aside = quarantined(&a, &operator).await?;
+    assert_eq!(set_aside.len(), 1, "one rule is set aside: {set_aside:?}");
+    assert_eq!(
+        quarantined(&b, &operator).await?,
+        set_aside,
+        "both replicas hold the same quarantined set"
+    );
+    assert_eq!(
+        errors(&b, &operator).await?,
+        errors(&a, &operator).await?,
+        "both replicas answer the same cycle error"
+    );
     Ok(())
 }
 
@@ -258,5 +271,108 @@ async fn it_reads_the_rules_it_sets_aside() -> Result<()> {
         Vec::<Entity>::new(),
         "retracting the closing rule lifts its quarantine"
     );
+    Ok(())
+}
+
+/// The rules `branch` answers under `dialog.rule/error`, each with its
+/// diagnostic, sorted by rule.
+async fn errors(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, String)>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "error": { "the": "dialog.rule/error", "as": "text:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("error".to_string(), Term::<Any>::var("error"));
+    let rows = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(operator)
+        .try_vec()
+        .await?;
+    let mut listed: Vec<(Entity, String)> = rows
+        .iter()
+        .map(|row| Ok((row.get::<Entity>("this")?, row.get::<String>("error")?)))
+        .collect::<Result<_>>()?;
+    listed.sort();
+    Ok(listed)
+}
+
+/// A rule set aside for closing a cycle is a compile error too: it is
+/// answered under `dialog.rule/error` as `cycle`, naming the concept it
+/// concludes, and the error lifts once the rule is retracted.
+#[dialog_common::test]
+async fn it_answers_a_rule_it_sets_aside_as_a_cycle_error() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    seeded(&branch, &operator).await?;
+
+    install(&branch, &operator, negating()?).await?;
+    assert_eq!(errors(&branch, &operator).await?, Vec::new());
+
+    let closing = closing()?;
+    install(&branch, &operator, closing.clone()).await?;
+    let listed = errors(&branch, &operator).await?;
+    let [(rule, error)] = listed.as_slice() else {
+        anyhow::bail!("one rule is answered as an error: {listed:?}");
+    };
+    assert_eq!(*rule, closing.this());
+    assert!(error.starts_with("cycle: "), "{error}");
+    assert!(
+        error.contains("test/q"),
+        "the error names what the rule concludes: {error}"
+    );
+
+    branch
+        .transaction()
+        .retract(closing)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        errors(&branch, &operator).await?,
+        Vec::new(),
+        "the error lifts with the rule"
+    );
+    Ok(())
+}
+
+/// A replica holding both rules of a cycle sets the closing one aside;
+/// once it pulls a retraction of that rule from another replica, the
+/// cycle is broken and nothing is set aside, under either relation.
+#[dialog_common::test]
+async fn a_cycle_broken_by_a_pull_lifts_the_quarantine() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    let alice = seeded(&a, &operator).await?;
+    let closing = closing()?;
+    install(&a, &operator, negating()?).await?;
+    install(&a, &operator, closing.clone()).await?;
+    assert_eq!(quarantined(&a, &operator).await?, vec![closing.this()]);
+
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
+    b.transaction()
+        .retract(&closing)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    a.pull(crate::Download::MinimalRanges)
+        .from(&b)
+        .perform(&operator)
+        .await?;
+
+    assert_eq!(
+        quarantined(&a, &operator).await?,
+        Vec::<Entity>::new(),
+        "the pulled retraction lifts the quarantine"
+    );
+    assert_eq!(errors(&a, &operator).await?, Vec::new());
+    assert_eq!(read(&a, &operator, &alice, "p").await?, vec![true]);
     Ok(())
 }
