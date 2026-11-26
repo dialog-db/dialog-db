@@ -25,8 +25,9 @@ now comes with a report of what it left out. The report is filled as
 the query runs and readable at any point: the rules of a concept are
 assembled before the first row that concept gives, so a report read
 when a row arrives already lists the rules left out of what produced
-it. Nothing has to be drained to read it, and dropping the query early
-loses nothing reported. Only rules the query's derivation reaches are
+it. A report read before the rows are first polled is empty, since
+the query has not run yet. Nothing has to be drained to read it, and
+dropping the query early loses nothing reported. Only rules the query's derivation reaches are
 reported.
 
 What this changes for you:

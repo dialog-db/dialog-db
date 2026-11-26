@@ -127,9 +127,10 @@ fn reports_broken(entries: &[Entry]) -> bool {
     })
 }
 
-/// A query of `doc/tag` reports the body it left out before its first
-/// row, and answers through the rule that compiles; the report reads the
-/// same between rows and after the last.
+/// A query of `doc/tag` reports nothing before its rows are first
+/// polled, since it has not run; it reports the body it left out by its
+/// first row, and answers through the rule that compiles; the report
+/// reads the same between rows and after the last.
 async fn reported_before_the_first_row<S: PeerSpace>(
     session: &Peer<S, Session>,
     peer: &Peer<S>,
@@ -138,6 +139,11 @@ async fn reported_before_the_first_row<S: PeerSpace>(
     let layer = branch.query();
     let mut answer = Box::pin(layer.select(tags()?).perform(session));
     let report = answer.report();
+    assert!(
+        report.is_empty(),
+        "read before the rows are first polled, the query has not run: {:?}",
+        report.entries()
+    );
     let first = answer.next().await.transpose()?;
     assert!(first.is_some(), "the rule that compiles derives");
     let entries = report.entries();

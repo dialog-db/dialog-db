@@ -190,6 +190,11 @@ impl<S> Answered<S> {
 
     /// What the query left out, so far: readable at any point, before
     /// the first row, between rows, and after the last.
+    ///
+    /// The query runs as its rows are polled, so a report read before
+    /// the rows are first polled is empty: nothing has been looked at
+    /// yet. Read it once a row arrives, once the rows end, or through
+    /// [`Report::stream`], which waits for what is reported.
     pub fn report(&self) -> Report {
         self.finish.0.clone()
     }
