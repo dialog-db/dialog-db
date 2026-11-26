@@ -14,6 +14,40 @@ says how to cut a release.
 
 ## Unreleased
 
+### One number held as two types groups, counts and joins as one
+
+[#888](https://github.com/dialog-db/dialog-db/pull/888)
+
+A fold grouped its rows by the encoding of their key values, counted
+distinct values by their encoding, and a rule's memo of rows looked a
+bound entity up by its encoding, and each encoding tells the types of a
+number apart: `3` and `3.0` made two groups, counted as two distinct
+values, and missed each other in the memo. A variable joined across two
+premises held whichever representation bound it first, so a join
+answered `3` or `3.0` depending on the order the plan ran its premises
+in. Keys, distinct counts and the memo now go by a value's identity, as
+the band keys numbers, and the narrowest type stands for the number, as
+a read of the band yields it: a group of `3` and `3.0` is one group
+keyed `3`, `count-distinct` of them is 1, and a variable bound to both
+holds `3`, whichever came first.
+
+What this changes for you:
+
+- A fold over rows whose group field holds one number as two types gives
+  one row for that number, its key the narrowest type. It gave one row
+  per type.
+- `count-distinct` counts one number held as two types once, folded or
+  run as a subscription steps it.
+- A variable a join binds to one number in two types holds the narrowest
+  of them. It held the first.
+- A fold's rows come out in the order of the new keys, which differs
+  from the order before for groups keyed by more than one value.
+- `Value::narrower` is new: whether a value is a narrower representation
+  of a number than another.
+
+Why: an answer must not depend on the type a number happened to be read
+as, or on the order a plan ran its premises in.
+
 ### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
 
 [#883](https://github.com/dialog-db/dialog-db/pull/883)
@@ -1612,6 +1646,12 @@ around it, with nothing reported. Setting the rule aside is reported,
 and names the rule.
 
 ### Compatibility and migration
+
+- One number held as two types groups, counts and joins as one: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A fold's groups, a distinct count and a join's binding are computed
+  as a query runs; an older release still splits them, so a mixed fleet
+  differs in what such a query answers until every replica upgrades.
 
 - `dialog.rule/error`: nothing is stored under it and nothing stored
   changes; it is answered from the rule bodies a branch holds, as
