@@ -327,24 +327,24 @@ fn once_used(
                 .for_each(&mut count);
         }
     }
-    let mut used: BTreeSet<String> = named
+    // The head and the reduce clause read a variable too, so one they
+    // name is not used once.
+    let in_head = |name: &str| {
+        conclusion.with().iter().any(|(field, descriptor)| {
+            field == name
+                || (matches!(descriptor.the(), The::Collection { .. })
+                    && The::is_key_operand(name, field))
+        })
+    };
+    let in_reduce = |name: &str| reduce.iter().any(|(_, spec)| spec.of.name() == Some(name));
+    named
         .iter()
         .zip(uses)
-        .filter(|(name, uses)| *uses == 1 && name.as_str() != "this")
+        .filter(|(name, uses)| {
+            *uses == 1 && name.as_str() != "this" && !in_head(name) && !in_reduce(name)
+        })
         .map(|(name, _)| name.clone())
-        .collect();
-    for (name, field) in conclusion.with().iter() {
-        used.remove(name);
-        if let The::Collection { .. } = field.the() {
-            used.remove(&The::key_operand(name));
-        }
-    }
-    for (_, spec) in reduce {
-        if let Some(name) = spec.of.name() {
-            used.remove(name);
-        }
-    }
-    used
+        .collect()
 }
 
 /// The names a labeling assigns the variables: the spelling with the
