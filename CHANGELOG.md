@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A query reports the rules it left out, as it runs
 
-Pull request: to be linked when it opens.
+[#889](https://github.com/dialog-db/dialog-db/pull/889)
 
 A rule a branch holds that did not compile here works as if it were not
 there (see the entry below on `dialog.rule/error`), and a query whose
