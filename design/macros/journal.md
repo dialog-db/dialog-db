@@ -2100,3 +2100,23 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 - **Casting.** The long form of a type, `(float of: ?q is: ?f)`, is the explicit cast. What it does at the lossy edge is in [design-type-constraint](design-type-constraint.md), (b2).
 
 **Decided.** By the maintainer: a write whose read left a rule out writes the partial result and reports it. Not decided: `when` at the top level, which the coordinating session puts to him as drop or keep, its recommendation drop; how an optional field is spelled in a concept's head. No reader rounds run.
+
+## 2026-11-26, Decided: `when` dropped at the top level, bare names, conversion, quotes
+
+**Asked.** The coordinating session relayed the maintainer's decisions of the day.
+
+**Decided.** By the maintainer:
+
+1. `when` is dropped from writes at the top level. A write reads as a rule does, `(assert head premise…)`, run once there and never installed. `(rule (assert head) premise…)` is the installed write. `(when …)` there is refused, naming the new form. This reverses the agent's decision of 2026-11-18 and holds to his of 2026-11-13. Not built yet.
+2. A bare name resolves over the repository's own primary together with its local `session:` layer. A qualifier is needed only for a layer that comes from another source, another repository's branch. `memory:` is the primary (`MEMORY` in `dialog-repository`'s `stack.rs`), so a definition lands in the primary unless the write names another layer (`in:`, `Statement::at`), and `session:` only when it does.
+3. Conversion is spelled `(float/from ?n is: ?f)`, `(integer/from ?n is: ?m)`: the source positional, the result under `is:`. `(integer ?t)` alone stays the constraint that narrows or filters. `(float of: ?q is: ?f)` is rejected: one name doing both jobs confused him. Not built.
+4. Both quotes, as a Lisp user expects. `'form` is the form as data, `?x` in it a literal variable. A syntax-quote (backtick) is the form as data with `~?x` replaced by the bound value, and `~@` splicing if it comes for free. A design note first, not built.
+5. Standing: the domain-shaped query and assertion forms, `(window/page window:1 is: ?p)` and `(domain/attribute entity is: value)` as a premise or an assert, are dropped, and no example writes them.
+6. `notation/analyze` takes a document's forms at once, so a form sees a concept defined above it, and sees earlier cells' definitions through what the stack holds; and it is to be incremental.
+
+**Learned.**
+
+- On 5: no entry drops these forms. Searched: this journal, #728's `research/notation/journal.md` and `design.md`, `spike/paged-views`. #728's 2026-11-16 entry dropped the getter, `(open-count (list ?l) is: …)`, and adopted a rule concluding `list/count-open` in place of it. 2026-11-18 built that as the derived attribute's read. His `select`, also 2026-11-18, asks a query by its head, `(select (list/card ?l is: ?card))`. 2026-11-25 dropped an undotted `word/field` as a stored attribute. His words that day: "Rule without labels is just sugar for (rule (list/label of: ?l is: ?n) ...)".
+  The shape stands in about 300 places on this branch, almost all of them query heads. Which form he means is asked of him: the derived attribute, the query head, or a stored attribute with its entity first.
+- On 2: `session:` under the bare name makes a bare name resolve differently on two replicas of one space, since `session:` is not synced. And when it and the primary both define one name, no precedence is decided.
+- On 4: 2026-11-14 decided that a quoted `( )` where a value stands is a list value, and a variable in it binds, as a list pattern. Under 4, `'(1 2 3)` is a form, and `?x` in a quote is literal. The reader reads `'` only: a backtick and `~` are not tokens.
