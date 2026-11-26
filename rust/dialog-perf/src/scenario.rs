@@ -21,6 +21,7 @@ mod replica;
 mod rule;
 mod subscribe;
 mod transaction;
+mod window;
 
 /// What a measured phase produced, by name: rows read, facts committed.
 pub type Outcome = BTreeMap<String, u64>;
@@ -343,6 +344,22 @@ pub fn catalog() -> Vec<Spec> {
             cross_cpu_pct: 0.0,
             layout_pct: 0.0,
             prepare: |size| Box::pin(export::walk(size)),
+        },
+        Spec {
+            name: "window-constant",
+            size: 30000,
+            about: "a window of 50 positions over a sorted list, moved on: the first poll of the next segment, its bounds constants of its rule",
+            cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
+            prepare: |size| Box::pin(window::constant(size)),
+        },
+        Spec {
+            name: "window-joined",
+            size: 30000,
+            about: "a window of 50 positions over a sorted list, moved on: a commit of the window's bounds, which its rule joins, then the subscription's poll",
+            cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
+            prepare: |size| Box::pin(window::joined(size)),
         },
     ]
 }
