@@ -414,6 +414,148 @@ Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
 
+### A cardinality-one write succeeds only the claims of its own type
+
+[#882](https://github.com/dialog-db/dialog-db/pull/882)
+
+A value of another type under an attribute is a claim of another
+relation, and a typed read already elects only among the claims its
+type reads (#875). The write side did not follow: asserting a value
+under cardinality one retracted the cell's newest claim of any type, so
+writing `"hello"` where a cell held `3` removed the `3`, and a `natural:`
+reader of the cell lost its value to a write it could not see. A
+cardinality-one write now succeeds only the newest claim of its own
+stratum, and leaves the claims of every other stratum standing. Numbers
+of every type are one stratum, as the band keys them: a float succeeds a
+natural. Every other type is a stratum of its own, and a type's finer
+forms share it: a listed text (`as: [low, high]`), a prefixed text and a
+text are all text, so a write of one succeeds the others.
+
+What this changes for you:
+
+- A cardinality-one assert of a text over a cell holding a number (or a
+  number over a text, an entity over a text, and so on) leaves the other
+  claim standing. It retracted it.
+- A cell under cardinality one can hold one live claim per stratum. A
+  typed read answers the newest claim of its own type; a read through a
+  field of no type elects the newest claim of all, as before.
+- An embedder that changes a cardinality-one value's type (writes an
+  entity where a text was) and expects the old value gone must retract
+  it.
+- Two inductive rules asserting one attribute under cardinality one
+  with values of different types no longer succeed each other: both
+  claims stand.
+
+Why: an attribute's type is part of which relation a claim belongs to,
+so a write must not remove a claim of a relation it does not write.
+
+### Two numbers of one value are equal whatever types they were read as
+
+[#881](https://github.com/dialog-db/dialog-db/pull/881)
+
+A rule's `==` compared two values by type first, so two numbers of one
+value read through different number types were not equal and the row
+was dropped, with no error: `3` read as `natural:` was not `3` read as
+`integer:` or as `float:`, since a typed read gives each number the
+representation of its type. `==` now holds between two numbers of one
+value whatever types they were read as, as the band keys them (`3`,
+`+3` and `3.0` are one number). The same holds where a computed value is
+checked against a constant: a formula's output, and a row of the tree's
+inspection relations.
+
+What this changes for you:
+
+- `==` between numbers of one value read through different number types
+  holds. It was a non-match.
+- Two values of one type, and a number against a value of another type,
+  compare as before.
+- A variable joined across two reads of different number types is still
+  refused when the rule compiles.
+
+### A range predicate orders two numbers of different types by value
+
+[#880](https://github.com/dialog-db/dialog-db/pull/880)
+
+A rule's `<`, `<=`, `>` and `>=` compared two numbers of data only when
+both were of one type, and a pair of different types was a non-match:
+the row was dropped, with no error. A read of the number band yields
+each number as its narrowest type (`3` a natural, `-5` an integer, `2.5`
+a float), whatever type wrote it, so the types two compared numbers
+arrive in depend on the data, and a rule that compiled answered wrongly
+on the data it met: `3 > -5` and `3 > 2.5` did not hold over an untyped
+or a `number:` read, nor `3 > -5` over a `natural:` and an `integer:`
+read. Two numbers of data now order by value, as the band's keys sort
+them, so a bound pushed into the scan and the same bound compared row
+by row keep the same numbers.
+
+What this changes for you:
+
+- A range predicate between two numbers of data holds or not by their
+  value, whatever types they were read as. Rows that were silently
+  dropped now match.
+- A numeric constant no type of the data takes orders against it by
+  value: `?x > 1.5` holds for the natural `3`, and `?x >= -1` for the
+  natural `0`. Both were non-matches, by a pushed range and by the
+  filter alike.
+- A number against a value of another type, and a NaN, are still a
+  non-match.
+
+Why: a rule that passes analysis must not answer wrongly because of the
+type a number happened to be read as.
+
+### One number held as two types elects its narrowest type
+
+[#879](https://github.com/dialog-db/dialog-db/pull/879)
+
+A cardinality-one election between claims that stand equal is broken by
+the hash of the value, which hashes the number and not its type, so it
+could not tell one number held as two types (`5` and `5.0`, `3` and the
+integer `3`, or the two zeros) apart and kept whichever it met first.
+Such a tie now goes to the narrowest type: the natural over the integer
+over the float, and `0.0` over `-0.0`. That is the type a read of the
+number band yields, so a deduced election answers what a stored read of
+the same claims would. It is reachable only for one number in two
+representations: any two values that are not the same number hash
+apart.
+
+What this changes for you:
+
+- A deduced cardinality-one read, and a `last`, `max` or `min` pick,
+  over candidates holding one number as two types at equal standing
+  answers the narrowest type, whatever order the candidates arrive in.
+  It answered whichever came first, or, for a pick, the float for `max`.
+- `Cardinality::newer` and `Cardinality::elect` take the narrowest of
+  such a pair; neither was newer than the other.
+- No stored answer changes. A tree a release before 0.3.0 keyed in
+  per-type bands can hold such a pair in one cell, and every stored read
+  of it met the natural first in key order and kept it; it still
+  answers the natural, as it does once migrated into the band.
+
+Why: an election must not depend on the order it meets its candidates
+in, and the narrowest type is what the band itself reads the number as.
+
+### Two opens of one credential racing both open it
+
+[#878](https://github.com/dialog-db/dialog-db/pull/878)
+
+`OpenCredential::open` loads the credential named, and creates one when
+none is there. When another opener created it between this one's load
+and its create, the create was refused as already there and the open
+failed with `IdentityError::Storage("Space already exists: …")`. It now
+loads the credential the other opener created, once, so two opens of one
+name racing end with one key.
+
+What this changes for you:
+
+- Opening one credential from two tasks or processes at once no longer
+  fails for whichever lost: both get the same key.
+- The tests that open peers in parallel through the test helpers no
+  longer fail now and then with "Space already exists: Temp/custodian-…"
+  (dialog-perf's unit tests among them).
+
+Why: open is the "load it or make it" call. Losing a race to make it is
+not a failure to open it, since what it was asked to open is there.
+
 ### A typed read elects and picks among the values its type reads
 
 [#875](https://github.com/dialog-db/dialog-db/pull/875)
@@ -510,9 +652,11 @@ What this changes for you:
 - `Value::cmp_number` is new: the order of two numbers by value, total
   and deterministic, NaN least, `-0.0` equal to 0, a float past `2^53`
   read as the decimal it prints as, as the band keys it.
-- Two numbers of one value held as two types, such as 3 and 3.0, pick
-  the same one whatever order they arrive in: `max` the float, `min`
-  the natural.
+- Two numbers of one value held as two types, such as 3 and 3.0, are
+  one value to a pick: the newer claim wins, and between claims that
+  stand equal the narrowest type, whatever order they arrive in, for
+  `max` and `min` alike (see "One number held as two types elects its
+  narrowest type").
 - A text, an entity or a listed type picks as before, and a pick over a
   field of no type holding values of several types that are not numbers
   still orders them by type first.
@@ -2004,6 +2148,31 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A cardinality-one write succeeds only its own type's claims: nothing
+  stored changes shape, no identity moves and nothing is rewritten on
+  upgrade. Every replica already holds at most one live claim per cell,
+  which is one per stratum. What a write retracts differs: an older
+  release retracts the newest claim of any type, this one only of its
+  own. An older release reads what this one writes; its cardinality-one
+  read elects the newest claim of any type and answers nothing when that
+  claim is of another type than its field. A mixed fleet differs in
+  what a cell holds until every writer upgrades: an older writer's
+  write still retracts the claim of another type, and that retraction
+  reaches every replica on sync. Concurrent writes converge on pull
+  whichever replica merges, before and after this change and in a mixed
+  fleet. Upgrade every writer; an embedder runs nothing.
+- Two numbers of one value equal whatever types read them: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A stored rule keeps its identity and now keeps the rows its `==`
+  dropped between numbers of different types; an older release still
+  drops them, so a mixed fleet differs in what such a rule derives until
+  every replica upgrades.
+- A range predicate between numbers of different types: nothing stored
+  or synced changes, no identity moves and nothing is rewritten. A rule
+  stored before keeps its identity and now keeps the rows its range
+  predicate dropped between numbers of different types; an older
+  release still drops them, so a mixed fleet differs in what such a
+  rule derives until every replica upgrades.
 - A rule's write under cardinality one after the same commit's write
   of the cell: nothing stored changes shape, no identity moves and
   nothing is rewritten on upgrade. What a commit writes differs: one

@@ -189,9 +189,14 @@ impl Equality {
                 match (&self.this, &self.is) {
                     (Pattern::Term(this), Pattern::Term(is)) => {
                         match (base.lookup(this), base.lookup(is)) {
-                            // Both Present: yield iff values match.
+                            // Both Present: yield iff values match, two
+                            // numbers of one value whatever types they
+                            // were read as (see [`Value::same_number`]).
                             (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
-                                if this_val == is_val {
+                                if this_val == is_val
+                                    || (this_val.data_type() != is_val.data_type()
+                                        && this_val.same_number(&is_val))
+                                {
                                     yield base;
                                 }
                             }
@@ -274,7 +279,15 @@ impl Equality {
             return Ok(None);
         }
         let (value, other) = match (this.build(&base), is.build(&base)) {
-            (Some(this_val), Some(is_val)) => return Ok((this_val == is_val).then_some(base)),
+            // Two numbers of one value are equal whatever types they
+            // were read as (see [`Value::same_number`]); a pair of one
+            // type compares as it did.
+            (Some(this_val), Some(is_val)) => {
+                let equal = this_val == is_val
+                    || (this_val.data_type() != is_val.data_type()
+                        && this_val.same_number(&is_val));
+                return Ok(equal.then_some(base));
+            }
             (Some(value), None) => (value, is),
             (None, Some(value)) => (value, this),
             (None, None) => {
