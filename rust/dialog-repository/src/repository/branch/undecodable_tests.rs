@@ -509,3 +509,68 @@ async fn a_retraction_beside_an_unread_claim_lands() -> Result<()> {
     assert_eq!(stored(&branch, "item/size", &operator).await?, 1);
     Ok(())
 }
+
+/// A cardinality-one write of a number to a cell holding a text claim
+/// this replica cannot read yet lands and leaves that claim in place: it
+/// is a claim of the text stratum, read off its key's type byte, and a
+/// write succeeds only claims of its own stratum, as it leaves the
+/// readable text in place too.
+#[dialog_common::test]
+async fn a_cardinality_one_write_leaves_an_unread_claim_of_another_stratum() -> Result<()> {
+    let (branch, operator) = cell(
+        test_storage().await,
+        "item/size",
+        Value::String("large".into()),
+        not_utf8(),
+        Stands::Newer,
+    )
+    .await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            claim("item/size", Value::UnsignedInt(3))?,
+            Cardinality::One,
+        )]))
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        stored(&branch, "item/size", &operator).await?,
+        3,
+        "the number stands beside the readable text and the unread one"
+    );
+    Ok(())
+}
+
+/// A claim whose value type this release does not know (type byte 10):
+/// its key does not parse, so neither its stratum nor its other orderings
+/// can be read off it. A cardinality-one write to its cell lands, passes
+/// it over and leaves it in place; it is not evicted. A read of the cell
+/// still fails on its key, which this replica cannot parse.
+#[dialog_common::test]
+async fn a_cardinality_one_write_passes_over_a_claim_of_a_type_it_does_not_know() -> Result<()> {
+    let unknown = Bad {
+        value: Value::String("QZ".into()),
+        marker: b"\x03QZ",
+        replacement: b"\x0aQZ",
+    };
+    let (branch, operator) = cell(
+        test_storage().await,
+        "item/size",
+        Value::String("unused".into()),
+        unknown,
+        Stands::Alone,
+    )
+    .await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            claim("item/size", Value::String("fine".into()))?,
+            Cardinality::One,
+        )]))
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        stored(&branch, "item/size", &operator).await?,
+        2,
+        "the write stands beside the claim of an unknown type"
+    );
+    Ok(())
+}

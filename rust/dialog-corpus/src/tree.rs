@@ -1285,13 +1285,15 @@ fn reconstruct(
     Ok(Some(fact))
 }
 
-/// Whether the stored `key` is a claim of `fact`'s cell: its entity and
-/// attribute bytes are `fact`'s, read off the key without decoding its
-/// value.
-fn in_cell(key: &Key, fact: &Fact) -> bool {
+/// Whether the stored `key` is a claim of `fact`'s cell and of the
+/// written value's stratum: its entity and attribute bytes are `fact`'s,
+/// and its value type, through the number band, is the stratum of
+/// `fact`'s value. Read off the key, without decoding its value.
+fn of_stratum(key: &Key, fact: &Fact) -> bool {
     varkey::parse_key_ref(key.as_ref()).is_some_and(|parts| {
         parts.entity.as_ref() == fact.of.as_str().as_bytes()
             && parts.attribute.as_ref() == fact.the.as_str().as_bytes()
+            && parts.value_type.band(NUMBER_BAND) == fact.is.stratum()
     })
 }
 
@@ -1691,12 +1693,27 @@ where
                     while let Some(candidate) = search_stream.next().await {
                         let candidate = candidate?;
                         if let State::Added(current_element) = &candidate.value {
-                            let spilled = fetch_spilled(
+                            let spilled = match fetch_spilled(
                                 storage,
                                 &ArchiveScope::new(transient.subject().clone()),
                                 &candidate.key,
                             )
-                            .await?;
+                            .await
+                            {
+                                Ok(spilled) => spilled,
+                                // A key whose value type this release
+                                // does not know does not parse: neither
+                                // its stratum nor its other orderings can
+                                // be read off it, so the write passes it
+                                // over and leaves it in place.
+                                Err(DialogCorpusError::InvalidKey(reason))
+                                    if varkey::parse_key_ref(candidate.key.as_ref()).is_none() =>
+                                {
+                                    crate::pass_over(Some(candidate.key.as_ref()), reason);
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
                             let current = match Fact::from_key_datum_with_value(
                                 &candidate.key,
                                 current_element,
@@ -1704,7 +1721,11 @@ where
                             ) {
                                 Ok(current) => current,
                                 Err(DialogCorpusError::CorruptEntry(reason)) => {
-                                    if in_cell(&candidate.key, &fact) {
+                                    // Evicted only when the key says it is
+                                    // a claim of the written value's
+                                    // stratum, as a readable one would be
+                                    // succeeded.
+                                    if of_stratum(&candidate.key, &fact) {
                                         crate::pass_over(Some(candidate.key.as_ref()), reason);
                                         unread.push((
                                             candidate.key.clone(),

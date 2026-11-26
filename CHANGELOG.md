@@ -38,11 +38,18 @@ What this changes for you:
   them fails on it.
 - An entity value stored in a rendering other than its canonical one is
   unread: it no longer reads as the entity it would parse to.
-- A cardinality-one write to a cell holding an unread claim lands
-  and evicts it: its keys are erased and the written claim's record
-  supersedes its version, so every replica that pulls the write evicts
-  it too. A cardinality-many write or a retraction beside it lands and
-  leaves it in place. A write that changes nothing evicts nothing.
+- A cardinality-one write to a cell holding an unread claim of the
+  written value's stratum, read off the claim's key without decoding
+  it, lands and evicts it: its keys are erased and the written claim's
+  record supersedes its version, so every replica that pulls the write
+  evicts it too. An unread claim of another stratum is left in place, as
+  a readable one is. A cardinality-many write or a retraction beside it
+  lands and leaves it in place. A write that changes nothing evicts
+  nothing.
+- A claim whose value type this release does not know has a key that
+  does not parse, so neither its stratum nor its other orderings can be
+  read off it: a cardinality-one write to its cell lands and leaves it
+  in place, and a read of the cell still fails on it.
 - Every claim passed over goes through `dialog_corpus::pass_over`, which
   logs it (`tracing::warn`) and returns an `Unread` naming its key
   and why. No query or commit result reports them yet.
