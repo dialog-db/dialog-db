@@ -1532,7 +1532,7 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
         );
     }
     // What is refused says something: a fold in a derived attribute's
-    // head, and the notebook read without core, which refuses three
+    // head, and the notebook read without core, which refuses four
     // uses of what core declares.
     for text in [
         format!("{concepts} (rule (list/count-open ?l (count ?t)) (xyz.todo ?t list: ?l))"),

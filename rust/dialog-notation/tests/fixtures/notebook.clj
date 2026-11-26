@@ -379,6 +379,26 @@
   (site ?site concept: tonk:notebook/route ...)
   (notebook/route ?site entity: ?n ...))
 
+; A retitle someone follows (the command palette) gets the notebook it
+; renamed as its output, so they are told it took. The head is declared
+; here, its line in `session:`, where it stays for the session, never
+; committed and never synced. YAML 851.
+
+; The notebook a followed retitle renamed, as its invocation's output, kept
+; in `session:`.
+; GAP: a concept pinned to an entity, `this: tonk:notebook/retitled`, as
+; `command/invoked` in core. YAML 862.
+(concept (notebook/retitled ?r output: ?output)
+  ; The notebook it renamed.
+  (xyz.tonk.invocation/output of: ?r is: ?output as: :entity in: :session cardinality: :one))
+
+; A followed retitle produces the notebook it renamed.
+; GAP: a command's own entity, read with `of:` as above, the managing
+; agent's opinion and not the design's. YAML 870.
+(rule (assert (notebook/retitled ?r output: ?output))
+  (notebook/retitle of: ?r subject: ?output ...)
+  (command/invoked ?r at: ?at concept: ?concept))
+
 ; Write one notebook block's source.
 (concept (block/edit subject: ?b source: ?s notebook: ?n)
   ; The block entity, stamped on the element's data-subject.

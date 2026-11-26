@@ -1539,8 +1539,9 @@ async fn it_refuses_what_a_view_may_not_say() -> Result<()> {
 
 /// How far tonk's notebook and table, written in the notation, get,
 /// form by form: how many forms are read, how many are refused, and how
-/// many compile to a step. Alone, the notebook's three uses of what core
-/// declares (two routes and an intent) are what nothing gives a meaning;
+/// many compile to a step. Alone, the notebook's four uses of what core
+/// declares (two routes, an intent and a followed command) are what
+/// nothing gives a meaning;
 /// with core in front, as tonk reads a component, nothing is refused. A
 /// change that moves these numbers moves them here on purpose.
 #[test]
@@ -1561,8 +1562,8 @@ fn it_measures_how_far_the_notebook_and_the_table_get() -> Result<()> {
     let notebook_views = include_str!("fixtures/notebook-views.clj");
     let table = include_str!("fixtures/table.clj");
     let table_views = include_str!("fixtures/table-views.clj");
-    assert_eq!(measure(&[notebook, notebook_views])?, (58, 3, 33));
-    assert_eq!(measure(&[core, notebook, notebook_views])?, (62, 0, 36));
-    assert_eq!(measure(&[core, table, table_views])?, (54, 0, 25));
+    assert_eq!(measure(&[notebook, notebook_views])?, (60, 4, 33));
+    assert_eq!(measure(&[core, notebook, notebook_views])?, (65, 0, 37));
+    assert_eq!(measure(&[core, table, table_views])?, (55, 0, 25));
     Ok(())
 }
