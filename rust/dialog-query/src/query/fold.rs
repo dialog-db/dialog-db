@@ -36,7 +36,7 @@ use crate::Term;
 use crate::concept::Conclusion;
 use crate::corpus::Value;
 use crate::error::EvaluationError;
-use crate::reduce::Reduce;
+use crate::reduce::{Reduce, group_key};
 use crate::selection::{Binding, Match, Selection};
 use crate::try_stream;
 use crate::types::Any;
@@ -170,7 +170,7 @@ fn key(row: &Match, groups: &[String]) -> Result<Vec<u8>, EvaluationError> {
             Binding::Absent => Ok(None),
         })
         .collect::<Result<_, EvaluationError>>()?;
-    Ok(crate::reduce::group_key(&values))
+    Ok(group_key(&values))
 }
 
 impl<G, Q> Application for Fold<G, Q>
