@@ -3,7 +3,7 @@
 //! The analyzer is given the trees a document parsed to. A rule about
 //! syntax among them is kept as a definition; every other tree is
 //! rewritten by the definitions in force until it is a rule of the
-//! kernel. What comes back is those rules, the analyzed trees, and
+//! primitive. What comes back is those rules, the analyzed trees, and
 //! what the definitions said about the document.
 //!
 //! The definitions are held here, in memory. They are to be read from a
@@ -22,7 +22,7 @@ use crate::{Error, Syntax};
 /// and [`answer`](crate::answer), and should prefer them over this.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Analysis {
-    /// The analyzed trees: every one a rule of the kernel, in the order
+    /// The analyzed trees: every one a rule of the primitive forms, in the order
     /// their forms were written. A form several definitions take is a
     /// rule a definition. None when any tree of the document is
     /// refused.

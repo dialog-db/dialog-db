@@ -1,17 +1,17 @@
-# The kernel and the core forms
+# The primitive forms and the core forms
 
-The slim kernel as agreed on 2026-11-11, the core forms defined in it, and what running them through a model showed. It is implemented in `rust/dialog-notation`: the core forms are its prelude, `src/prelude.clj`, which is the reference where this note and it differ.
+The slim set of primitive forms as agreed on 2026-11-11, the core forms defined in it, and what running them through a model showed. It is implemented in `rust/dialog-notation`: the core forms are its prelude, `src/prelude.clj`, which is the reference where this note and it differ.
 
 ```mermaid
 flowchart LR
   text["text"] -- read --> form["form"]
-  form -- "walk: is the head kernel?" --> ask{{"(expand form): ask the rules"}}
+  form -- "walk: is the head primitive?" --> ask{{"(expand form): ask the rules"}}
   ask -- "(syntax form'): one answer" --> form
-  form -- "all kernel" --> rule["kernel rule"]
+  form -- "all primitive" --> rule["primitive rule"]
   rule -- compile --> descriptor["descriptor, as dialog stores rules today"]
 ```
 
-## The kernel
+## The primitive forms
 
 | | Form | In dialog today |
 |---|---|---|
@@ -25,7 +25,7 @@ flowchart LR
 | Together | `(all form…)` as what a template answers: several forms standing where one was written | new; a template needs it to say more than one thing. Not written in a rule, where it is refused |
 
 - No form carries `!` (#728, taken here on 2026-11-16). `(assert A)` lands and is kept until retracted; `(retract A)` takes it back.
-- How long a fact lasts belongs to its layer, not to the word that concludes it. A head with no word derives, the relation holding while the premises do, a command's included. `assert` of claims on the control layer, `(:control …)`, issues them: they hold for the next tick and that tick only. Retracting a command is not decided and is unsupported, and so is a head with control claims beside stored ones. A command's head names no entity: when no premise binds it, the kernel derives it, `(:id domain label: term …)` over the fields. From 2026-11-16 to 2026-11-18 it was the other way round, by the relation's domain under `command.` ([design-issue.md](design-issue.md)); the design at #728 overtook it.
+- How long a fact lasts belongs to its layer, not to the word that concludes it. A head with no word derives, the relation holding while the premises do, a command's included. `assert` of claims on the control layer, `(:control …)`, issues them: they hold for the next tick and that tick only. Retracting a command is not decided and is unsupported, and so is a head with control claims beside stored ones. A command's head names no entity: when no premise binds it, the primitive forms derive it, `(:id domain label: term …)` over the fields. From 2026-11-16 to 2026-11-18 it was the other way round, by the relation's domain under `command.` ([design-issue.md](design-issue.md)); the design at #728 overtook it.
 - From 2026-11-11 to 2026-11-16 the mark told the two apart: `assert!` stayed and `assert` held a round. `assert!` and `retract!` are refused now, with the word to write.
 - An application has one part with no label. Every other part has its label; `:` alone is the label of a formula's second operand.
 - A formula's result is `is:`. An application of a formula in a term's place stands for that value: `count: (+ ?n : 1)`.
@@ -38,8 +38,8 @@ flowchart LR
   - To write part of it, write the relation: `(retract (xyz.todo/state of: ?t is: :open))`. A write through the concept that names some fields is refused, saying so.
   - A write with no premise needs its entity: `(retract (todo ?t))` at the top level is refused, as `(retract (todo ?t state: :open))` is.
   - To replace a record through its concept, retract the record and assert the changed record, a rule each on the same premises: what one round both retracts and asserts holds afterwards (#863; `it_replaces_a_record_by_retracting_it_and_asserting_it_changed`).
-- A fold, `(count ?t)`, is a term the kernel reads: `count`, `count-distinct`, `sum`, `min`, `max`, `avg`, as the engine's `reduce` has them. It stands in a field of a head that derives and nowhere else: in the notation, a derived attribute, `(rule (list/count-open ?l (count ?t)) …)`, which the walker writes as the relation `dialog.n.c.<hash>/is`, the hash 128 bits of the reference of `list` and `count-open` as written. Nothing runs it yet: the engine refuses a fold in a rule that derives, and compiling says so.
-- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:one (:text ?t)))`, and the walker writes it so: `cardinality:` is the wrapper `:one` or `:many`, which replaced the picks `last` and `all` (#728), `as:` the type, an elector on the value, `is: (max ?s)`, the wrapper `:max`, `in: :control` the layer. The line is what a document writes; the wrapped read is the kernel's, and since 2026-11-25 no document writes one: a wrapper in a document is refused, naming the line to write in its place (journal, "Decided: a document writes no wrapper"). Any other layer is unsupported. `(xyz.todo/title ?i ?t)`, the two terms unlabeled, is the same line. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields. A line says its cardinality wherever it stands in a concept's body, beside a read of another concept too. A body that is a read of a domain, `(concept (m ?t text: ?x) (xyz.m ?t text: ?x))`, is a read and not a line: it says no cardinality and reads every claim, and is accepted, since what is required of authors is on lines (`it_refuses_a_line_with_no_cardinality_whatever_the_body_holds`).
+- A fold, `(count ?t)`, is a term the primitive forms read: `count`, `count-distinct`, `sum`, `min`, `max`, `avg`, as the engine's `reduce` has them. It stands in a field of a head that derives and nowhere else: in the notation, a derived attribute, `(rule (list/count-open ?l (count ?t)) …)`, which the walker writes as the relation `dialog.n.c.<hash>/is`, the hash 128 bits of the reference of `list` and `count-open` as written. Nothing runs it yet: the engine refuses a fold in a rule that derives, and compiling says so.
+- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not primitive. It is the read `(xyz.todo ?i title: (:one (:text ?t)))`, and the walker writes it so: `cardinality:` is the wrapper `:one` or `:many`, which replaced the picks `last` and `all` (#728), `as:` the type, an elector on the value, `is: (max ?s)`, the wrapper `:max`, `in: :control` the layer. The line is what a document writes; the wrapped read is the primitive forms', and since 2026-11-25 no document writes one: a wrapper in a document is refused, naming the line to write in its place (journal, "Decided: a document writes no wrapper"). Any other layer is unsupported. `(xyz.todo/title ?i ?t)`, the two terms unlabeled, is the same line. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields. A line says its cardinality wherever it stands in a concept's body, beside a read of another concept too. A body that is a read of a domain, `(concept (m ?t text: ?x) (xyz.m ?t text: ?x))`, is a read and not a line: it says no cardinality and reads every claim, and is accepted, since what is required of authors is on lines (`it_refuses_a_line_with_no_cardinality_whatever_the_body_holds`).
 
 ## Syntax is a rule
 
@@ -154,7 +154,7 @@ A description is a fact about an entity, `syntax.meta/description`, never part o
 
 Built 2026-11-13, and changed in two ways. What a form is for is said in a comment right above it, not in a `description:` part (Irakli: `description:` does not belong in a concept). And Dialog-DB refuses `dialog.meta/` from a transaction, since `dialog.` is kept for what it writes itself, so the fact is `syntax.meta/description`. Decided 2026-11-14 (Irakli): `dialog.` stays closed, as it is reserved so that nothing written from outside can upset the indexes the database keeps, and a description is metadata like any other, under a domain of the notation's own. `syntax` is that domain: `syntax.form` is the kept form, `syntax.meta` what is said about one.
 
-- A comment right above a `rule`, and one that ends its line, are the rule's description. It lands as that fact on the rule's entity. The kernel rule still carries it as `description:`, which is how it reaches the compiler.
+- A comment right above a `rule`, and one that ends its line, are the rule's description. It lands as that fact on the rule's entity. The primitive rule still carries it as `description:`, which is how it reaches the compiler.
 - A concept's comment is kept with its form. It is not a fact yet: a definition has no entity until syntax is kept on a branch.
 
   ```clj
@@ -209,7 +209,7 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ## What the model is
 
-[`design/macros/model/model.py`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/model/model.py) on `research-data` is a throwaway in Python: a reader, pattern matching and template filling, an evaluator for kernel rules over a dictionary of facts, the walker, and rounds in which what `assert` says is seen once. It reads the prelude as text and runs it, so the definitions above are checked as written. It shares no code with dialog.
+[`design/macros/model/model.py`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/model/model.py) on `research-data` is a throwaway in Python: a reader, pattern matching and template filling, an evaluator for primitive rules over a dictionary of facts, the walker, and rounds in which what `assert` says is seen once. It reads the prelude as text and runs it, so the definitions above are checked as written. It shares no code with dialog.
 
 It does not model the planner, picks (the wrapper is carried and ignored, and a write to a to-do's field replaces what was there), layers, canonical identities, names at a revision, source maps, or a document whose forms are in any order: it takes them top to bottom.
 

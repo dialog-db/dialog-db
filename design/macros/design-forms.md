@@ -2,7 +2,7 @@
 
 **Decision:** what a form is in dialog, so that a rule about syntax is a rule dialog stores and evaluates.
 
-**For:** the direction, macros as rules. The proof of concept ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`) runs the kernel on dialog, and holds the rules about syntax in memory and matches patterns itself. Nothing about syntax is stored, named by hash, or synced.
+**For:** the direction, macros as rules. The proof of concept ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`) runs the primitive forms on dialog, and holds the rules about syntax in memory and matches patterns itself. Nothing about syntax is stored, named by hash, or synced.
 
 **Decided 2026-11-11, by the maintainer: a form is a record (C).** `entity/derive` takes a record too. The matrix below is how the approaches compared; what follows it is what the decision asks of records.
 
@@ -70,7 +70,7 @@ That puts one thing under three that looked separate:
                  └── build ───────▶ (:id …) = entity/derive of a record
 ```
 
-Finding 3 of [kernel.md](kernel.md) said `expand`, `syntax` and `:id` each take whatever labels they are given, so each needed a premise of a new kind. With records there is one: a record and its fields.
+Finding 3 of [primitive.md](primitive.md) said `expand`, `syntax` and `:id` each take whatever labels they are given, so each needed a premise of a new kind. With records there is one: a record and its fields.
 
 ## `entity/derive` takes a record
 
@@ -160,9 +160,9 @@ Built, in `rust/dialog-notation/src/data.rs` and `src/syntax.rs`. The first vers
 
 ## Tested: what the parts of a form are
 
-Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted over every application in `prelude.clj` and the two examples, 151 as written and the 70 of the kernel rules they expand to (`cargo run -p dialog-notation --example shapes -- <files>`):
+Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted over every application in `prelude.clj` and the two examples, 151 as written and the 70 of the primitive rules they expand to (`cargo run -p dialog-notation --example shapes -- <files>`):
 
-| parts without a label | as written | kernel | which heads |
+| parts without a label | as written | primitive | which heads |
 |---|---|---|---|
 | none or one | 113 | 64 | every read, formula, command, `assert!`, `report`, `expand` |
 | several | 38 | 6 | `rule` 15, `when` 7, `unless` 2, `query` 2, `all` 1; `syntax` 8, `concept` 3 |
@@ -178,7 +178,7 @@ Two readings of `( )` were on the table on 2026-11-11, both Irakli's. Counted ov
 | what data it is | a set of pairs; only #748 has it, and it is not built | a list and a map, which EDN, JSON and IPLD all have |
 | forms that have to be written differently | 11, and a new label | 0 |
 
-Found on the way: where the part with no label may also be written `of:` (#728's design), the prelude's own command row says `of:` twice, `(command.add.todo _ of: ?t …)`: 3 forms as written, 17 in the kernel. The row's field for what the command is about needs another name.
+Found on the way: where the part with no label may also be written `of:` (#728's design), the prelude's own command row says `of:` twice, `(command.add.todo _ of: ?t …)`: 3 forms as written, 17 in the primitive forms. The row's field for what the command is about needs another name.
 
 The agent's reading of the count: the tuple, with the labelled parts a map at its end.
 
@@ -219,7 +219,7 @@ Irakli, 2026-11-11: parsing transforms notation into a syntax tree, and the tree
 So there are three things, and the proof of concept has kept the first as if it were the third:
 
 ```
- notation ──parse──▶ syntax tree ──expand──▶ kernel rules ──compile──▶ dialog
+ notation ──parse──▶ syntax tree ──expand──▶ primitive rules ──compile──▶ dialog
  text                nodes, by name          what dialog runs
                      kept as maps, lists, tuples
 ```
@@ -256,7 +256,7 @@ Nodes the prelude and the examples need, in the shape of the example:
 
 They are named and versioned already too. A rule's identity is a merkle reference of its canonical spelling, in which variables are renamed by structure and premises sorted (`rule/canonical.rs`), so neither a name nor the order of premises is in it. A stored rule is `{ "format": 3, "rule": … }`, and a reader refuses a format newer than its own (`rule/body.rs`).
 
-So the tree for what dialog runs exists. `kernel.rs` in the proof of concept is a second copy of it. What dialog's forms do not have is what the notation adds before that point:
+So the tree for what dialog runs exists. `primitive.rs` in the proof of concept is a second copy of it. What dialog's forms do not have is what the notation adds before that point:
 
 - an operator by name, `'todo`: dialog's `ConceptQuery` holds the concept itself, inlined;
 - a term that is an application, a map or a tuple: a `Term` is a variable or a constant;
@@ -376,7 +376,7 @@ Built in the proof of concept, and what each case does:
 
 Kept on a real branch as the diagram has it: three definitions of `todo`, the third a correction of the first, come back by the name alone as two, each with its own names for the field (`it_keeps_definitions_on_a_branch_under_their_signatures`). So H9 is taken: the field names are with the name. H10 holds as built: what is named is a name, a kind and a set of labels.
 
-What "showing all" costs, measured on the cases above: one more kernel rule a definition that fits, and only where a read's labels fit several. A form that recurs takes one definition for the whole rule, so `(query (todo ?t title: ?x))`, which the prelude copies into a head and a premise, is two rules and not four.
+What "showing all" costs, measured on the cases above: one more primitive rule a definition that fits, and only where a read's labels fit several. A form that recurs takes one definition for the whole rule, so `(query (todo ?t title: ?x))`, which the prelude copies into a head and a premise, is two rules and not four.
 
 Not built:
 
@@ -459,7 +459,7 @@ H2 is now a requirement in the table above, not a hypothesis. H3 and H4 stand.
 ## Next
 
 1. Done 2026-11-16, for patterns: #799 is merged in here and a rule that holds a struct is kept. As it was written: a stored rule that holds a pattern: format 4 of a rule body, its own topic (#779), for patterns, records, several heads and rules about syntax together. Dialog lays a rule with a struct in it over a branch now and still cannot keep one, so a rule that writes cannot hold a struct. `entity/derive` over a record waits on the same: built once, it made every rule that derives an entity uninstallable, and was taken out.
-2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `kernel.rs` gives way to dialog's own forms.
+2. The expander and the compiler read the tree, an application lowers to a `ConceptQuery` of the definition's concept, and `primitive.rs` gives way to dialog's own forms.
 
 Parked by the maintainer: what decides between two definitions of one signature written apart. `last` elects one.
 3. A struct as a term and `entity/derive` over a record: with [patterns](../patterns/plan.md).

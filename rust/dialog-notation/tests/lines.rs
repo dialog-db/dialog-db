@@ -1,4 +1,4 @@
-//! What a document writes where the kernel reads a value wrapped in a
+//! What a document writes where the primitive forms read a value wrapped in a
 //! type, a pick, a cardinality or a layer: a line, `of:`, `is:`, `as:`,
 //! `cardinality:` and `in:`, in every position (gaps row 56).
 
@@ -176,7 +176,7 @@ async fn it_elects_a_derived_attributes_value_as_a_line_does() -> Result<()> {
 }
 
 /// A document writes no wrapper: a value wrapped in a type, a pick, a
-/// cardinality or a layer is the kernel's, which the walker writes for a
+/// cardinality or a layer is primitive, which the walker writes for a
 /// line. Wherever a document writes one, in a write, a `when`, a rule's
 /// head or premise, a select's head or premise, `unless` or a concept's
 /// body, it is refused as `Error::Refused`, naming the line to write in
@@ -338,9 +338,9 @@ async fn it_lists_a_derived_attributes_cases_as_a_line_does() -> Result<()> {
     Ok(())
 }
 
-/// The walker still writes every wrapper for a line, and the kernel still
+/// The walker still writes every wrapper for a line, and the primitive forms still
 /// reads each: a type, a cardinality, an elector, a listed type's cases
-/// and a layer each come out of a line wrapped and compile. A kernel tree
+/// and a layer each come out of a line wrapped and compile. A primitive tree
 /// built through the Rust API is no document, and compiles with them.
 #[dialog_common::test]
 fn it_still_reads_every_wrapper_the_walker_writes() -> Result<()> {

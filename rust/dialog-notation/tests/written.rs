@@ -209,7 +209,7 @@ fn relabelled_relation(
 }
 
 /// What a document may not write, a hand-built tree may not either:
-/// for each write the analyzer refuses, the same kernel rule built by
+/// for each write the analyzer refuses, the same primitive rule built by
 /// hand is refused by `compile`, as the same kind of refusal. The
 /// notation's own record of descriptions, `syntax.meta`, is written by
 /// nothing but the notation, as a head, an assert, a retract or a field;
@@ -422,7 +422,7 @@ fn it_holds_a_tree_built_by_hand_to_what_a_document_may_name() -> Result<()> {
 
 /// A pin of a split that is meant: a hand-built head may write a field
 /// labelled by another domain's attribute, `xyz.b/c:`, which writes that
-/// attribute of the entity, because the kernel reads a label with a `/`
+/// attribute of the entity, because the primitive forms read a label with a `/`
 /// as the attribute it names, the form the analyzer joins the reads of
 /// one entity under `unless` into. A document may not write one: it
 /// reads and writes each domain by itself, and is refused saying so.

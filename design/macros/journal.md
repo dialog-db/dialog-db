@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
+| **Status** | The primitive forms and the core forms run on a real branch through `rust/dialog-notation` ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `primitive.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
 | **Agenda** | **One at a time, in the order of the queue at the end of this journal** (the maintainer, 2026-11-13: the threads were more than he could follow). The rest of this cell is what the queue was drawn from. Answered since, 2026-11-14: descriptions stay under `syntax.meta` and `dialog.` stays closed; a stored rule is written in the new format always (#799); `[ ]` where a value stands is a list, as `'( )` is. #791 is a bug (the maintainer), fixed in #802. Next: what a map's key is. Still to build: a reported row in the order asked; printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
@@ -22,7 +22,7 @@ Not examined yet. They are columns, not recommendations.
 
 - **Status quo.** A parser and compiler in Rust know every form (tonk-notation today; the `dialog-notation` crate #728 plans).
 - **Everything is a rule** (Irakli). Macros are rules, and the compiler is a rule too.
-- **Macros are rules, compiling is a formula** (Irakli). Rules turn a surface form into kernel forms; one built-in formula turns a kernel form into what dialog stores.
+- **Macros are rules, compiling is a formula** (Irakli). Rules turn a surface form into primitive forms; one built-in formula turns a primitive form into what dialog stores.
 - **Macros are data, expanding is built in** (the 2026-05-16 journal). A macro is a stored pattern and templates; a native expander applies them. No rule takes part.
 
 ## 2026-11-10, Diagnosing: from "macros as rules" to what is in the way
@@ -30,25 +30,25 @@ Not examined yet. They are columns, not recommendations.
 **Asked.**
 
 - Irakli brought the list in the [topic's description](../macros.md#description), and asked: is the compiler itself a rule, or is there a built-in formula that takes syntax and compiles it?
-- The agent's answer, as a hypothesis (H1 in the ledger): both, split at the kernel form. Three reasons the compiler cannot be a rule all the way down. Something has to compile the first rule. A rule's identity comes from a canonical labeling that searches (colour refinement, then individualisation), which is not a deduction. And a rule that does not match says nothing, where a compiler has to say why a form was refused.
+- The agent's answer, as a hypothesis (H1 in the ledger): both, split at the primitive form. Three reasons the compiler cannot be a rule all the way down. Something has to compile the first rule. A rule's identity comes from a canonical labeling that searches (colour refinement, then individualisation), which is not a deduction. And a rule that does not match says nothing, where a compiler has to say why a form was refused.
 - Open, asked of Irakli: which of the four candidate problems is in the way today, and what happens because of it.
 
 **Learned.**
 
-- "All primitive forms are expressed through macro rules" and "macros are rules" cannot both hold all the way down: `rule` would be defined by a rule. Irakli's own follow-up, the built-in formula, is where the regress stops. The word "primitive" was carrying two meanings; the [glossary](glossary.md) splits it into surface form and kernel form.
+- "All primitive forms are expressed through macro rules" and "macros are rules" cannot both hold all the way down: `rule` would be defined by a rule. Irakli's own follow-up, the built-in formula, is where the regress stops. The word "primitive" was carrying two meanings; the [glossary](glossary.md) splits it into surface form and primitive form.
 - Earlier readings by the agent in this conversation were off the mark and are withdrawn: conduct as the host language, and a meta-circular evaluator with bindings threaded through premises. Neither is in the maintainer's notes.
 - The 2026-05-16 design had no problem assembling a form from rows, because its macros expanded to triples. The problem appeared on #728 when a definition became one value under its hash. H4 says a set-collecting `reduce` closes it.
 
 **Decided.** Not decided. What would decide the phase: Irakli's answer to the open question, written into the Problem section.
 
-## 2026-11-11, Designing: the kernel, and the core forms run in a model
+## 2026-11-11, Designing: the primitive forms, and the core forms run in a model
 
 **Asked.**
 
-- Irakli declined to state a problem and asked for a design and a plan, not an implementation. Direction: macros as rules, a minimal kernel, hash-addressed definitions, nothing built on conduct or wasm, and as fast as the system is today.
+- Irakli declined to state a problem and asked for a design and a plan, not an implementation. Direction: macros as rules, a minimal set of primitive forms, hash-addressed definitions, nothing built on conduct or wasm, and as fast as the system is today.
 - He asked that claims be confirmed in the code and not left as hypotheses, and that notes not be trusted. The planner, the rule evaluator and fixpoint, commit-time induction, the value and type model, resolvers and the write instructions were read.
 - He set the spellings: a formula is applied by keyword, `(:text ?x)`, or by a bare operator with `:` as the second operand's label, `(+ ?a : ?b is: ?c)`; equality is `(:value ?a is: ?b)`; `when` and `unless` are siblings in a rule; "application", not "call"; `query` is a rule marked for the report; a head that persists is `assert!`.
-- He asked for the core forms defined in the slim kernel, to see whether it works before the kernel is built.
+- He asked for the core forms defined in the slim set of primitive forms, to see whether it works before the primitive forms are built.
 
 **Learned.**
 
@@ -61,10 +61,10 @@ Not examined yet. They are columns, not recommendations.
 **Decided.**
 
 - The direction, by the maintainer, on an opinion. No problem statement.
-- The kernel and its spellings as in [kernel.md](kernel.md), except the pick wrapper, which is proposed.
+- The primitive forms and its spellings as in [primitive.md](primitive.md), except the pick wrapper, which is proposed.
 - `!` marks what stays, which departs from #728's design as of R25.
 - Forms are fully inlined, with a canonical encoding (bijoux for integers). The #733 tokenization is for storage. A source map keeps, for each reference, its name, the revision and the entity.
-- Not decided: findings 3 to 8 of [kernel.md](kernel.md).
+- Not decided: findings 3 to 8 of [primitive.md](primitive.md).
 
 ## 2026-11-11, Designing: syntax is a rule
 
@@ -77,15 +77,15 @@ Not examined yet. They are columns, not recommendations.
 - A concept definition is one rule: `(todo …)` stands for that read of `xyz.todo`. Shown as that rule it is plain; shown as the syntax that writes the rule it was not.
 - A diagnostic is something a rule derives about a form.
 
-**Decided.** Syntax is a rule with `expand` and `syntax`. A top-level write is kernel. A misspelled command is a warning. Not decided: whether `concept` stays a word of its own, since it only shortens a rule.
+**Decided.** Syntax is a rule with `expand` and `syntax`. A top-level write is primitive. A misspelled command is a warning. Not decided: whether `concept` stays a word of its own, since it only shortens a rule.
 
-## 2026-11-11, Designing: the kernel on Dialog-DB
+## 2026-11-11, Designing: the primitive forms on Dialog-DB
 
 **Asked.** Irakli asked for a proof of concept in dialog itself: concepts, rules and queries defined in the notation and evaluated. He asked that domains be told from other names, since syntax needs them. He corrected a concept the agent wrote with a check in its body: a concept maps facts to itself and back, and a check has no inverse. He then said a concept may read several entities, a backlink being one, and a rule may have several heads of different kinds; what dialog lacks for these it can be given.
 
 **Learned.**
 
-- The kernel compiles to descriptors Dialog-DB already has, and the to-do, the counter, a backlink, a recursive relation and a query of several premises run on a real branch. See [`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`.
+- The primitive forms compile to descriptors Dialog-DB already has, and the to-do, the counter, a backlink, a recursive relation and a query of several premises run on a real branch. See [`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`.
 - A rule and the command it reads can share a document: the rule fires in the transaction that installs it.
 - Dialog-DB has no formula that makes an entity, so a rule cannot issue a command yet.
 - `unless` takes one proposition whose own variables are blank. A formula inside it, a concept spanning entities under it, and a variable repeated inside it are each out of reach.
@@ -93,7 +93,7 @@ Not examined yet. They are columns, not recommendations.
 - A report comes back in relations, not in the words the query used.
 - Two commands in one document share a round. Where both write one `last` field, the cell holds both claims.
 
-**Decided.** Nothing new. The proof of concept is evidence for the kernel table, not a decision about it. Open for the maintainer: whether `report` takes a template; whether a write through a concept may leave fields out; what a read with no pick reads.
+**Decided.** Nothing new. The proof of concept is evidence for the primitive table, not a decision about it. Open for the maintainer: whether `report` takes a template; whether a write through a concept may leave fields out; what a read with no pick reads.
 
 ## 2026-11-11, Designing: what a form is to dialog
 
@@ -229,7 +229,7 @@ Not examined yet. They are columns, not recommendations.
 - 20 applications have a variable for a head, so an operator is a node.
 - 38 have several parts without a label. A map of terms has no place for them, and a rule that puts one such part under `of` and several elsewhere gives `(when A)` and `(when A B)` two shapes, which the pattern `(when ?premise ...)` cannot meet as one.
 
-- Irakli, the same sitting: most of these forms are in Rust already. They are: `Premise`, `Proposition`, `Parameters`, `Term` and the rule descriptors, each written as a map, named by a canonical reference that ignores variable names and the order of premises, and stored under a format number. `kernel.rs` copies them.
+- Irakli, the same sitting: most of these forms are in Rust already. They are: `Premise`, `Proposition`, `Parameters`, `Term` and the rule descriptors, each written as a map, named by a canonical reference that ignores variable names and the order of premises, and stored under a format number. `primitive.rs` copies them.
 
 **Decided.** By the maintainer: a node is a map with a `type`; an application has an operator and an operand of parameters. Not decided: where several parts without a label go. What is to be designed is narrower than it looked: the tree before names are resolved and syntax expanded, and nothing after.
 
@@ -270,7 +270,7 @@ Not examined yet. They are columns, not recommendations.
 
 **Learned.**
 
-- The walker already asks about any form that is not kernel, so a pattern in brackets at the top level expands with no change.
+- The walker already asks about any form that is not primitive, so a pattern in brackets at the top level expands with no change.
 - A struct as a pattern does not: `(expand {note: ?n})` is read as `(expand note: ?n)`, by the reading of a trailing record as labelled parts built earlier the same day. That reading and "a struct is a value like 5" contradict each other.
 
 **Decided.** By the maintainer: `unless` may stand inside `when`; a pattern is any form; the `syntax` of two parts goes and the prelude is rules. Built, with tests. Not decided: the label for a concept's body, and which of the two readings of a trailing struct stays.
@@ -433,7 +433,7 @@ Not examined yet. They are columns, not recommendations.
 **Learned.** Read in the code, not built:
 
 ```
- source text ──parse──▶ tree ──resolve names──▶ definitions ──expand──▶ kernel ──compile──▶ rule facts
+ source text ──parse──▶ tree ──resolve names──▶ definitions ──expand──▶ primitive ──compile──▶ rule facts
               formula          a read (a scan)    by hash        resolver         formula      written by a rule
               pure             moves, so it                      pure                          that answers the
                                records demand                                                  command
@@ -507,14 +507,14 @@ Not examined yet. They are columns, not recommendations.
                    name ──▶ hash
                         │
                         ▼ analyze: a function of the tree, the hashes and what they name
-                   kernel forms, what each name meant, what did not resolve
+                   primitive forms, what each name meant, what did not resolve
 ```
 
 - The parse can name every reference and cannot name a definition. Every symbol is read as a `:reference` (`syntax.rs`). Which of them a form defines is said by the rule about that form: `concept` is a rule of the prelude, and its pattern is what finds the name. So what a source defines is something analysis finds, in order, and gives back; it is not an input to it. Resolving every name written and letting the misses be locals, binders or errors costs a lookup a name and loses nothing.
 - Whether one resolve is enough rests on what a kept rule about syntax holds where its template names something: the name, read where the form is used, or the hash of what the name meant where the rule was written. With hashes an expansion brings no name to resolve. Nothing about syntax is kept yet, so this is open, and it is the same question as whether a macro is hygienic.
 - Either way analysis reads what a hash names, to expand by a rule it was not handed. That is a read by content, which a formula cannot do and a resolver can. So "the analyzer is a resolver" and "a resolver, then a formula" are one program with a boundary shown or not. What showing it buys is analysis over a context that is not a committed root.
 
-**Decided.** By the maintainer: do not complicate it, the analyzer as a resolver is fine. Proposed by the agent, not decided: it resolves names first, as one step, and gives the table back with the kernel forms and the diagnostics, so an editor can ask what a name meant and the boundary can be shown later. Open, and his: what a kept template holds where it names something.
+**Decided.** By the maintainer: do not complicate it, the analyzer as a resolver is fine. Proposed by the agent, not decided: it resolves names first, as one step, and gives the table back with the primitive forms and the diagnostics, so an editor can ask what a name meant and the boundary can be shown later. Open, and his: what a kept template holds where it names something.
 
 ## 2026-11-12, Directing: a macro resolves its names when it is defined
 
@@ -522,7 +522,7 @@ Not examined yet. They are columns, not recommendations.
 
 **Learned.**
 
-- A template that names only domains and kernel words has nothing to resolve. Every rule of the prelude is such a template, so the proof of concept never met the question.
+- A template that names only domains and primitive words has nothing to resolve. Every rule of the prelude is such a template, so the proof of concept never met the question.
 - A concept's entity is made of its attributes and does not hold what its fields are called (`Signature`, `syntax.rs`). So the entity of `todo` alone does not say which attribute `state:` is. A template resolved when defined has to hold the attribute of each labelled part as well, or the labels still read the name where the form is used.
 - A concept that applies its own name in its body can be resolved before its body is: its entity is its attributes. A rule about syntax whose template applies itself, or one defined later in the source, has no entity yet when the template is resolved.
 
@@ -586,7 +586,7 @@ Not examined yet. They are columns, not recommendations.
 
 **Learned.**
 
-- Several heads do not come from that use alone. Writing a concept whose body is several reads is one head a read ([kernel](kernel.md), "one head each"), so expansion makes rules of several heads whether or not anyone writes one. `(all …)` in a head's place has to mean something either way.
+- Several heads do not come from that use alone. Writing a concept whose body is several reads is one head a read ([primitive](primitive.md), "one head each"), so expansion makes rules of several heads whether or not anyone writes one. `(all …)` in a head's place has to mean something either way.
 - A rule of several heads is already one Dialog-DB rule a head, each with the whole body (`compile.rs`). So today it is a way of writing, and not a thing dialog runs.
 - The move of a to-do, run three ways with the same result (`tests/notation.rs`):
 
@@ -598,9 +598,9 @@ Not examined yet. They are columns, not recommendations.
 
 - They differ in one case: a head that needs a variable only one premise binds. With the whole body under every head, nothing is written when that premise has no match. Split by hand, the other head still writes: a to-do on no list is put on one. Nine of ten K1 readers took the first for a trap.
 - Cost, not measured: the body is evaluated once a head where it is written again, and once where a command names it, at a round of the sixteen a commit has.
-- On 2026-11-11 the maintainer decided rules of several heads are to be built in dialog (#776), and that one head was an accident of tonk's notation. Several heads are also the one addition to a stored rule that might respell a rule of one head (#779). A kernel rule of one head would need neither.
+- On 2026-11-11 the maintainer decided rules of several heads are to be built in dialog (#776), and that one head was an accident of tonk's notation. Several heads are also the one addition to a stored rule that might respell a rule of one head (#779). A primitive rule of one head would need neither.
 
-**Decided.** By the maintainer, as a lean: drop `when`. Proposed by the agent, not decided: a kernel rule has one head, `(rule head premise… (unless premise…))`; `(all h1 h2)` in the head's place is one rule a head with the premises again, as it is compiled today; the condition named by a command is a way of writing that needs nothing new. Open, and his: whether a head that cannot be bound holds the others back, which is what decides whether dialog needs a rule of several heads at all.
+**Decided.** By the maintainer, as a lean: drop `when`. Proposed by the agent, not decided: a primitive rule has one head, `(rule head premise… (unless premise…))`; `(all h1 h2)` in the head's place is one rule a head with the premises again, as it is compiled today; the condition named by a command is a way of writing that needs nothing new. Open, and his: whether a head that cannot be bound holds the others back, which is what decides whether dialog needs a rule of several heads at all.
 
 ## 2026-11-12, Directing: several heads as a collection, or not at all
 
@@ -645,7 +645,7 @@ Not examined yet. They are columns, not recommendations.
 
 **Asked.** Irakli: put another agent on the measurement and on how far the cost could be optimized (#788), and meanwhile get the parser, the analyzer and the compiler done.
 
-**Learned.** What is built is one walk: `Expander::submit` reads text, expands by rules about syntax held in memory, and gives kernel rules as the notation as parsed, which `compile` reads. The tree is built beside it and nothing downstream reads it. A reference resolved to an entity has no spelling in the notation as parsed, so what was decided today cannot be built until the phases read the tree.
+**Learned.** What is built is one walk: `Expander::submit` reads text, expands by rules about syntax held in memory, and gives primitive rules as the notation as parsed, which `compile` reads. The tree is built beside it and nothing downstream reads it. A reference resolved to an entity has no spelling in the notation as parsed, so what was decided today cannot be built until the phases read the tree.
 
 **Decided.** By the agent, as the reading of "done" to build to, in [design-pipeline.md](design-pipeline.md): three phases that take and give trees, in four stages, the last a name table the analysis gives back. What is left out of the stages is listed there with what each waits on.
 
@@ -742,9 +742,9 @@ Not examined yet. They are columns, not recommendations.
    p q                                ──▶   each with p q again
 ```
 
-- A kernel rule has one head: `kernel::Rule` holds `head`, not `heads`, and `compile` gives the steps of one rule.
+- A primitive rule has one head: `primitive::Rule` holds `head`, not `heads`, and `compile` gives the steps of one rule.
 - The split a concept of several reads needs moved from the compiler to the analyzer, which is where it belongs: an analyzed tree is now one engine rule, where it was one or several.
-- A report of a read the query named no field of got no step before; now it gets no rule, decided in the analyzer by the same test (`Read::named`), which moved to `kernel.rs`.
+- A report of a read the query named no field of got no step before; now it gets no rule, decided in the analyzer by the same test (`Read::named`), which moved to `primitive.rs`.
 - `(all …)` is still what a template answers for several: the concept rule in the prelude is the one use. Written in a rule it is refused, in the head's place and among the premises.
 - Lost: `(query (all h1 h2) premise…)`. A query of two relations is two queries.
 - Not the same as two heads on one rule: each rule waits only on its own premises. The test of the move shows it: a to-do on no list is still put on one, since the write does not wait on what only the retraction needs. Whoever wants both or neither writes the premises again, or names the condition.
@@ -836,9 +836,9 @@ Not examined yet. They are columns, not recommendations.
 **Learned.** Two things, one built and one found.
 
 - Built: `description:` is out of `concept`. A comment right above a form, with no blank line between, and one that ends its line, say what the form is for. A comment with a blank line under it is about no form. `check` puts what they say on each analyzed rule as its `description:`, which the compiler hands to Dialog-DB.
-- Dialog-DB is given a rule's description and keeps none. The descriptor reads one, the rule built from it gives none back (`DeductiveRule::descriptor`, `InductiveRule::descriptor`), and format 3 of a stored rule writes no description (`dialog-query/src/rule/body.rs`). The [kernel note](kernel.md#describing-things) had this already and the proof of concept had not built it: a description is a fact about the rule's entity. The ledger's hypothesis said "the description Dialog-DB keeps", which was loose.
+- Dialog-DB is given a rule's description and keeps none. The descriptor reads one, the rule built from it gives none back (`DeductiveRule::descriptor`, `InductiveRule::descriptor`), and format 3 of a stored rule writes no description (`dialog-query/src/rule/body.rs`). The [primitive note](primitive.md#describing-things) had this already and the proof of concept had not built it: a description is a fact about the rule's entity. The ledger's hypothesis said "the description Dialog-DB keeps", which was loose.
 - Built: a described rule compiles to the rule and one more assertion, the description as a fact about the rule's entity. `(query (syntax.meta ?rule description: ?text))` finds a rule by what the comment above it says.
-- The kernel note names the relation `dialog.meta/description`. Dialog-DB refuses that from a transaction: `dialog.` is kept for what it writes itself, but for `dialog.rule/` and `dialog.concept/` (`dialog-corpus/src/tree.rs`). So the fact is kept under `syntax.meta`, beside `syntax.name` and `syntax.form`, which the tests already keep names and forms under.
+- The primitive note names the relation `dialog.meta/description`. Dialog-DB refuses that from a transaction: `dialog.` is kept for what it writes itself, but for `dialog.rule/` and `dialog.concept/` (`dialog-corpus/src/tree.rs`). So the fact is kept under `syntax.meta`, beside `syntax.name` and `syntax.form`, which the tests already keep names and forms under.
 - A concept has no entity yet, since a definition is held by the analyzer and not kept on a branch. Its comment is in the mapping and nowhere a query reaches.
 - Where patterns and the composite value stand:
 
@@ -909,7 +909,7 @@ Not examined yet. They are columns, not recommendations.
 **Learned.**
 
 - The question was already answered. The journal of 2026-11-11 has "`( )` is a list, as every lisp calls it, and `[ ]` a tuple". The agent asked it again, with a hypothesis against it, without reading what was written. The hypothesis is withdrawn in the ledger.
-- Built: where a value stands, a `( )` headed by a keyword or an operator is a formula, as it was, and any other is the list of what it holds. `...?run` after its items is the ones after them, as a list. It is read where the kernel reads a term, so the tree has one `( )` node and a pattern over syntax is not changed.
+- Built: where a value stands, a `( )` headed by a keyword or an operator is a formula, as it was, and any other is the list of what it holds. `...?run` after its items is the ones after them, as a list. It is read where the primitive forms read a term, so the tree has one `( )` node and a pattern over syntax is not changed.
 
 ```
  (assert! (xyz.note note:1 tags: ("math" "engines" "looms")))
@@ -1067,11 +1067,11 @@ Not examined yet. They are columns, not recommendations.
 
 ## 2026-11-14, Designing: descriptions stay outside `dialog.`
 
-**Asked.** By voice, whether descriptions are `dialog.meta/description`, as the kernel note said, which Dialog-DB refuses from a transaction. The maintainer: the prefix is reserved "so that others cannot mess up internal indexes the database uses"; updating a description might be fine or even useful, but any other metadata can be associated too, so maybe it does not need to be there. He asked for a recommendation.
+**Asked.** By voice, whether descriptions are `dialog.meta/description`, as the primitive note said, which Dialog-DB refuses from a transaction. The maintainer: the prefix is reserved "so that others cannot mess up internal indexes the database uses"; updating a description might be fine or even useful, but any other metadata can be associated too, so maybe it does not need to be there. He asked for a recommendation.
 
 **Learned.** The agent's recommendation, which he took: keep `dialog.` closed. A description is text a user writes, and letting one relation through is a special case in the writer or a hole in the rule. A description is also not special: it is one thing said about a form beside who wrote it and when, and those belong in one place.
 
-**Decided.** By the maintainer: `dialog.` stays closed, a description is ordinary metadata outside it. By the agent, his to change: the domain is `syntax`, which the kept form is already under (`syntax.form`), so the relation stays `syntax.meta/description` and nothing is renamed. The kernel note no longer says `dialog.meta`.
+**Decided.** By the maintainer: `dialog.` stays closed, a description is ordinary metadata outside it. By the agent, his to change: the domain is `syntax`, which the kept form is already under (`syntax.form`), so the relation stays `syntax.meta/description` and nothing is renamed. The primitive note no longer says `dialog.meta`.
 
 In the same conversation he settled how a pattern is written in a stored rule (`match`; [rule-format](https://github.com/dialog-db/dialog-db/pull/779)), which turned up a question of its own, now in the queue.
 
@@ -1148,7 +1148,7 @@ Found on the way to the second step: this build's `assert` with no `!` is the wo
 
 The maintainer was away and asked for the build to go on without him.
 
-**Asked.** With `!` gone (#728), `assert` is the write that stays. The kernel already had `assert` with no mark: the head that holds one round, which the prelude answers for a command in a head's place. What does that head become?
+**Asked.** With `!` gone (#728), `assert` is the write that stays. The primitive forms already had `assert` with no mark: the head that holds one round, which the prelude answers for a command in a head's place. What does that head become?
 
 **Learned.**
 
@@ -1159,23 +1159,23 @@ The maintainer was away and asked for the build to go on without him.
 
 **Decided.** By the agent, in [design-issue.md](design-issue.md): the held head has no word. A head with no word on a relation under `command.` is issued for the round; on any other it is derived. `assert` and `retract` are the kept writes, and keeping a command is refused. `assert!` and `retract!` are refused with the word to write. It rests on the maintainer's opinion on #728 that no form carries `!`, against his own of 2026-11-11 here; what he wanted then, that a count persists, holds.
 
-Built: `kernel.rs` (`Head::Hold` by the relation), `expand.rs` (three head words, a command at the top level is a rule with that head), `syntax.rs` (`COMMAND`, `is_command`), the prelude's two templates. 94 unit tests, 25 on a branch, 2 doc tests; lint clean. The stored rule's own keys, `assert!` and `retract!` in `dialog-query`, are what a replica holds and did not move.
+Built: `primitive.rs` (`Head::Hold` by the relation), `expand.rs` (three head words, a command at the top level is a rule with that head), `syntax.rs` (`COMMAND`, `is_command`), the prelude's two templates. 94 unit tests, 25 on a branch, 2 doc tests; lint clean. The stored rule's own keys, `assert!` and `retract!` in `dialog-query`, are what a replica holds and did not move.
 
-Not done: a command at the top level with premises, which #728 writes with a `when`. Posted to #728: that the kernel has no word for issuing, so `(do add …)` would be a prelude rule if taken.
+Not done: a command at the top level with premises, which #728 writes with a `when`. Posted to #728: that the primitive forms have no word for issuing, so `(do add …)` would be a prelude rule if taken.
 
 ## 2026-11-16, Building: a concept as lines
 
-**Asked.** What a line is under the walker: a new kernel read, or the read the kernel has.
+**Asked.** What a line is under the walker: a new primitive read, or the read the primitive forms have.
 
 **Learned.**
 
-- The kernel's read is one entity and the fields named, each under a type and a pick. A line says the same of one field, so it needs nothing new below: `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)` is `(xyz.todo ?i title: (:last (:text ?t)))`.
+- The primitive read is one entity and the fields named, each under a type and a pick. A line says the same of one field, so it needs nothing new below: `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)` is `(xyz.todo ?i title: (:last (:text ?t)))`.
 - A name cannot be taken apart by a pattern, so the split of `xyz.todo/title` into its domain and its field is in the walker, not in a rule of the prelude.
 - A concept was already checked for a variable its head does not hold, since the first build (`cc2448b`, 2026-11-11), which the alignment table had as "not checked". The check asked whether the body is reads, which lines were not, so lines went past it until a concept of lines was kept as its reads.
 - Kept as a read a line, a query through a concept would report a row an attribute. Joined where one entity is read under one domain, a concept of lines reports what the same concept written as a read does.
 - The reader already refuses two parts with no label beside labelled ones, so a line with two entities never reaches the walker.
 
-**Decided.** By the agent, on #728's design: a line is surface, written by the walker as the kernel read. `:one` is `last` and `:many` is `all`. A variant is read as `:entity` and not checked. `in:` and a sized number are refused. The spelling with wrappers stays, as what the kernel is written in.
+**Decided.** By the agent, on #728's design: a line is surface, written by the walker as the primitive read. `:one` is `last` and `:many` is `all`. A variant is read as `:entity` and not checked. `in:` and a sized number are refused. The spelling with wrappers stays, as what the primitive forms are written in.
 
 Built: `line` and `lines` in `expand.rs`; the to-do example is in lines. 98 unit tests, 26 on a branch, 2 doc tests; lint clean.
 
@@ -1205,7 +1205,7 @@ Not looked at: what a write under `:one` retires. It is what the engine does for
 
 **Decided.** Not decided: where a fold lives, which is his. By the agent, in the build: the surface is the design's, and the refusal is the engine's, said as unsupported. A getter is read and expanded to a relation of its own, `getter.<name>.<concept>`; one that folds nothing runs; one that folds is refused with where the engine admits a fold. `is:` written is what makes the words a getter.
 
-Built: `Term::Fold` and `FOLDS` in `kernel.rs`; the refusal in `compile.rs`; `(:getter …)` and `(:said …)` in `expand.rs`; the getter's rule in the prelude. 101 unit tests, 27 on a branch, 2 doc tests; lint clean.
+Built: `Term::Fold` and `FOLDS` in `primitive.rs`; the refusal in `compile.rs`; `(:getter …)` and `(:said …)` in `expand.rs`; the getter's rule in the prelude. 101 unit tests, 27 on a branch, 2 doc tests; lint clean.
 
 ## 2026-11-18, Designing: the design moved, and a label as a keyword
 
@@ -1223,9 +1223,9 @@ On labels: paired by place, a keyword label cannot be told from a keyword value 
 
 **Learned.**
 
-- The entity derived from content and the one-tick lifetime were there, as `:id` and `Head::Hold`. What moved is what tells a command apart. The kernel now reads a layer off a field as it reads a type and a pick: a line `in: :control` is the field `(:control …)`. `assert` of a read whose every field is on the control layer is `Head::Hold`; the same read with no word is `Head::Derive`. The domain's name says nothing.
-- A command's head names no entity, so its expansion holds a variable of its own there. Where no premise binds it, in a write and in a deduction alike, the kernel puts `(:id domain label: term …)` over the fields in its place. Identical commands in a tick are one, as before.
-- A name with a `/` reads as an attribute. A declared concept's name wins, so `todo/add` is the command where it is declared and an attribute anywhere else. A misspelled command is therefore no command: it is refused as an attribute with no entity, and the refusal says no concept is declared under the name. Finding 9 of [kernel.md](kernel.md), a misspelling as a warning, is overtaken by commands being declared.
+- The entity derived from content and the one-tick lifetime were there, as `:id` and `Head::Hold`. What moved is what tells a command apart. The primitive forms now read a layer off a field as it reads a type and a pick: a line `in: :control` is the field `(:control …)`. `assert` of a read whose every field is on the control layer is `Head::Hold`; the same read with no word is `Head::Derive`. The domain's name says nothing.
+- A command's head names no entity, so its expansion holds a variable of its own there. Where no premise binds it, in a write and in a deduction alike, the primitive forms put `(:id domain label: term …)` over the fields in its place. Identical commands in a tick are one, as before.
+- A name with a `/` reads as an attribute. A declared concept's name wins, so `todo/add` is the command where it is declared and an attribute anywhere else. A misspelled command is therefore no command: it is refused as an attribute with no entity, and the refusal says no concept is declared under the name. Finding 9 of [primitive.md](primitive.md), a misspelling as a warning, is overtaken by commands being declared.
 - A query of a command expands its head and its premise at two sites, which name the entity two ways. The report takes the entity the premise read.
 - A document is still expanded top to bottom: a command used above its declaration in the same document is read as an attribute and refused (`it_finds_a_rule_by_what_the_comment_above_it_says` moved its declaration up). The design says the order of a document's forms does not matter.
 - `(id ?t list: ?l text: ?x)` as a premise is not built, so the examples carry the to-do's entity in a `todo:` field of the command.
@@ -1241,7 +1241,7 @@ Not decided by the design, and refused as unsupported, each pinned by a test:
 
 **Decided.** By the agent, each an opinion in [claims.md](claims.md): a declared command that no rule reads is issued with the warning the old form had. A call alone at the top level is refused, a command's included. A command's lines are in one domain, since this build derives its entity from one domain's claims; more than one is unsupported, which is a limit of the build and not a question of the design. A layer other than `:control` stays unsupported.
 
-Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived entity), `expand.rs` (`in: :control`, the command checked where it is declared, a declared name before an attribute, the top level), `compile.rs` (the reported entity), the prelude's concept with no primary and its warning, the examples and every test. 105 unit tests, 27 on a branch, 2 doc tests; lint clean.
+Built: `primitive.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived entity), `expand.rs` (`in: :control`, the command checked where it is declared, a declared name before an attribute, the top level), `compile.rs` (the reported entity), the prelude's concept with no primary and its warning, the examples and every test. 105 unit tests, 27 on a branch, 2 doc tests; lint clean.
 
 ## 2026-11-18, Building: an attribute's two terms unlabeled
 
@@ -1262,13 +1262,13 @@ Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived ent
 
 - The design names the relation by the concept's hash and the name. The expander has no hash of a concept: a concept is a rule about syntax, named by its signature, and its identity as a set of attributes exists only in the compiler. So the relation is named by the concept's name: `concept.list.count-open`. Unlabeled, its value is under `is:`; with labels, `(list/count ?l status: ?s count: (count ?t))`, it is the fields the labels name.
 - A name with a `/` now resolves three ways, in order: a concept declared under it (`todo/add`), an attribute in the domain of a concept declared under what is before the `/` (`list/count-open`), an attribute (`xyz.todo/title`). A misspelled command under a declared concept's name is read as a derived attribute and refused for having no entity, which the refusal says.
-- Writes of the concept's domain are refused in the kernel, by the domain's prefix, so a kernel rule written by hand is refused too.
+- Writes of the concept's domain are refused in the primitive forms, by the domain's prefix, so a primitive rule written by hand is refused too.
 - A fold in such a head is the engine's refusal, as it was for the getter. One that folds nothing runs on a branch.
 - `:getter` and `:said` had nothing else to serve, and went with the getter's rule.
 
 **Decided.** By the agent: retracting a derived attribute is refused as asserting one is; the design names only the assert. The relation's name, from the concept's name. Both opinions in [claims.md](claims.md). Not looked at: a concept's name declared twice under other signatures, which the design lists as open.
 
-Built: `derived` and the resolution order in `expand.rs`, `DERIVED` and `is_derived` in `syntax.rs`, the write refused in `kernel.rs`; the getter's rule out of the prelude. 107 unit tests, 28 on a branch, 2 doc tests; lint clean.
+Built: `derived` and the resolution order in `expand.rs`, `DERIVED` and `is_derived` in `syntax.rs`, the write refused in `primitive.rs`; the getter's rule out of the prelude. 107 unit tests, 28 on a branch, 2 doc tests; lint clean.
 
 ## 2026-11-18, Designing: a struct's keys are keywords
 
@@ -1288,7 +1288,7 @@ Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every t
 
 - What declares a name is a `concept`, or a `rule` whose head is `syntax` or `warning`. Each is known by its first word before it is expanded, so the walker expands those first, in the order written, and the rest after them.
 - A macro's expansion may also declare: `(note-kind memo)` expands to a concept. That is known only once it is expanded, so what failed before it is expanded again whenever a pass declared something, until a pass declares nothing. A name two such expansions need of each other is not a cycle the walker can break: it is refused with whatever the first one met, an unknown form or an attribute with no entity. Built and pinned, `it_expands_again_what_a_later_expansion_declares_a_name_for`; the mutual case is not pinned, since no core form makes one.
-- A document's kernel rules come back in the order of the trees they came of, whatever order they were expanded in, and so do its refusals.
+- A document's primitive rules come back in the order of the trees they came of, whatever order they were expanded in, and so do its refusals.
 - A concept installed by one document is known to the next one on the same branch, since the walker keeps it (`it_runs_a_document_whose_uses_stand_above_its_declarations`). Nothing stores it on the branch: a new walker over the same branch does not know it ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`, syntax is not stored).
 
 **Decided.** Nothing new. 110 unit tests, 29 on a branch, 2 doc tests; lint clean.
@@ -1313,7 +1313,7 @@ Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every t
 **Learned.**
 
 - Dialog keeps a collection as the attributes of one domain whose name is the key: `xyz.tonk.notebook/N1`. A descriptor reads every entry as `{the: {domain, keyed: sequence | dictionary}}` (`The::Collection` in `rust/dialog-query/src/attribute/descriptor.rs`), and a query binds an entry under its field as `{the: key, is: value}`. A rule's head writes an entry under the key its body binds to `<field>/key`. Both kinds run from a rule, read and written.
-- The kernel had nowhere to keep a key, since a field is one attribute. A line over a collection is now the field `entry:` of its domain, its value `(:entry value key: ?p by: :position)`, and the kernel reads the key and what it is off that wrapper as it reads a type. The name `entry` is the build's, internal to the kernel read.
+- The primitive forms had nowhere to keep a key, since a field is one attribute. A line over a collection is now the field `entry:` of its domain, its value `(:entry value key: ?p by: :position)`, and the primitive forms read the key and what it is off that wrapper as it reads a type. The name `entry` is the build's, internal to the primitive read.
 - A key a position is spelled uppercase, `N1`, and a relation written as text takes no uppercase name (`Relation::validate`). So a ground write of one entry is resolved under a name of its own and given the entry's attribute after, through `The::entry`, which also refuses a key of the wrong shape. For the same reason an entry cannot be read by its attribute written out, `(xyz.tonk.notebook/N2 notebook:1 ?x)`: Dialog-DB refuses the name. Through the concept, `(notebook-entry notebook:1 at: "N2" block: ?x)`, it reads.
 - A row says an entry under its key, as the attribute it is: `(xyz.tonk.notebook notebook:1 N1: block:a)`.
 - Two entries of one sequence, their keys compared with `<`, run in one rule: text keys compare in the order the index sorts them (`constraint/compare.rs`).
@@ -1339,7 +1339,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Learned.**
 
-- A write at the top level with premises after it was a rule with that head, installed. The design has no such form: a top-level write is ground or has a `when`. So premises with no `when` are refused now, naming both forms to write, and a `when` makes a kernel rule that says `once: true`.
+- A write at the top level with premises after it was a rule with that head, installed. The design has no such form: a top-level write is ground or has a `when`. So premises with no `when` are refused now, naming both forms to write, and a `when` makes a primitive rule that says `once: true`.
 - Dialog-DB has no way to run a rule once without installing it. So a write that runs once compiles to a query and a template: a query whose row is every variable the write holds, and the write, which each match fills and makes. The notebook runs the query over the branch as it stood before the transaction and adds each write to it (`Step::Write`).
 - What it reads is therefore the branch before the document, not "the facts as they stood when the tick began, plus whatever is asserted or deduced in it": a `when` does not see what its own document asserts, nor the rules it installs. Not built: reading the transaction as it is being made.
 - Under `:one`, the write succeeds the claim the cell holds, which is what main does for any `last` write (`Attribution::pick`): after it, every claim of the to-do's state is `:done` alone. It does not use the claim the `when` read: the succession is the cell's, whatever was read. Under `:many` a write adds.
@@ -1425,11 +1425,11 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 ## 2026-11-18, Building: a view, to a description
 
-**Asked.** Step N: `(view concept :name template condition…)`, events inline as `:on/<type>`, as the design proposes and the sketch writes. Read it, expand it to a kernel form that is a plain description, check it, and give the description to another back end as data. Dialog-DB refuses it, pointing at #830. No renderer.
+**Asked.** Step N: `(view concept :name template condition…)`, events inline as `:on/<type>`, as the design proposes and the sketch writes. Read it, expand it to a primitive form that is a plain description, check it, and give the description to another back end as data. Dialog-DB refuses it, pointing at #830. No renderer.
 
 **Learned.**
 
-- The kernel form is `(view premise… concept: todo name: :row entity: ?t template: […])`: the conditions expanded as a rule's premises are, and the rest beside them unchanged. `View::describe` reads it into `View`, `Node`, `Element`, `Attribute`, `Event`, `Input` and `Nested`, exported from the crate. Nothing in it is a Dialog-DB rule.
+- The primitive form is `(view premise… concept: todo name: :row entity: ?t template: […])`: the conditions expanded as a rule's premises are, and the rest beside them unchanged. `View::describe` reads it into `View`, `Node`, `Element`, `Attribute`, `Event`, `Input` and `Nested`, exported from the crate. Nothing in it is a Dialog-DB rule.
 - What the walker checks, as the design says: the conditions apply the view's concept once, and that application's entity is the one rendered; every variable of the template, events included, is one a condition binds; every event posts a declared command with every field of it and no other; every nested view names a view of the document or of one before it.
 - Unsupported, as the design leaves them open: a valueless attribute, `:hidden true` (the design has no boolean term); an attribute built of several parts, `:href ["/notebook/" ?n]`; a nested view by anything but its name and entity, `:model`, `:with`; a nested view of no entity.
 - The design's own example nests a view as the map right after the tag, `[:ul {view: :row of: ?t}]`, where Hiccup puts an element's attributes. The description reads a map there as attributes unless it has a `:view` key, so an element has no attribute named `view`.
@@ -1459,7 +1459,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 - A retract by the entity alone names no field, so every field of the expansion is a variable of its own. The compiler reads the fields on the entity and retracts what it read: the head's read is added to the premises. At the top level the read is a `when`, run once (step I). Under `:one` it reads the newest claim and retracts that one.
 - The design says nothing of a retract through a concept that names some fields and not others. It stays refused, as a write that leaves fields out.
 - A retract of an entry with its key and value written compiles to what an assert of it does, with `retract!`: a ground one to a statement under the entry's attribute, one in a rule to an inductive rule whose head binds the entry's key. On a branch the entry goes and its neighbours stay, and the notebook's placement rule takes every other entry of its block out.
-- A retract of a collection that leaves out the key or the value is unsupported, not decided. The refusal moved from the kernel, which cannot tell a field left out from one a premise binds, to the compiler, which can.
+- A retract of a collection that leaves out the key or the value is unsupported, not decided. The refusal moved from the primitive forms, which cannot tell a field left out from one a premise binds, to the compiler, which can.
 
 **Decided.** The managing agent's reading of (2), built. The bar moves from 43 compiled to 47, of 56: the notebook's three retracts of an entry and its retract of a block by its entity compile. 119 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
@@ -1493,7 +1493,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Asked.** Step T: count a view that reaches `View::describe` as described, though Dialog-DB's compiler refuses it, and pin four numbers.
 
-**Learned.** A view is described during expansion, so a view that expands is one that describes, and the count is the views among the kernel trees that `View::describe` reads. Before step S one view was described, `notebook/block :directory`; after it all five.
+**Learned.** A view is described during expansion, so a view that expands is one that describes, and the count is the views among the primitive trees that `View::describe` reads. Before step S one view was described, `notebook/block :directory`; after it all five.
 
 **Decided.** Nothing. The bar, read / expanded / compiled / described: the notebook alone 56 / 52 / 47 / 5, of 56; with core 60 / 59 / 54 / 5, of 60. 120 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
@@ -1517,7 +1517,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Asked.** Step W, additive to what `Checked` gives a back end: each line's label and attribute descriptor, the form each declaration and step came of, and a way to check a document form by form, so that one refused form does not empty the rest. The tonk test reimplemented the loop and copied `described` to get this.
 
-**Learned.** A line's descriptor is what `attribute` in `compile.rs` writes for the kernel field the line reads as, which is the descriptor a concept's read holds under that field's label. A line's label is the head's label whose variable is the line's value; a key's is the head's label whose variable is the key. The expander already keeps every form it can expand when another is refused, and says the way to the refused one; only `Analyzer::analyze` and `check` threw that away. Dialog-DB's `AttributeDescriptor` has no setter for a description, so a line's descriptor carries none; that is dialog-query's to add.
+**Learned.** A line's descriptor is what `attribute` in `compile.rs` writes for the primitive field the line reads as, which is the descriptor a concept's read holds under that field's label. A line's label is the head's label whose variable is the line's value; a key's is the head's label whose variable is the key. The expander already keeps every form it can expand when another is refused, and says the way to the refused one; only `Analyzer::analyze` and `check` threw that away. Dialog-DB's `AttributeDescriptor` has no setter for a description, so a line's descriptor carries none; that is dialog-query's to add.
 
 **Decided.** Built, all additive. `Line::label`, `Line::descriptor` and `Key::label`; `Checked::declaration_forms` and `Checked::step_forms`, parallel to `declarations` and `steps`, so `Declaration` keeps its shape; `check_forms` beside `check`, with `Analyzer::analyze_forms` under it. Through `check_forms` every step and analyzed tree carries its description, so a back end has no need of `described`. `check` is as it was, and fills the two new vectors too. The bar is unchanged: 56 / 53 / 48 / 5 and 60 / 60 / 55 / 5.
 
@@ -1644,7 +1644,7 @@ His second question is #712, his own: a collection premise is a positive join, s
 
 **Asked.** Why the build still writes `(:entry (:all …))`, when the design's full spelling was agreed. Then, by the maintainer: the line should be canonical, the expansion is confusing and misleading, and a `claim` form he had considered.
 
-**Learned.** The form he met is the kernel's read, which nobody writes: no sketch, example or prelude rule holds one. The agent had shown it as if it were notation, and the reader does take it from a document. It contradicts the design in one place the agent had not seen: it writes picks, which `cardinality:` replaced. The pick-wraps-a-term form was the agent's proposal in kernel.md, never the maintainer's decision. What it is, plainly, is the engine's descriptor shown as syntax.
+**Learned.** The form he met is the primitive read, which nobody writes: no sketch, example or prelude rule holds one. The agent had shown it as if it were notation, and the reader does take it from a document. It contradicts the design in one place the agent had not seen: it writes picks, which `cardinality:` replaced. The pick-wraps-a-term form was the agent's proposal in primitive.md, never the maintainer's decision. What it is, plainly, is the engine's descriptor shown as syntax.
 
 **Decided.** Not decided. [design-canonical-read.md](design-canonical-read.md) sets the three side by side. The agent's hypothesis is the line, with the descriptor as compile output; `claim` is the simpler form and has met no reader.
 
@@ -2004,7 +2004,7 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 ## 2026-11-25, Decided: a name of words joined by `/` is never a stored attribute
 
-**Found.** The second independent check at `ff19a1fed`: with no concept `foo`, `(foo/x ?x ?n)` was read as `(foo ?x x: ?n)`, a relation named by the bare word `foo`. A head on it said "?x applies no relation", a premise "(foo ?x x: ?n) is not a kernel premise", and under a word of the notation, `select/x`, `rule/x`, `unless/x`, the rewrite was that form, `(rule ?x x: ?n)`. The two-term line sugar asked the reader's `Kind::of`, which calls any name with a `/` an attribute, and not `syntax::named`, which tells a dotted attribute from a concept's name.
+**Found.** The second independent check at `ff19a1fed`: with no concept `foo`, `(foo/x ?x ?n)` was read as `(foo ?x x: ?n)`, a relation named by the bare word `foo`. A head on it said "?x applies no relation", a premise "(foo ?x x: ?n) is not a primitive premise", and under a word of the notation, `select/x`, `rule/x`, `unless/x`, the rewrite was that form, `(rule ?x x: ?n)`. The two-term line sugar asked the reader's `Kind::of`, which calls any name with a `/` an attribute, and not `syntax::named`, which tells a dotted attribute from a concept's name.
 
 **Decided.** By the coordinator, (a) of two: the sugar is a stored attribute's only, its domain dotted. An undotted `word/field` under no concept of its name, nor one of its first part, is refused naming what is missing, in a head, a premise, `unless` and a select alike. A consequence: a read above the macro use that declares its concept was refused, saying to declare the concept above, because its first try read the stored relation; now its first try reads nothing, and it is expanded again once the use declares the concept, as a read above a `(concept …)` already was. Both orders answer the same. Still refused: a derived attribute of a declared concept read before a macro's use declares a concept of that name.
 
@@ -2014,7 +2014,7 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Why.** Three reasons, each run: the labelled form's own example cannot compile, since a fold in a rule that derives is refused by Dialog-DB and a fold in one that writes by the notation; no fixture and no tonk form uses a label; and the form took what says nothing, a head that writes `is:` beside another label and a read of a label no rule concludes, which answered nothing.
 
-**What brings it back.** Folds admitted in rules that derive, so that a derivation of several fields at once, a count beside the status it counts, says something a domain and a concept cannot. Reversing this is one step: let `derived` in `src/expand.rs` and `read` in `src/kernel.rs` take the labels again (the check is `syntax::one_value`), and turn `it_refuses_a_derived_attribute_with_a_label_other_than_is` back into a test of what they answer.
+**What brings it back.** Folds admitted in rules that derive, so that a derivation of several fields at once, a count beside the status it counts, says something a domain and a concept cannot. Reversing this is one step: let `derived` in `src/expand.rs` and `read` in `src/primitive.rs` take the labels again (the check is `syntax::one_value`), and turn `it_refuses_a_derived_attribute_with_a_label_other_than_is` back into a test of what they answer.
 
 ## 2026-11-25, Decided: the marker is distinct
 
@@ -2036,9 +2036,9 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Asked.** The maintainer, of gaps row 56, why the wrappers are back, `(:integer ?n)` and `(:one …)` written where nothing else says a type or a cardinality.
 
-**Decided.** By the maintainer: "I think we should remove it and potentially add formula per type or something like that. More forms add things to keep in mind/context." A document writes no wrapper. A type, a pick, a cardinality, a listed type's cases or a layer written in a document, anywhere it stands, is refused as `Error::Refused`, naming the line to write in its place. The walker still writes them for a line and the kernel still reads them; a kernel tree built through the Rust API is no document and compiles with them.
+**Decided.** By the maintainer: "I think we should remove it and potentially add formula per type or something like that. More forms add things to keep in mind/context." A document writes no wrapper. A type, a pick, a cardinality, a listed type's cases or a layer written in a document, anywhere it stands, is refused as `Error::Refused`, naming the line to write in its place. The walker still writes them for a line and the primitive forms still read them; a primitive tree built through the Rust API is no document and compiles with them.
 
-**Built.** Every position row 56 listed has a line spelling: four already worked, and two were added, `as:` a map of a label to its type on a derived attribute's labelled fields, `as: {:status :text}`, and an elector on a derived attribute's value, `is: (max ?n)`, as on a line. A sixth position turned up while building, a listed type on a derived attribute, which the kernel's `(:among …)` said and nothing else did: `as: [:open :done]` on a derived attribute, as on a line, is added too. What a document gives up is one form for a write of several fields of one domain under `:one`: it is a line a form, or a concept.
+**Built.** Every position row 56 listed has a line spelling: four already worked, and two were added, `as:` a map of a label to its type on a derived attribute's labelled fields, `as: {:status :text}`, and an elector on a derived attribute's value, `is: (max ?n)`, as on a line. A sixth position turned up while building, a listed type on a derived attribute, which the primitive forms' `(:among …)` said and nothing else did: `as: [:open :done]` on a derived attribute, as on a line, is added too. What a document gives up is one form for a write of several fields of one domain under `:one`: it is a line a form, or a concept.
 
 **Open.** "A formula per type" is asked of the maintainer and not built.
 

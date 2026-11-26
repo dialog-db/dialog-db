@@ -1,6 +1,6 @@
-//! Expansion: rewriting a tree until every part of it is kernel.
+//! Expansion: rewriting a tree until every part of it is primitive.
 //!
-//! The kernel is small: `rule`, whose first part is its head and whose
+//! The primitive forms are small: `rule`, whose first part is its head and whose
 //! other parts are its premises, `(unless …)` among them for what must
 //! not hold; the application of a relation and of a formula; `assert`,
 //! `retract` and `report` as a rule's head. A head with no word is
@@ -37,18 +37,18 @@ use dialog_corpus::Value;
 use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
-use crate::kernel::QUOTE;
-use crate::kernel::{
-    AMONG, CARDINALITIES, CONTROL, ELECTORS, Head, Keyed, LAYERS, PICKS, RETIRED, Rule, TYPES,
-};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
+use crate::primitive::QUOTE;
+use crate::primitive::{
+    AMONG, CARDINALITIES, CONTROL, ELECTORS, Head, Keyed, LAYERS, PICKS, RETIRED, Rule, TYPES,
+};
 use crate::syntax::{self, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 mod query;
 
-/// The core forms, written in the kernel.
+/// The core forms, written in the primitive forms.
 pub const PRELUDE: &str = include_str!("prelude.clj");
 
 /// Where a form stands when it is expanded.
@@ -98,14 +98,14 @@ struct Choice {
 /// The formula that makes a position between two others.
 const POSITION: &str = "dialog/position";
 
-/// What a kernel rule says of itself when it is a write at the top level
+/// What a primitive rule says of itself when it is a write at the top level
 /// with a `when`: it runs once and is not installed.
 pub const ONCE: &str = "once";
 
 /// The words that make a rule's head a write or an answer.
 const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
 
-/// How many times one form may be rewritten on its way to the kernel,
+/// How many times one form may be rewritten on its way to the primitive forms,
 /// counted along the path from the top-level form. The prelude and every
 /// test of the crate rewrite a form at most twice; one rewritten 32
 /// times is one whose expansion does not end. It is below what a form
@@ -532,7 +532,7 @@ pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
 }
 
 /// The read a line is. A line is one attribute, by its full name, and
-/// is what a document writes; the read below it is the kernel's, which
+/// is what a document writes; the read below it is primitive, which
 /// the walker writes for it and no document writes:
 ///
 /// ```clj
@@ -754,7 +754,7 @@ fn derived(
         }
     };
     // `as:` is the type of the value under `is:`, as on a line: the
-    // kernel's read wraps the value in it. A derived attribute's
+    // primitive read wraps the value in it. A derived attribute's
     // cardinality is what its rules conclude, and no read or head says it.
     let mut terms = terms;
     if terms.contains_key("cardinality") {
@@ -766,7 +766,7 @@ fn derived(
     // `as:` a type, or a listed type's cases, is the type of the value
     // under `is:`; a map, of each field it names, `as: {:status :text}`.
     let types = || {
-        crate::kernel::TYPES
+        crate::primitive::TYPES
             .iter()
             .map(|word| format!(":{word}"))
             .collect::<Vec<_>>()
@@ -780,7 +780,7 @@ fn derived(
             return Ok(kind.clone());
         }
         kind.keyword()
-            .filter(|word| crate::kernel::TYPES.contains(word))
+            .filter(|word| crate::primitive::TYPES.contains(word))
             .map(|_| kind.clone())
             .ok_or_else(|| {
                 Error::Refused(format!(
@@ -1025,7 +1025,7 @@ fn blanked(rule: Syntax) -> Syntax {
     clauses.into_rule()
 }
 
-/// Whether `tree` is a value wrapped as the kernel reads it: in a type,
+/// Whether `tree` is a value wrapped as the primitive forms read it: in a type,
 /// a pick, a cardinality or a layer, `(:integer ?n)`, or in a listed
 /// type's cases, `(:among ?s cases: [:open :done])`.
 fn wrapper(tree: &Syntax) -> bool {
@@ -1154,7 +1154,7 @@ fn on_control(tree: &Syntax) -> bool {
         })
 }
 
-/// The parts of a kernel rule.
+/// The parts of a primitive rule.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clauses {
     /// What the rule says about itself: its labelled parts.
@@ -1495,9 +1495,9 @@ pub struct Expander {
     sites: BTreeMap<String, usize>,
     /// Which of them is being expanded.
     tree: usize,
-    /// For each kernel rule of the last document, which tree it came of.
+    /// For each primitive rule of the last document, which tree it came of.
     origin: Vec<usize>,
-    /// Each tree of the last document a kernel rule of which is the same
+    /// Each tree of the last document a primitive rule of which is the same
     /// as one an earlier tree came to, with that tree: the rule is kept
     /// once, at the earlier tree.
     repeats: Vec<(usize, usize)>,
@@ -1621,7 +1621,7 @@ impl Expander {
     }
 
     /// Parse `text` and expand every tree of it. A rule about syntax is
-    /// kept here; every other comes back as kernel rules, in the order
+    /// kept here; every other comes back as primitive rules, in the order
     /// written, with what the rules said about the document. A tree
     /// whose head stands for several comes back as a rule each.
     pub fn submit(&mut self, text: &str) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
@@ -1631,13 +1631,13 @@ impl Expander {
     /// Expand every tree of `trees`, as [`submit`](Self::submit) does
     /// the trees a text parses to. The first refusal is the error.
     pub fn expand(&mut self, trees: Vec<Syntax>) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
-        let (kernel, diagnostics) = self.check(trees);
+        let (primitive, diagnostics) = self.check(trees);
         match diagnostics
             .iter()
             .find_map(|diagnostic| diagnostic.refusal.clone())
         {
             Some(error) => Err(error),
-            None => Ok((kernel, diagnostics)),
+            None => Ok((primitive, diagnostics)),
         }
     }
 
@@ -1783,10 +1783,10 @@ impl Expander {
         // A rule, a concept or a query written again installs nothing
         // new, and is kept once. A write written again writes again: a
         // document is a sequence, so each is kept in its place.
-        let mut kernel = Vec::new();
+        let mut primitives = Vec::new();
         for (at, rules) in done {
             for rule in rules {
-                match kernel.iter().position(|kept| *kept == rule) {
+                match primitives.iter().position(|kept| *kept == rule) {
                     Some(first) if !writes(&rule) => {
                         let earlier = self.origin[first];
                         if earlier != at && !self.repeats.contains(&(at, earlier)) {
@@ -1794,19 +1794,19 @@ impl Expander {
                         }
                     }
                     _ => {
-                        kernel.push(rule);
+                        primitives.push(rule);
                         self.origin.push(at);
                     }
                 }
             }
         }
-        let reads = self.conclusions(&kernel);
+        let reads = self.conclusions(&primitives);
         let forgotten: BTreeSet<usize> = refused.keys().copied().collect();
         self.forget_uses(&forgotten);
         let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
         diagnostics.extend(self.unconcluded(reads, &trees));
-        (kernel, diagnostics)
+        (primitives, diagnostics)
     }
 
     /// Forget the derived uses the forms `refused` of the document being
@@ -1823,10 +1823,10 @@ impl Expander {
         });
     }
 
-    /// Record what each rule of `kernel` concludes of a derived
+    /// Record what each rule of `primitive` concludes of a derived
     /// attribute, and give each read of one its premises make: the form
     /// it came of, the derived attribute, and the labels it reads.
-    fn conclusions(&mut self, kernel: &[Syntax]) -> Vec<(usize, String, BTreeSet<String>)> {
+    fn conclusions(&mut self, primitive: &[Syntax]) -> Vec<(usize, String, BTreeSet<String>)> {
         let derived = |tree: &Syntax| -> Option<(String, BTreeSet<String>)> {
             let name = tree.applies()?.strip_prefix(syntax::DERIVED_READ)?;
             let labels = tree
@@ -1836,7 +1836,7 @@ impl Expander {
             Some((name.to_string(), labels))
         };
         let mut reads = Vec::new();
-        for (rule, at) in kernel.iter().zip(&self.origin) {
+        for (rule, at) in primitive.iter().zip(&self.origin) {
             let Some(operand) = rule.operand() else {
                 continue;
             };
@@ -1999,7 +1999,7 @@ impl Expander {
         Ok(())
     }
 
-    /// The first value `tree` writes wrapped as the kernel reads it, in a
+    /// The first value `tree` writes wrapped as the primitive forms read it, in a
     /// type, a pick, a cardinality or a layer, `(:one (:integer 3))`, and
     /// what to write in its place. The walker writes these for a line,
     /// and a document writes none: the read it stands in, and why.
@@ -2008,7 +2008,7 @@ impl Expander {
             Syntax::Application(operator, operand) => {
                 if wrapper(tree) {
                     let message = format!(
-                        "{tree} is a value as the kernel reads it, and a document writes no \
+                        "{tree} is a value as the primitive forms read it, and a document writes no \
                          wrapper: say its type, cardinality and layer on a line, `as:`, \
                          `cardinality:` and `in:`, and an elector on its value, `is: (max ?x)`"
                     );
@@ -2097,7 +2097,7 @@ impl Expander {
             peeled.value()
         )
     }
-    fn each(&mut self, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
+    fn each(&mut self, tree: &Syntax, primitive: &mut Vec<Syntax>) -> Result<(), Error> {
         // Where several definitions take a form that is read, the rule
         // is expanded once a definition: what is read is what any of
         // them reads. Within one rule a form that recurs is the same
@@ -2116,7 +2116,7 @@ impl Expander {
             return self.about(&part, |_| Err(error));
         }
         if let Some(rules) = self.query_forms(tree)? {
-            kernel.extend(rules);
+            primitive.extend(rules);
             return Ok(());
         }
         let mut choices = Vec::new();
@@ -2126,9 +2126,9 @@ impl Expander {
             choices = std::mem::take(&mut self.choices);
             for rule in rules {
                 if let Some(rule) = self.install(rule)?
-                    && !kernel.contains(&rule)
+                    && !primitive.contains(&rule)
                 {
-                    kernel.push(rule);
+                    primitive.push(rule);
                 }
             }
             while let Some(last) = choices.last_mut() {
@@ -2159,7 +2159,7 @@ impl Expander {
         done
     }
 
-    /// For each kernel rule the last document expanded to, which of its
+    /// For each primitive rule the last document expanded to, which of its
     /// trees the rule came of.
     pub fn origin(&self) -> &[usize] {
         &self.origin
@@ -3100,7 +3100,7 @@ impl Expander {
     }
 
     /// `(id ?t list: ?l text: ?x)` and `(fresh ?n)`, the formulas a new
-    /// thing is made by, as the kernel premise they are, or `None` for
+    /// thing is made by, as the primitive premise they are, or `None` for
     /// any other premise.
     ///
     /// `id` binds `?t` to the entity `(:id domain list: ?l text: ?x)`
@@ -3172,9 +3172,9 @@ impl Expander {
         )))
     }
 
-    /// A top-level tree, rewritten until it is kernel rules. A write at
+    /// A top-level tree, rewritten until it is primitive rules. A write at
     /// the top level is a rule with that head and whatever clauses
-    /// follow it. A kernel rule has one head, so a head that stands for
+    /// follow it. A primitive rule has one head, so a head that stands for
     /// several, as a concept of several reads does, is a rule each, with
     /// the premises again.
     fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
@@ -3342,7 +3342,7 @@ impl Expander {
     }
 }
 
-/// Whether `rule`, a kernel tree, writes where it stands: a write at the
+/// Whether `rule`, a primitive tree, writes where it stands: a write at the
 /// top level, with no premise, or with a `when` and run once.
 fn writes(rule: &Syntax) -> bool {
     let Some(operand) = rule.operand() else {
@@ -3375,10 +3375,10 @@ mod tests {
           (todo/add todo: ?t list: ?l text: ?x))
     "#;
 
-    /// The kernel trees `text` expands to after `setup`: a tree the
+    /// The primitive trees `text` expands to after `setup`: a tree the
     /// notation names its own variables in is not printed and read back,
     /// since no document can spell those names.
-    fn kernel(setup: &str, text: &str) -> Result<Vec<Syntax>, Error> {
+    fn primitives(setup: &str, text: &str) -> Result<Vec<Syntax>, Error> {
         let mut expander = Expander::new()?;
         expander.submit(setup)?;
         Ok(expander.submit(text)?.0)
@@ -3387,8 +3387,8 @@ mod tests {
     fn expanded(setup: &str, text: &str) -> Result<Vec<String>, Error> {
         let mut expander = Expander::new()?;
         expander.submit(setup)?;
-        let (kernel, _) = expander.submit(text)?;
-        Ok(kernel.iter().map(Syntax::to_string).collect())
+        let (primitive, _) = expander.submit(text)?;
+        Ok(primitive.iter().map(Syntax::to_string).collect())
     }
 
     /// What a document expands to, or its refusal, given a few
@@ -3499,7 +3499,7 @@ mod tests {
     /// two premises once named theirs alike and joined on them.
     #[test]
     fn it_names_the_own_variables_of_two_sites_apart() -> Result<(), Error> {
-        let rules = kernel(
+        let rules = primitives(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
             "(rule (xyz.out ?a97 other: ?a940) (task ?a97 ...) (task ?a940 ...))",
         )?;
@@ -3520,7 +3520,7 @@ mod tests {
     /// and its own variables are one; the prelude says so.
     #[test]
     fn it_names_the_own_variables_of_one_form_written_twice_alike() -> Result<(), Error> {
-        let rules = kernel(
+        let rules = primitives(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
             "(rule (xyz.out ?a other: ?b) (task ?a ...) (task ?b ...) (task ?a ...))",
         )?;
@@ -3552,8 +3552,8 @@ mod tests {
             // a blank.
             let setup =
                 "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))";
-            let rules = kernel(setup, &text)?;
-            assert_eq!(rules, kernel(setup, &text)?, "the same each time");
+            let rules = primitives(setup, &text)?;
+            assert_eq!(rules, primitives(setup, &text)?, "the same each time");
             let [rule] = rules.as_slice() else {
                 return Err(Error::Refused(format!("one rule: {rules:?}")));
             };
@@ -3758,11 +3758,11 @@ mod tests {
             (select (todo ?t text: ?x ...))"#;
         let expand = |text: &str| {
             let mut expander = Expander::new().unwrap();
-            let (kernel, diagnostics) = expander.submit(text).unwrap();
+            let (primitives, diagnostics) = expander.submit(text).unwrap();
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
-            let mut kernel: Vec<String> = kernel.iter().map(Syntax::to_string).collect();
-            kernel.sort();
-            kernel
+            let mut primitives: Vec<String> = primitives.iter().map(Syntax::to_string).collect();
+            primitives.sort();
+            primitives
         };
         let first = expand(&format!("{declarations}{uses}"));
         assert_eq!(first.len(), 4, "{first:?}");
@@ -3774,7 +3774,7 @@ mod tests {
     #[test]
     fn it_expands_again_what_a_later_expansion_declares_a_name_for() {
         let mut expander = Expander::new().unwrap();
-        let (kernel, diagnostics) = expander
+        let (primitive, diagnostics) = expander
             .submit(
                 "(select (memo ?t text: ?x))
                  (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x cardinality: :many)))
@@ -3784,7 +3784,7 @@ mod tests {
             .unwrap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
-            kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
+            primitive.iter().map(Syntax::to_string).collect::<Vec<_>>(),
             vec!["(rule (report (xyz.note ?t text: (:many ?x))) (xyz.note ?t text: (:many ?x)))"]
         );
         assert_eq!(expander.origin(), &[0]);
@@ -3981,11 +3981,11 @@ mod tests {
     }
 
     /// A concept of several reads stands for them all. Written, it is a
-    /// rule a read, each with the premises again, since a kernel rule
+    /// rule a read, each with the premises again, since a primitive rule
     /// has one head.
     #[test]
     fn it_writes_a_concept_of_several_reads_as_a_rule_each() {
-        let kernel = expanded(
+        let primitives = expanded(
             "(concept (card ?c title: ?x owner: ?o)
                (xyz.card/title of: ?c is: ?x as: :text cardinality: :one)
                (xyz.owned/by of: ?c is: ?o as: :entity cardinality: :one))",
@@ -3994,7 +3994,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            kernel,
+            primitives,
             vec![
                 "(rule (assert (xyz.card ?c title: (:one (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
                 "(rule (assert (xyz.owned ?c by: (:one (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
@@ -4005,29 +4005,29 @@ mod tests {
     /// Reported, a read the query named no field of gets no rule.
     #[test]
     fn it_reports_only_the_reads_a_query_names_a_field_of() {
-        let kernel = expanded(
+        let primitives = expanded(
             "(concept (card ?c title: ?x owner: ?o)
                (xyz.card/title of: ?c is: ?x as: :text cardinality: :one)
                (xyz.owned/by of: ?c is: ?o as: :entity cardinality: :one))",
             "(select (card ?c title: ?x ...))",
         )
         .unwrap();
-        assert_eq!(kernel.len(), 1, "{kernel:?}");
-        assert!(kernel[0].starts_with("(rule (report (xyz.card ?c title: (:one (:text ?x))))"));
+        assert_eq!(primitives.len(), 1, "{primitives:?}");
+        assert!(primitives[0].starts_with("(rule (report (xyz.card ?c title: (:one (:text ?x))))"));
     }
 
     /// A pattern is any form, not an application only: here a form in
     /// brackets at the top level.
     #[test]
     fn it_expands_a_form_that_is_not_an_application() {
-        let kernel = expanded(
+        let primitives = expanded(
             r#"(rule (syntax (assert (xyz.note/text of: ?n is: ?x as: :text)))
                  (expand [note ?n ?x]))"#,
             r#"[note note:1 "hi"]"#,
         )
         .unwrap();
         assert_eq!(
-            kernel,
+            primitives,
             vec![r#"(rule (assert (xyz.note note:1 text: (:text "hi"))))"#]
         );
     }
@@ -4035,9 +4035,9 @@ mod tests {
     #[test]
     fn it_expands_a_concept_where_it_is_read_and_where_it_is_written() {
         let mut expander = Expander::new().unwrap();
-        let (kernel, diagnostics) = expander.submit(TODO).unwrap();
-        let [rule] = kernel.as_slice() else {
-            panic!("one rule: {kernel:?}");
+        let (primitive, diagnostics) = expander.submit(TODO).unwrap();
+        let [rule] = primitive.as_slice() else {
+            panic!("one rule: {primitive:?}");
         };
         let rule = rule.to_string();
         // The command's entity, which the author did not write and the
@@ -4055,8 +4055,8 @@ mod tests {
     /// another where it stands as the premise.
     #[test]
     fn it_expands_a_query_to_a_rule_that_reports() {
-        let kernel = kernel(TODO, "(select (todo ?t text: ?x ...))").unwrap();
-        let rule = Clauses::of(&kernel[0]);
+        let primitives = primitives(TODO, "(select (todo ?t text: ?x ...))").unwrap();
+        let rule = Clauses::of(&primitives[0]);
         let at = |tree: &Syntax, label: &str| {
             tree.operand()
                 .and_then(|operand| operand.terms.get(label))
@@ -4077,22 +4077,22 @@ mod tests {
 
     /// A command is issued by asserting it: at the top level, a rule
     /// with that head and no premise. Its head names no entity, so the
-    /// kernel rule holds one of the expansion's own, which the kernel
+    /// primitive rule holds one of the expansion's own, which the primitive forms
     /// derives from what the command says. One declared that no rule
     /// reads is issued all the same, and said so.
     #[test]
     fn it_issues_a_command_and_warns_when_nothing_reads_it() {
         let mut expander = Expander::new().unwrap();
         expander.submit(TODO).unwrap();
-        let (kernel, diagnostics) = expander
+        let (primitive, diagnostics) = expander
             .submit(r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#)
             .unwrap();
-        assert_eq!(kernel.len(), 1);
+        assert_eq!(primitive.len(), 1);
         assert!(
-            kernel[0]
+            primitive[0]
                 .to_string()
                 .starts_with("(rule (assert (xyz.todo.add ?c["),
-            "{kernel:?}"
+            "{primitive:?}"
         );
         assert!(diagnostics.is_empty());
 
@@ -4161,14 +4161,14 @@ mod tests {
             deduced[0].starts_with("(rule (xyz.todo.add ?c["),
             "{deduced:?}"
         );
-        let deduced = kernel(
+        let deduced = primitives(
             TODO,
             r#"(rule (todo/add todo: ?t list: list:home text: ?x) (xyz.draft ?t text: ?x))"#,
         )
         .unwrap();
-        let kernel = Rule::parse(&deduced[0]).unwrap();
-        assert!(matches!(&kernel.head, Head::Derive(read)
-            if matches!(&read.entity, crate::kernel::Term::Formula(id) if id.name == "id")));
+        let primitives = Rule::parse(&deduced[0]).unwrap();
+        assert!(matches!(&primitives.head, Head::Derive(read)
+            if matches!(&read.entity, crate::primitive::Term::Formula(id) if id.name == "id")));
     }
 
     /// A call alone at the top level says nothing to do, a command's
@@ -4505,7 +4505,7 @@ mod tests {
             r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
             "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open ...))",
         ] {
-            // Each line is the kernel's read of its field, the lines of
+            // Each line is the primitive read of its field, the lines of
             // one entity one read.
             let by_lines = expanded(lines, text).unwrap();
             assert!(!by_lines.is_empty());
@@ -4765,13 +4765,13 @@ mod tests {
 
     #[test]
     fn it_joins_the_reads_of_one_entity_under_unless() {
-        let kernel = expanded(
+        let primitives = expanded(
             "(concept (author ?p name: ?n email: ?e) (io.person ?p name: ?n) (io.contact ?p email: ?e))",
             "(select (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
         )
         .unwrap();
-        assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e["));
-        assert!(kernel[0].contains(" name: ?n["));
+        assert!(primitives[0].contains("(unless (io.person ?p io.contact/email: ?e["));
+        assert!(primitives[0].contains(" name: ?n["));
     }
 
     /// A concept, a command or a query is declared under a name, and a
@@ -4864,9 +4864,13 @@ mod tests {
                 )
                 .is_err()
         );
-        let (kernel, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
-        assert_eq!(kernel.len(), 1);
-        assert!(kernel[0].to_string().starts_with("(rule (report (xyz.t ?x"));
+        let (primitive, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
+        assert_eq!(primitive.len(), 1);
+        assert!(
+            primitive[0]
+                .to_string()
+                .starts_with("(rule (report (xyz.t ?x")
+        );
     }
 
     /// A declared name follows the rule a stored name's part does (gaps
@@ -5029,7 +5033,7 @@ mod tests {
 
     /// `syntax::FORMS` is written by hand, so it is checked against what
     /// the notation defines: every word the sources apply as a form,
-    /// `applies() == Some("…")` and its kin, every word of the kernel's
+    /// `applies() == Some("…")` and its kin, every word of the primitive forms'
     /// tables and every macro the prelude defines is in it, and every
     /// word in it is one of those. A match on a keyword, `:command` or
     /// `:float`, is not on what is applied, and is not read. It reads the
@@ -5050,7 +5054,7 @@ mod tests {
             ("expand.rs", include_str!("expand.rs")),
             ("expand/query.rs", include_str!("expand/query.rs")),
             ("form.rs", include_str!("form.rs")),
-            ("kernel.rs", include_str!("kernel.rs")),
+            ("primitive.rs", include_str!("primitive.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("live.rs", include_str!("live.rs")),
             ("parse.rs", include_str!("parse.rs")),
@@ -5138,13 +5142,13 @@ mod tests {
         }
         defined.extend(HEAD_WORDS.iter().map(|word| word.to_string()));
         defined.extend(DIRECTIVES.iter().map(|word| word.to_string()));
-        defined.extend(crate::kernel::FOLDS.iter().map(|word| word.to_string()));
+        defined.extend(crate::primitive::FOLDS.iter().map(|word| word.to_string()));
         defined.extend(
             [
                 ONCE,
                 THIS,
                 POSITION,
-                crate::kernel::QUOTE,
+                crate::primitive::QUOTE,
                 crate::select::COLLECT,
                 crate::select::DISTINCT,
                 "site",
@@ -5319,7 +5323,11 @@ mod tests {
                 .submit("(rule (syntax (+ ?x 1)) (expand (select ?x)))")
                 .is_err()
         );
-        let (kernel, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
-        assert!(kernel[0].to_string().starts_with("(rule (report (xyz.t ?x"));
+        let (primitive, _) = expander.submit("(select (xyz.t ?x name: ?n))").unwrap();
+        assert!(
+            primitive[0]
+                .to_string()
+                .starts_with("(rule (report (xyz.t ?x")
+        );
     }
 }

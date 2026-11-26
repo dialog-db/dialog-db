@@ -3,8 +3,8 @@
 // builds: without it those links have nothing to name.
 #![cfg_attr(not(feature = "repository"), allow(rustdoc::broken_intra_doc_links))]
 
-//! A notation for Dialog-DB: a small kernel, and the core forms defined
-//! in it as rules.
+//! A notation for Dialog-DB: a small set of primitive forms, and the core forms defined
+//! in them as rules.
 //!
 //! ## A document
 //!
@@ -98,11 +98,11 @@
 //! | phase | takes | gives |
 //! |---|---|---|
 //! | [`parse`](parse()) | text | syntax trees, names unresolved |
-//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, which tree each came of, and diagnostics: every refusal and every warning, each with the way to the form it is about |
+//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the primitive forms, which tree each came of, and diagnostics: every refusal and every warning, each with the way to the form it is about |
 //! | [`compile`](compile()) | an analyzed tree | what Dialog-DB already runs: concept queries, deductive and inductive rules, facts and dispatched commands |
 //!
 //! Analysis is the walker and the patterns it matches; the compiler
-//! reads the analyzed tree as the kernel's forms. The notation as parsed
+//! reads the analyzed tree as the primitive forms. The notation as parsed
 //! ([`Form`], what [`read`](read()) gives) is the parser's own, and what
 //! a tree is printed as: nothing after [`parse`](parse()) reads it.
 //!
@@ -219,11 +219,11 @@ mod declare;
 mod diagnostic;
 mod expand;
 mod form;
-mod kernel;
 #[cfg(feature = "repository")]
 pub mod live;
 mod parse;
 mod pattern;
+mod primitive;
 mod print;
 mod select;
 mod syntax;
@@ -366,7 +366,7 @@ pub enum Error {
     /// A form is understood and not allowed.
     #[error("{0}")]
     Refused(String),
-    /// A kernel form has no counterpart in Dialog-DB yet.
+    /// A primitive form has no counterpart in Dialog-DB yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
     /// A document writes a name the build writes itself, the one given.

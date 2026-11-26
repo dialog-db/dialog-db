@@ -17,11 +17,11 @@ says how to cut a release.
 ### A document writes no wrapper: a line says a value's type, cardinality and layer
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). A value wrapped as the
-kernel reads it, in a type `(:integer ?n)`, a pick `(:last ?x)`, a
+primitive forms read it, in a type `(:integer ?n)`, a pick `(:last ?x)`, a
 cardinality `(:one ?x)`, a listed type's cases `(:among ?s cases: [:a :b])`
 or a layer `(:control ?x)`, is refused wherever a document writes it, as
 `Error::Refused` naming the line to write in its place. The walker still
-writes these for a line, and the kernel still reads them.
+writes these for a line, and the primitive forms still read them.
 
 What this changes for you:
 
@@ -47,7 +47,7 @@ What this changes for you:
   saying its cardinality is what its rules conclude, and a wrapped field
   of a concept read saying to read the field as it is: the concept's lines
   say it.
-- A kernel tree built through the Rust API and passed to `compile` is no
+- A primitive tree built through the Rust API and passed to `compile` is no
   document, and compiles with its wrappers as before. Rules a branch
   holds are unchanged. A document text kept and checked again is refused
   where it writes a wrapper, and is mended by writing the line the
@@ -199,7 +199,7 @@ What this changes for you:
   saying neither is declared above what reads it, in a rule's head, its
   premises, `unless` and a select, where it was read as a relation `foo`
   and refused as `?x applies no relation` or `(foo ?x x: ?n) is not a
-  kernel premise`. `(xyz.t/name ?x ?n)` reads the stored attribute as
+  primitive premise`. `(xyz.t/name ?x ?n)` reads the stored attribute as
   before.
 - A name Dialog-DB cannot keep is refused naming it, its length and the
   limit, where it was refused as `not a symbol: Invalid attribute:
@@ -1013,7 +1013,7 @@ a descriptor a caller can build must not take the process down.
 [design/macros/claims.md](./design/macros/claims.md).
 
 `dialog-notation` reads a Lisp-like notation and compiles it to
-Dialog-DB's own descriptors. A small kernel (`rule`, the application of
+Dialog-DB's own descriptors. A small set of primitive forms (`rule`, the application of
 a relation or a formula, and the writes) is all that is compiled; every
 other form is a macro written as a rule about syntax, in a prelude the
 crate reads. `(concept (todo ?t title: ?x) line…)` declares a concept, a
@@ -1121,7 +1121,7 @@ folds, and the notation evaluates only what the engine cannot yet state.
 ### A rule can name an entity it did not read
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
-[design/macros/kernel.md](./design/macros/kernel.md).
+[design/macros/primitive.md](./design/macros/primitive.md).
 
 A rule that concludes a fact of an entity its premises did not bind, the
 row of a command it issues or a record it creates, had no way to name

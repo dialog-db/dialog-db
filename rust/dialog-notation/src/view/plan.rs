@@ -84,7 +84,7 @@ pub enum Why {
     Joined,
 }
 
-/// A condition of a layer, as a kernel premise, and why it is there.
+/// A condition of a layer, as a primitive premise, and why it is there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Condition {
     /// The premise. `(unless …)` stands as it does in a rule.
@@ -300,7 +300,7 @@ fn items(tree: &Syntax) -> &[Syntax] {
     tree.operand().map_or(&[], |operand| &operand.items)
 }
 
-/// The premises of a query's conditions, from the kernel rules analysis
+/// The premises of a query's conditions, from the primitive rules analysis
 /// reported them by: the rule's premises, but for the entity it names
 /// its row by.
 fn premises(rules: &[Syntax]) -> Result<Vec<Syntax>, Error> {

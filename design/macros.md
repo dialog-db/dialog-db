@@ -2,7 +2,7 @@
 
 Phase: **Designing** the three phases ([design-pipeline](macros/design-pipeline.md)); **Directing** how they stand behind the query engine. The direction was decided by the maintainer on 2026-11-10 without a problem statement; the journal records it as a decision on an opinion. Backtracked from Designing on 2026-11-12: every phase is to be reachable from the query engine, and how is not decided.
 
-Working material: [journal](macros/journal.md), [claims](macros/claims.md), [glossary](macros/glossary.md), [the kernel and the core forms](macros/kernel.md) with the model that runs them, the proof of concept on Dialog-DB ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`), and the decision being made now, [what a form is to dialog](macros/design-forms.md). It picks up [research/notation/macros.md](https://github.com/dialog-db/dialog-db/blob/docs/notation/research/notation/macros.md) on #728 and Gozala's tonk journal of [2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md) and [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md).
+Working material: [journal](macros/journal.md), [claims](macros/claims.md), [glossary](macros/glossary.md), [the primitive forms and the core forms](macros/primitive.md) with the model that runs them, the proof of concept on Dialog-DB ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`), and the decision being made now, [what a form is to dialog](macros/design-forms.md). It picks up [research/notation/macros.md](https://github.com/dialog-db/dialog-db/blob/docs/notation/research/notation/macros.md) on #728 and Gozala's tonk journal of [2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md) and [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md).
 
 ## Description
 
@@ -36,10 +36,10 @@ Not stated. Irakli, 2026-11-10: "I don't want to justify why I want to build it 
 
 ## Approach
 
-A slim kernel, and every other form a macro that is a rule. [kernel.md](macros/kernel.md) has it in full.
+A slim set of primitive forms, and every other form a macro that is a rule. [primitive.md](macros/primitive.md) has it in full.
 
-- The kernel is `rule` with `when` and `unless`, application of a relation, application of a formula, `assert!` and `retract!` for what stays, `assert` for what holds one round, `report`, and the two syntax directives.
+- The primitive forms are `rule` with `when` and `unless`, application of a relation, application of a formula, `assert!` and `retract!` for what stays, `assert` for what holds one round, `report`, and the two syntax directives.
 - A macro is a rule: `(expand pattern)` in its premise says which form it is about, and `(syntax template)` in its head says what the form becomes. `query`, `concept` and commands are defined this way in 64 lines.
-- A walker in native code rewrites a form until it is all kernel, asking the rules at each step. What runs afterwards is the descriptor dialog runs today.
+- A walker in native code rewrites a form until it is all primitive, asking the rules at each step. What runs afterwards is the descriptor dialog runs today.
 - Forms are fully inlined values with a canonical encoding. Each reference keeps its name, the revision and the entity it resolved to, so a form can be shown as written.
 - Types follow conduct: a lattice with full inference. A macro sees declarations, never inferred types.

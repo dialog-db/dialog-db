@@ -914,12 +914,12 @@ mod tests {
         Ok(())
     }
 
-    /// A concept's lines are declared as the kernel reads them: a type,
+    /// A concept's lines are declared as the primitive forms read them: a type,
     /// a cardinality, an elector, a variant's cases and an entry of a
     /// collection each give the line its type, its cardinality and its
     /// label, and the value under them is what it is.
     #[test]
-    fn it_declares_every_line_as_the_kernel_reads_it() -> Result<(), Error> {
+    fn it_declares_every_line_as_its_primitive_read() -> Result<(), Error> {
         let checked = check(
             &mut Analyzer::new()?,
             r#"(concept (todo ?t text: ?x state: ?s list: ?l)
@@ -1027,7 +1027,7 @@ mod tests {
             .analyzed
             .iter()
             .map(|rule| {
-                crate::kernel::Rule::parse(rule)
+                crate::primitive::Rule::parse(rule)
                     .ok()
                     .and_then(|rule| rule.description)
             })
@@ -1584,15 +1584,15 @@ mod tests {
 
     /// A derived attribute is what rules conclude, on the default layer:
     /// one concluded or read on a layer, `in: :control`, the only layer
-    /// there is (`kernel::LAYERS`), is refused naming the attribute, in a
-    /// head, a select, a premise and `unless`, and in the kernel's
+    /// there is (`primitive::LAYERS`), is refused naming the attribute, in a
+    /// head, a select, a premise and `unless`, and in the primitive
     /// spelling, which no document writes.
     #[test]
     fn it_refuses_a_derived_attribute_on_a_layer() -> Result<(), Error> {
         let list = "(concept (list ?l name: ?n) \
                     (xyz.list/name of: ?l is: ?n as: :text cardinality: :one)) \
                     (rule (list/label ?l ?n) (list ?l name: ?n))";
-        for layer in crate::kernel::LAYERS {
+        for layer in crate::primitive::LAYERS {
             for form in [
                 format!("(rule (list/label of: ?l is: ?n in: :{layer}) (list ?l name: ?n))"),
                 format!("(select (list/label of: ?l is: ?n in: :{layer}))"),
@@ -1601,7 +1601,7 @@ mod tests {
                     "(select (list ?l name: ?n) (list ?l name: ?n) \
                      (unless (list/label of: ?l is: ?q in: :{layer})))"
                 ),
-                // The kernel's spelling is refused as every wrapper is.
+                // The primitive spelling is refused as every wrapper is.
                 format!("(select (list/label ?l (:{layer} ?n)))"),
             ] {
                 let text = format!("{list} {form}");

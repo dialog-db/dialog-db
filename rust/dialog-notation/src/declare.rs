@@ -153,13 +153,13 @@ fn lines_of(part: &Syntax, description: Option<String>) -> Result<Vec<Line>, Err
         }]);
     }
     // A read, `(xyz.todo ?t title: (:last (:text ?x)))`: a line a field,
-    // what it is written under taken off it as the kernel reads it.
+    // what it is written under taken off it as the primitive forms read it.
     let of = operand.items.first().cloned().unwrap_or(Syntax::Blank);
     operand
         .terms
         .iter()
         .map(|(label, term)| {
-            let wrapped = crate::kernel::wrapped(term)?;
+            let wrapped = crate::primitive::wrapped(term)?;
             let cardinality = wrapped.cardinality.or(match wrapped.pick.as_deref() {
                 Some("last") => Some("one".into()),
                 // `all` reads every claim, and an elector chooses one of
@@ -217,7 +217,7 @@ pub(crate) fn concept(
             part,
             said(written, &[Segment::Item(at), Segment::Item(index + 1)]),
         )?;
-        // The descriptor each line compiles to: the kernel read the part
+        // The descriptor each line compiles to: the primitive read the part
         // is, a field a line. Its cardinality is the line's, as Dialog-DB
         // reads it.
         let read = match crate::expand::line(part)? {
@@ -226,7 +226,7 @@ pub(crate) fn concept(
             None => None,
         };
         if let Some(read) = read {
-            let read = crate::kernel::read(&read)?;
+            let read = crate::primitive::read(&read)?;
             if read.fields.len() == these.len() {
                 for (line, field) in these.iter_mut().zip(&read.fields) {
                     let descriptor = crate::compile::descriptor(field)?;

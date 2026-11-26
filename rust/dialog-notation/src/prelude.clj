@@ -1,4 +1,4 @@
-; The prelude: the core forms, written in the kernel.
+; The prelude: the core forms, written in the primitive forms.
 ;
 ; A rule's first part is its head, and every part after it is a premise.
 ; Two directives carry syntax:

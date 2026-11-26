@@ -34,7 +34,7 @@
 //!     (is ?card SHAPE)))
 //! ```
 //!
-//! A `RULE` is a kernel rule that reports a column for each variable
+//! A `RULE` is a primitive rule that reports a column for each variable
 //! the vector names, in its order, under `c0`, `c1` and on.
 
 use std::cmp::Ordering;

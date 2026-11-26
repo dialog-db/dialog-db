@@ -1,9 +1,9 @@
-//! The kernel, typed: what an expanded rule is made of.
+//! The primitive forms, typed: what an expanded rule is made of.
 //!
 //! Analysis leaves a `(rule …)` tree whose every head and premise
 //! applies a relation or a formula. This module reads that tree into
 //! the shapes Dialog-DB's own descriptors have, and refuses what is not
-//! kernel.
+//! primitive.
 
 use std::collections::BTreeSet;
 
@@ -210,7 +210,7 @@ impl Read {
     }
 }
 
-/// A kernel rule: one head, and what must and must not hold for it.
+/// A primitive rule: one head, and what must and must not hold for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rule {
     /// What the rule says it is for.
@@ -325,7 +325,7 @@ pub(crate) struct Wrapped<'a> {
     pub inner: &'a Syntax,
 }
 
-/// The wrappers of a field's value taken off it, as the kernel reads
+/// The wrappers of a field's value taken off it, as the primitive forms read
 /// them: `(:entry …)` outermost, then any of a type, a pick, a
 /// cardinality, `(:among …)` and a layer, each once at most.
 pub(crate) fn wrapped(mut node: &Syntax) -> Result<Wrapped<'_>, Error> {
@@ -540,7 +540,7 @@ pub(crate) fn premise(node: &Syntax) -> Result<Premise, Error> {
     } else if node.is_formula() {
         Ok(Premise::Formula(formula(node)?))
     } else {
-        Err(Error::Refused(format!("{node} is not a kernel premise")))
+        Err(Error::Refused(format!("{node} is not a primitive premise")))
     }
 }
 
@@ -573,12 +573,12 @@ fn head(node: &Syntax) -> Result<Head, Error> {
     }
     if node.applies() == Some("all") {
         return Err(Error::Refused(format!(
-            "{node} is several heads, and a kernel rule has one"
+            "{node} is several heads, and a primitive rule has one"
         )));
     }
     let inner = match node.operand().map(|operand| operand.items.as_slice()) {
         Some([inner]) => read(inner)?,
-        _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
+        _ => return Err(Error::Refused(format!("{node} is not a primitive head"))),
     };
     if matches!(node.applies(), Some("assert" | "retract")) && inner.written.is_some() {
         return Err(Error::Refused(format!(
@@ -596,7 +596,7 @@ fn head(node: &Syntax) -> Result<Head, Error> {
         ))),
         (Some("retract"), false) => Ok(Head::Retract(inner)),
         (Some("report"), _) => Ok(Head::Report(inner)),
-        _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
+        _ => Err(Error::Refused(format!("{node} is not a primitive head"))),
     }
 }
 
@@ -617,7 +617,7 @@ fn derived(read: &Read) -> Term {
 
 impl Rule {
     /// Read an analyzed tree: a `(rule …)` whose every head and premise
-    /// is kernel.
+    /// is primitive.
     pub fn parse(node: &Syntax) -> Result<Self, Error> {
         let (Some("rule"), Some(operand)) = (node.applies(), node.operand()) else {
             return Err(Error::Refused(format!("{node} is not a rule")));
@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn it_refuses_what_is_not_kernel() {
+    fn it_refuses_what_is_not_primitive() {
         let form = forms("(rule (assert (todo ?t)))").unwrap().remove(0);
         assert!(matches!(Rule::parse(&form), Err(Error::Refused(_))));
     }
@@ -876,7 +876,7 @@ mod tests {
         ));
     }
 
-    /// A kernel rule has one head: no head and several are both refused.
+    /// A primitive rule has one head: no head and several are both refused.
     #[test]
     fn it_refuses_a_rule_of_no_head_and_of_several() {
         let none = forms("(rule)").unwrap().remove(0);

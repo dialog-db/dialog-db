@@ -7,7 +7,7 @@ Decided by the maintainer: there are three phases and a command over them; the a
 ```
  text ──parse──▶ syntax tree ──analyze──▶ analyzed tree ──compile──▶ what Dialog-DB runs
                  as written,              every form a rule          statements, rules,
-                 names unresolved         of the kernel, names       queries
+                 names unresolved         of the primitive forms, names       queries
                                           resolved, and a table
                                           of what each name meant
 ```
@@ -15,7 +15,7 @@ Decided by the maintainer: there are three phases and a command over them; the a
 | phase | takes | gives | reads the database |
 |---|---|---|---|
 | `parse` | text | a list of trees: applications, variables, constants, references, structs, tuples | no |
-| `analyze` | trees, and the definitions in force | the analyzed trees, each a rule of the kernel; the name table: each name written and what it resolved to, or that it did not; diagnostics | yes: the definitions. Today they are held by the analyzer in memory |
+| `analyze` | trees, and the definitions in force | the analyzed trees, each a rule of the primitive forms; the name table: each name written and what it resolved to, or that it did not; diagnostics | yes: the definitions. Today they are held by the analyzer in memory |
 | `compile` | an analyzed tree | steps: assert, retract, issue, deduce, induce, query | no |
 
 Named by the maintainer: what analysis gives is the **analyzed tree**. What is the same in every phase is the tree. The notation as parsed (`Form`) is the parser's own and what a tree is printed as; nothing after `parse` reads it.
@@ -25,7 +25,7 @@ Named by the maintainer: what analysis gives is the **analyzed tree**. What is t
 Each ends with the tests passing.
 
 1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Done.
-2. **The compiler reads the tree.** `kernel.rs` and `compile.rs`. Done: neither names the notation as parsed, and a reported row is a tree.
+2. **The compiler reads the tree.** `primitive.rs` and `compile.rs`. Done: neither names the notation as parsed, and a reported row is a tree.
 3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees. Done: nothing after `parse` names the notation as parsed.
 4. **What was written, beside what was said.** Each phase gives its result and a mapping of what the result left out, and a printer takes both back to the source. See below.
    - Done, the parser's part: `parse_written` gives the trees and `Written`, the mapping; `print(trees, written)` gives the text, the same bytes for the prelude and both examples. A warning says the way to its form and an analyzed tree says which tree it came of, so the notebook says `5:1: warning: …` and where a refusal by the compiler is.

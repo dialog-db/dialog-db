@@ -4269,7 +4269,7 @@ async fn it_pins_a_rule_written_by_hand() -> Result<()> {
 /// the value under `is:`: with `list/label` derived from a text, a read
 /// of it as an integer or an entity answers nothing, as text it
 /// answers, and a join through a typed read of it answers as the same
-/// join through the stored attribute's line. The kernel's spelling, the
+/// join through the stored attribute's line. The primitive spelling, the
 /// value wrapped in its type, `(:text ?n)`, is no document's: it is
 /// refused, naming `as:`. A derived
 /// attribute takes no `cardinality:`, which is what its rules conclude,

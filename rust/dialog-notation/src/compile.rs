@@ -1,10 +1,10 @@
-//! Compiling a kernel rule to what Dialog-DB runs.
+//! Compiling a primitive rule to what Dialog-DB runs.
 //!
-//! Nothing here evaluates anything. A kernel rule becomes the
+//! Nothing here evaluates anything. A primitive rule becomes the
 //! descriptors Dialog-DB already has, and Dialog-DB plans and runs
 //! them:
 //!
-//! | kernel | Dialog-DB |
+//! | primitive | Dialog-DB |
 //! |---|---|
 //! | `(assert A)`, `(retract A)` with no premise | a [`ConceptStatement`], asserted or retracted |
 //! | `(assert A)` of claims on the control layer, with no premise | a [`ConceptStatement`], dispatched: a command, which holds one round |
@@ -19,7 +19,7 @@
 //! | `(dialog.n.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
 //! | `(dialog.n.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
 //!
-//! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
+//! A primitive rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
 //! something close.
 
@@ -36,8 +36,8 @@ use dialog_query::{
 use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
-use crate::kernel::{Field, Formula, Head, Keyed, Premise, QUOTE, Read, Rule, TYPES, Term};
 use crate::pattern::REST;
+use crate::primitive::{Field, Formula, Head, Keyed, Premise, QUOTE, Read, Rule, TYPES, Term};
 use crate::syntax::{self, Parameters, Syntax};
 
 /// One thing to do with a branch.
@@ -106,10 +106,10 @@ impl Write {
             &self.head.entity,
             row.operand().map(|operand| operand.items.as_slice()),
         ) {
-            values.insert(name.clone(), crate::kernel::term(entity)?);
+            values.insert(name.clone(), crate::primitive::term(entity)?);
         }
         for (label, value) in row.operand().into_iter().flat_map(|operand| &operand.terms) {
-            values.insert(label.clone(), crate::kernel::term(value)?);
+            values.insert(label.clone(), crate::primitive::term(value)?);
         }
         fn bound(term: &Term, values: &BTreeMap<String, Term>) -> Result<Term, Error> {
             Ok(match term {
@@ -596,7 +596,7 @@ pub const REPORTED: &str = crate::syntax::namespaced!("report.q");
 pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 
 /// Compile an analyzed tree: the third phase, from a rule of the
-/// kernel to what Dialog-DB runs.
+/// primitive to what Dialog-DB runs.
 ///
 /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
 /// and [`answer`](crate::answer), and should prefer them over this.
@@ -610,7 +610,7 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     compiled(form).map_err(|error| error.said(&told))
 }
 
-/// Why nothing may write what the kernel rule `form` writes, where it
+/// Why nothing may write what the primitive rule `form` writes, where it
 /// writes what only the notation writes: the one test of writes, which
 /// the analyzer asks of every rule it makes and [`compile`] of every tree
 /// it is given, however it was built. A hash of the notation's, a
@@ -2401,7 +2401,7 @@ mod tests {
     use super::*;
     use crate::parse;
 
-    /// What `text` compiles to, a kernel rule written as text: a
+    /// What `text` compiles to, a primitive rule written as text: a
     /// variable written `?x.1` is one an expansion made, `x[1]`, which no
     /// text can spell.
     fn steps(text: &str) -> Result<Vec<Step>, Error> {
@@ -2477,7 +2477,7 @@ mod tests {
         assert!(matches!(derived.as_slice(), [Step::Deduce(_)]));
     }
 
-    /// A kernel rule has one head, so several are refused and nothing is
+    /// A primitive rule has one head, so several are refused and nothing is
     /// compiled of them.
     #[test]
     fn it_refuses_a_rule_of_several_heads() {
@@ -2487,7 +2487,7 @@ mod tests {
                (xyz.counter ?c count: (:last (:natural ?n))))",
         );
         assert!(
-            matches!(&refused, Err(Error::Refused(why)) if why.contains("a kernel rule has one")),
+            matches!(&refused, Err(Error::Refused(why)) if why.contains("a primitive rule has one")),
             "{:?}",
             refused.as_ref().map(Vec::len)
         );

@@ -3,7 +3,7 @@ name = "dialog-notation"
 version.workspace = true
 edition = "2024"
 authors.workspace = true
-description = "A notation for Dialog-DB: a small kernel, and the core forms defined in it as rules"
+description = "A notation for Dialog-DB: a small set of primitive forms, and the core forms defined in them as rules"
 license.workspace = true
 
 [features]

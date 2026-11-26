@@ -12,7 +12,7 @@
 //!
 //! Nothing of a query is compiled where it is defined. `(select CALL)`
 //! of one is analyzed into a `(dialog.n.select …)` tree that holds the
-//! query and every query it reaches, each condition expanded to kernel
+//! query and every query it reaches, each condition expanded to primitive
 //! rules (see [`crate::select`]).
 //!
 //! A rule and a concept never read a query, and never collect: a rule's
@@ -864,7 +864,7 @@ impl Expander {
         Ok(apply("missing", parts))
     }
 
-    /// The kernel rules that report what `conditions` bind, a column a
+    /// The primitive rules that report what `conditions` bind, a column a
     /// variable of `columns` in order, `c0` and on, under the entity the
     /// conditions are about; with more than one column beside it, as one
     /// record under [`ROW_FIELD`] too.
@@ -968,7 +968,7 @@ impl Expander {
     }
 }
 
-/// A kernel rule that reports a query's row, with the row naming
+/// A primitive rule that reports a query's row, with the row naming
 /// `part`.
 fn parted(rule: &Syntax, part: &Syntax) -> Syntax {
     let mut rule = rule.clone();
