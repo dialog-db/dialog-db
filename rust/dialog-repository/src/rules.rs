@@ -50,6 +50,8 @@
 //!   which is what makes the "overlay rule masked by a head-keyed cache"
 //!   bug structurally impossible.
 
+pub(crate) mod error;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 #[cfg(test)]
@@ -83,8 +85,8 @@ use dialog_common::Blake3Hash;
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
 pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, derives_attr, head_entities, invalid_attr, on_attr, quarantined_attr,
-    reads_attr, source_attr,
+    conclusion_attr, derives_attr, error_attr, head_entities, invalid_attr, on_attr,
+    quarantined_attr, reads_attr, source_attr,
 };
 
 /// Whether facts of `the` are rule facts: every `dialog.rule/*` attribute
@@ -103,14 +105,6 @@ pub(crate) fn is_rule_attribute(the: &Relation) -> bool {
 /// committed.
 pub(crate) fn transient_attr() -> Relation {
     the!("dialog.concept/transient").into()
-}
-
-/// Hydrate a compiled [`InductiveRule`] from a `dialog.rule/source` claim
-/// value (the canonical dag-cbor
-/// [`InductiveRuleDescriptor`](dialog_query::rule::inductive::descriptor::InductiveRuleDescriptor)).
-pub(crate) fn hydrate_inductive(source: &[u8]) -> Result<InductiveRule, EvaluationError> {
-    InductiveRule::decode(source)
-        .map_err(|reason| EvaluationError::Store(format!("inductive rule hydrate: {reason}")))
 }
 
 /// [`Statement`] wrapper declaring a concept transient: facts of it are
@@ -157,14 +151,6 @@ pub(crate) fn derives_keys(attribute: &ConceptDescriptor) -> Vec<Entity> {
 /// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
 pub(crate) fn source_selector(rule: &Entity) -> Selector<Constrained> {
     Selector::new().the(source_attr()).of(rule.clone())
-}
-
-/// Hydrate a compiled [`DeductiveRule`] from a `dialog.rule/source` claim
-/// value (the canonical dag-cbor [`DeductiveRuleDescriptor`]).
-#[tracing::instrument(skip_all, name = "hydrate_rule")]
-pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
-    DeductiveRule::decode(source)
-        .map_err(|reason| EvaluationError::Store(format!("rule hydrate: {reason}")))
 }
 
 /// Extract the rule entities from a batch of `dialog.rule/conclusion`
@@ -568,6 +554,11 @@ pub(crate) struct RuleContent {
     bodies: Cache<(Entity, Blake3Hash), DeductiveRule>,
     /// Hydrated inductive bodies, keyed like `bodies`.
     inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
+    /// Why a stored body is no rule on this release, keyed like
+    /// `bodies`: what [`judge`](error::judge) found, so a body that did
+    /// not compile is judged once, as one that did. Built on the first
+    /// such body: they are rare, and a cache reserves its room up front.
+    failures: OnceLock<Cache<(Entity, Blake3Hash), error::RuleError>>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -576,21 +567,34 @@ pub(crate) struct RuleContent {
     selecting: Cache<SelectingKey, Selecting>,
 }
 
+/// The most bodies that are no rule a rule content remembers: such a
+/// body reaches a branch only from elsewhere and is rare, so its cache is
+/// built on the first one and kept small, rather than reserved up front
+/// at the size of the others.
+const FAILURES: usize = 64;
+
 impl RuleContent {
-    /// Rule content remembering up to `capacity` entries of each kind:
+    /// Rule content remembering up to `capacity` entries of each kind
+    /// (and, once one is met, at most [`FAILURES`] bodies that are no
+    /// rule):
     /// heads, deductive bodies, inductive bodies and selecting rules.
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             heads: Cache::with_capacity(capacity),
             bodies: Cache::with_capacity(capacity),
             inductive: Cache::with_capacity(capacity),
+            failures: OnceLock::new(),
             selecting: Cache::with_capacity(capacity),
         }
     }
 
     /// How many entries it remembers now, of every kind.
     pub(crate) fn len(&self) -> usize {
-        self.heads.len() + self.bodies.len() + self.inductive.len() + self.selecting.len()
+        self.heads.len()
+            + self.bodies.len()
+            + self.inductive.len()
+            + self.failures.get().map_or(0, Cache::len)
+            + self.selecting.len()
     }
 
     /// How many entries of each kind this content may remember.
@@ -853,19 +857,63 @@ impl RuleCache {
         self.content.selecting.insert(key, selecting);
     }
 
+    /// What the body `bytes` stored under `rule` is on this release, the
+    /// rule or why it is none, from what an earlier read found when one
+    /// found it, and otherwise judged and remembered.
+    pub(crate) fn judged(
+        &self,
+        rule: &Entity,
+        bytes: &[u8],
+    ) -> Result<error::Hydrated, error::RuleError> {
+        let key = (rule.clone(), Blake3Hash::hash(bytes));
+        if let Some(body) = self.content.bodies.get_cached(&key) {
+            return Ok(error::Hydrated::Deductive(body));
+        }
+        if let Some(body) = self.content.inductive.get_cached(&key) {
+            return Ok(error::Hydrated::Inductive(body));
+        }
+        if let Some(failure) = self
+            .content
+            .failures
+            .get()
+            .and_then(|failures| failures.get_cached(&key))
+        {
+            return Err(failure);
+        }
+        let judged = error::judge(rule, bytes);
+        match &judged {
+            Ok(error::Hydrated::Deductive(body)) => {
+                self.content.bodies.insert(key, body.clone());
+            }
+            Ok(error::Hydrated::Inductive(body)) => {
+                self.content.inductive.insert(key, body.clone());
+            }
+            Err(failure) => {
+                self.content
+                    .failures
+                    .get_or_init(|| Cache::with_capacity(FAILURES))
+                    .insert(key, failure.clone());
+            }
+        }
+        judged
+    }
+
+    /// Whether `rule` stored as `bytes` was judged no rule before, and
+    /// remembered.
+    #[cfg(test)]
+    pub(crate) fn failure(&self, rule: &Entity, bytes: &[u8]) -> Option<error::RuleError> {
+        self.content
+            .failures
+            .get()?
+            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
+    }
+
     /// The body `rule` decoded to from `bytes`, if decoded before.
+    #[cfg(test)]
     pub(crate) fn body(&self, rule: &Entity, bytes: &[u8]) -> Option<DeductiveRule> {
         self.content
             .bodies
             .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
-    }
-
-    /// Cache the body `rule` decoded to from `bytes`, once it was checked
-    /// to be stored under its content address.
-    pub(crate) fn record_body(&self, rule: Entity, bytes: &[u8], body: DeductiveRule) {
-        self.content
-            .bodies
-            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The committed trigger footprint if scanned at `head`; `None` if
@@ -910,22 +958,6 @@ impl RuleCache {
     /// `head`.
     pub(crate) fn record_reads(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
         self.inner.write().reads.insert(on, (head, entities));
-    }
-
-    /// The inductive body `rule` decoded to from `bytes`, if decoded
-    /// before.
-    pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
-        self.content
-            .inductive
-            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
-    }
-
-    /// Cache the inductive body `rule` decoded to from `bytes`, once it
-    /// was checked to be stored under its content address.
-    pub(crate) fn record_inductive(&self, rule: Entity, bytes: &[u8], body: InductiveRule) {
-        self.content
-            .inductive
-            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The cached committed transience verdict for `concept` if
