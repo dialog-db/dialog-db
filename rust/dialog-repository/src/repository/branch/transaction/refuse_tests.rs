@@ -234,3 +234,73 @@ async fn it_writes_a_rule_body_stored_under_its_identity() -> Result<()> {
     assert_eq!(written(&branch, &operator).await?, (1, true));
     Ok(())
 }
+
+/// What a commit judged is tied to the bytes it judged, not only to the
+/// entity: once a rule is installed through the API, and its body judged
+/// and remembered, other bytes written under the same entity are judged
+/// again and refused, alone or beside the rule staged in one transaction,
+/// and nothing of either commit is written.
+#[dialog_common::test]
+async fn it_refuses_other_bytes_under_an_entity_a_rule_was_installed_under() -> Result<()> {
+    let (operator, branch) = branch().await?;
+    let rule = dialog_query::DeductiveRule::decode(&body()?).map_err(anyhow::Error::msg)?;
+    branch
+        .transaction()
+        .assert(rule.clone())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(written(&branch, &operator).await?, (1, false));
+
+    let refused = write(&branch, &operator, &rule.this(), vec![0xff, 0x00]).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(CommitError::InvalidRule { rule: refused, reason: RuleError::Undecodable { .. } })
+                if *refused == rule.this()
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        written(&branch, &operator).await?,
+        (1, false),
+        "nothing more is written"
+    );
+
+    let mut changes = Changes::new();
+    changes.associate(
+        "dialog.rule/source".parse()?,
+        rule.this(),
+        Value::Bytes(ill_typed()?),
+        Cardinality::Many,
+    );
+    changes.associate(
+        "doc/label".parse()?,
+        "doc:2".parse()?,
+        Value::String("final".into()),
+        Cardinality::Many,
+    );
+    let staged = branch
+        .transaction()
+        .assert(rule.clone())
+        .assert(changes)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await;
+    assert!(
+        matches!(
+            &staged,
+            Err(CommitError::InvalidRule { rule: refused, reason: RuleError::IllTyped { .. } })
+                if *refused == rule.this()
+        ),
+        "{staged:?}"
+    );
+    assert_eq!(
+        written(&branch, &operator).await?,
+        (1, false),
+        "nothing of the transaction is written"
+    );
+    Ok(())
+}
