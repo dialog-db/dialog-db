@@ -32,13 +32,16 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 use crate::corpus::Type as ValueType;
 use crate::error::{AnalysisError, TypeError};
+use crate::formula::FormulaQuery;
 use crate::planner::categorize;
 use crate::premise::Negation;
 use crate::proposition::Proposition;
 use crate::reduce::{ReduceEntry, ReduceSpec};
+use crate::resolver::ResolverQuery;
 use crate::rule::RuleKind;
 use crate::rule::canonical::Identity;
 use crate::rule::types::TypeEnv;
+use crate::supplied::{ANALYZE, READ};
 use crate::type_system::unifier::Context;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::{Entity, Environment, Premise, Term};
@@ -421,6 +424,35 @@ pub fn analyze_with(
     kind: RuleKind,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<AnalyzedRule, AnalysisError> {
+    // No rule holds a formula or resolver the engine declares and another
+    // crate supplies (`crate::supplied`). A built-in formula is on every
+    // replica. One whose implementation comes from another crate is only
+    // where that crate is linked, and what it does would become part of
+    // what the stored rule means.
+    //
+    // Opening rules to them is this refusal removed, once what an
+    // implementation does is versioned in what a replica stores, and a
+    // replica holding no implementation judges such a rule when its rule
+    // set is assembled (a `RuleError`, quarantined as every rule it cannot
+    // compile is), not when a query asks it (an `EvaluationError`).
+    if let Some(formula) = premises.iter().find_map(|premise| {
+        let proposition = match premise {
+            Premise::Assert(proposition) | Premise::Unless(Negation(proposition)) => proposition,
+        };
+        match proposition {
+            Proposition::Formula(FormulaQuery::NotationRead(_)) => Some(READ),
+            Proposition::Resolver(resolver)
+                if matches!(**resolver, ResolverQuery::NotationAnalyze(_)) =>
+            {
+                Some(ANALYZE)
+            }
+            _ => None,
+        }
+    }) {
+        return Err(AnalysisError::SuppliedInRule {
+            formula: formula.to_string(),
+        });
+    }
     let head: Vec<(String, Kind)> = conclusion
         .with()
         .iter()

@@ -98,6 +98,8 @@ pub mod source;
 pub mod statement;
 /// Stream utilities for async query result iteration.
 pub mod stream;
+/// Formulas the engine declares and a crate of dialog's own supplies.
+pub mod supplied;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
 

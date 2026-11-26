@@ -455,6 +455,14 @@ pub fn reset_tally() {
     chain.round = None;
 }
 
+/// Forget the round the chain last saw issued: a new lockstep session
+/// counts its rounds from its own first request, one deeper than the
+/// chain so far.
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_round() {
+    CHAIN.lock().expect("chain lock poisoned").round = None;
+}
+
 /// An in-flight simulated request: [`begin`] has taken a connection and
 /// charged the request's authorization and latency; [`InFlight::complete`]
 /// charges the payload's transfer time, records its bytes, and hands the
@@ -697,9 +705,24 @@ mod shaping {
     /// instant is served in the next, together: a request's depth is the
     /// round it was issued in, the same in every run of the same schedule.
     /// Modeled time then counts one millisecond per round.
+    ///
+    /// Turning it on starts a session: its rounds are counted from its own
+    /// first request, on the clock of the runtime that issues it. Each
+    /// test runs on a paused clock of its own, frozen where its runtime was
+    /// built, so an instant taken on one test's clock means nothing on
+    /// another's, and a session measured from another's first request
+    /// would read its rounds as that one's.
     pub fn lockstep(enabled: bool) {
+        if enabled {
+            *SESSION.lock().expect("lockstep session lock poisoned") = None;
+            super::forget_round();
+        }
         LOCKSTEP.store(enabled, Ordering::Relaxed);
     }
+
+    /// The instant the current lockstep session issued its first request
+    /// at, on the clock of the runtime that issued it.
+    static SESSION: Mutex<Option<Instant>> = Mutex::new(None);
 
     /// Serve a request's file operation: in lockstep with no shape
     /// configured, to completion on a thread of its own while the
@@ -741,14 +764,14 @@ mod shaping {
     }
 
     /// In lockstep, the instant a request issued now is issued at, as time
-    /// since the first one asked: its round (see `Chain`).
+    /// since the session's first request: its round (see `Chain`).
     pub(super) fn round() -> Option<Duration> {
-        static FIRST: OnceLock<Instant> = OnceLock::new();
         if !LOCKSTEP.load(Ordering::Relaxed) || active().is_some() {
             return None;
         }
         let now = Instant::now();
-        Some(now.duration_since(*FIRST.get_or_init(|| now)))
+        let mut session = SESSION.lock().expect("lockstep session lock poisoned");
+        Some(now.duration_since(*session.get_or_insert(now)))
     }
 
     /// Set (or, with `None`, clear) the active link model, overriding the
@@ -967,6 +990,72 @@ mod tests {
             "issued together, served together"
         );
         assert_eq!(started.elapsed(), Duration::from_millis(1), "one round");
+    }
+
+    /// Run only as a child of
+    /// [`a_session_counts_its_rounds_from_its_own_first_request`], so the
+    /// process has issued no lockstep request before it. A runtime built
+    /// earlier and one built later are each a test's paused clock, frozen
+    /// where its runtime was built; the later one issues the process's
+    /// first lockstep request, then the earlier one issues a pair together.
+    #[test]
+    #[ignore = "a child of a_session_counts_its_rounds_from_its_own_first_request"]
+    fn a_pair_issued_on_an_earlier_clock_after_a_later_one_is_one_round() {
+        let paused = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("a paused runtime builds")
+        };
+        let earlier = paused();
+        std::thread::sleep(Duration::from_millis(5));
+        let later = paused();
+        later.block_on(async {
+            let _serial = serial().await;
+            configure(None);
+            lockstep(true);
+            request(Traffic::ArchiveGet).await;
+            lockstep(false);
+        });
+        let independent = earlier.block_on(async {
+            let _serial = serial().await;
+            configure(None);
+            lockstep(true);
+            let before = longest_chain();
+            futures_util::future::join(request(Traffic::ArchiveGet), request(Traffic::ArchiveGet))
+                .await;
+            lockstep(false);
+            longest_chain() - before
+        });
+        assert_eq!(independent, 1, "an independent pair is one round");
+    }
+
+    /// A lockstep session counts its rounds from its own first request,
+    /// whichever test's clock began the process's first one. Tests share
+    /// the process on the default runner, each its own paused clock, and
+    /// a session whose clock reads earlier than the instant another
+    /// session began at read its rounds as that session's first one: an
+    /// independent pair counted no round at all. Run in a child process,
+    /// as no test in a shared process can know it is the first to issue
+    /// a lockstep request.
+    #[test]
+    fn a_session_counts_its_rounds_from_its_own_first_request() -> std::io::Result<()> {
+        let child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "fs::simulation::tests::a_pair_issued_on_an_earlier_clock_after_a_later_one_is_one_round",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .output()?;
+        assert!(
+            child.status.success(),
+            "the child failed: {}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        Ok(())
     }
 
     /// In lockstep, two requests known to be independent, issued
