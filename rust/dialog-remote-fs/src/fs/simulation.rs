@@ -969,6 +969,72 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_millis(1), "one round");
     }
 
+    /// Run only as a child of
+    /// [`a_session_counts_its_rounds_from_its_own_first_request`], so the
+    /// process has issued no lockstep request before it. A runtime built
+    /// earlier and one built later are each a test's paused clock, frozen
+    /// where its runtime was built; the later one issues the process's
+    /// first lockstep request, then the earlier one issues a pair together.
+    #[test]
+    #[ignore = "a child of a_session_counts_its_rounds_from_its_own_first_request"]
+    fn a_pair_issued_on_an_earlier_clock_after_a_later_one_is_one_round() {
+        let paused = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("a paused runtime builds")
+        };
+        let earlier = paused();
+        std::thread::sleep(Duration::from_millis(5));
+        let later = paused();
+        later.block_on(async {
+            let _serial = serial().await;
+            configure(None);
+            lockstep(true);
+            request(Traffic::ArchiveGet).await;
+            lockstep(false);
+        });
+        let independent = earlier.block_on(async {
+            let _serial = serial().await;
+            configure(None);
+            lockstep(true);
+            let before = longest_chain();
+            futures_util::future::join(request(Traffic::ArchiveGet), request(Traffic::ArchiveGet))
+                .await;
+            lockstep(false);
+            longest_chain() - before
+        });
+        assert_eq!(independent, 1, "an independent pair is one round");
+    }
+
+    /// A lockstep session counts its rounds from its own first request,
+    /// whichever test's clock began the process's first one. Tests share
+    /// the process on the default runner, each its own paused clock, and
+    /// a session whose clock reads earlier than the instant another
+    /// session began at read its rounds as that session's first one: an
+    /// independent pair counted no round at all. Run in a child process,
+    /// as no test in a shared process can know it is the first to issue
+    /// a lockstep request.
+    #[test]
+    fn a_session_counts_its_rounds_from_its_own_first_request() -> std::io::Result<()> {
+        let child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "fs::simulation::tests::a_pair_issued_on_an_earlier_clock_after_a_later_one_is_one_round",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .output()?;
+        assert!(
+            child.status.success(),
+            "the child failed: {}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        Ok(())
+    }
+
     /// In lockstep, two requests known to be independent, issued
     /// together, are one round; two known to be dependent, the second
     /// issued with the first's response in hand, are two. The rounds bound
