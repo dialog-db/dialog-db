@@ -209,6 +209,22 @@ impl Branch {
     }
 }
 
+#[cfg(feature = "helpers")]
+impl Branch {
+    /// A commit of raw index `entries`, written as they are: for a test
+    /// that stands in for a writer this release does not control, such as
+    /// another implementation storing bytes this release would refuse to
+    /// write itself.
+    #[doc(hidden)]
+    pub fn commit_entries(
+        &self,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Commit<'_, futures_util::stream::Empty<Instruction>> {
+        self.commit(futures_util::stream::empty())
+            .with_entries(entries)
+    }
+}
+
 impl<Changes> Commit<'_, Changes>
 where
     Changes: Stream<Item = Instruction> + ConditionalSend,

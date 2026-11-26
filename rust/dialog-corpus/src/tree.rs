@@ -34,6 +34,7 @@ use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_capability::Provider;
+use dialog_capability::identity::Uri;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
@@ -1296,7 +1297,7 @@ fn check_written_entity(entity: &crate::Entity) -> Result<(), DialogCorpusError>
             "an entity holds whitespace or a control character: {uri:?}"
         )));
     }
-    dialog_capability::identity::Uri::check_stored(uri).map_err(|_| {
+    Uri::check_stored(uri).map_err(|_| {
         DialogCorpusError::InvalidEntity(format!("an entity is not a canonical URI: {uri:?}"))
     })
 }
