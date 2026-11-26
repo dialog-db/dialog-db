@@ -3766,6 +3766,101 @@ async fn it_runs_the_notebooks_commands() -> Result<()> {
     Ok(())
 }
 
+/// The three notebook rules written as tonk's YAML writes them, each
+/// leaving out what the rule's other premises already say, as they were
+/// written before: `(old, new)`, each found once in the fixture.
+const NOTEBOOK_REWRITES: [(&str, &str); 3] = [
+    // The insert's `next` is the chain's, which is deduced from it.
+    (
+        "(block/chain ?b next: ?x)\n  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p)\n",
+        "(block/chain ?b next: ?x)\n  (block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)\n",
+    ),
+    // At the tail, as the chain's premise says.
+    (
+        "(block/insert of: ?b notebook: ?n source: ?s next: case:none prev: ?p)",
+        "(block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)",
+    ),
+    // The fields the premise binds, retracted by value rather than each
+    // field's every claim: both are of cardinality one.
+    (
+        "(rule (retract (notebook/block ?b))",
+        "(rule (retract (notebook/block ?b notebook: ?n source: ?s))",
+    ),
+];
+
+/// Every entry of the scratch notebook and every block's own facts, after
+/// each of the notebook's commands: an insert at the tail, an insert
+/// between two blocks, a removal.
+async fn notebook_after_commands(fixture: &str) -> Result<Vec<Vec<String>>> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!("{}\n{fixture}", include_str!("fixtures/core.clj")))
+        .await?;
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.refusal.is_none()),
+        "{diagnostics:?}"
+    );
+    let scratch = "id:notebook/scratch";
+    let mut seen = Vec::new();
+    for command in [
+        format!(
+            r#"(assert (block/insert notebook: {scratch} source: "tail" next: case:none prev: {scratch}/3))"#
+        ),
+        format!(
+            r#"(assert (block/insert notebook: {scratch} source: "middle" next: {scratch}/3 prev: {scratch}/2))"#
+        ),
+        format!(r#"(assert (block/remove subject: {scratch}/2 notebook: {scratch} key: "N5"))"#),
+    ] {
+        notebook.submit(&command).await?;
+        let mut rows = report(
+            &mut notebook,
+            &format!("(select (notebook/blocks {scratch} block: {{?k ?b}}))"),
+        )
+        .await?;
+        rows.extend(
+            report(
+                &mut notebook,
+                &format!("(select (notebook/block ?b notebook: {scratch} source: ?s))"),
+            )
+            .await?,
+        );
+        rows.sort();
+        seen.push(rows);
+    }
+    Ok(seen)
+}
+
+/// The notebook's rules written as tonk's YAML writes them answer what
+/// they answered as they were written before: the same entries and block
+/// facts after every command, so the rewrite changes the rules'
+/// identities and nothing they conclude. The commands do something: the
+/// tail and the middle insert each add a block, and the removal takes
+/// one away.
+#[dialog_common::test]
+async fn it_runs_the_notebook_alike_with_what_the_premises_say_left_out() -> Result<()> {
+    let fixture = include_str!("fixtures/notebook.clj");
+    let mut before = fixture.to_string();
+    for (old, new) in NOTEBOOK_REWRITES {
+        assert_eq!(
+            fixture.matches(new).count(),
+            1,
+            "the fixture writes {new:?}"
+        );
+        assert_eq!(fixture.matches(old).count(), 0, "{old:?} is rewritten");
+        before = before.replace(new, old);
+    }
+    let now = notebook_after_commands(fixture).await?;
+    assert_eq!(notebook_after_commands(&before).await?, now);
+    let counts: Vec<usize> = now.iter().map(Vec::len).collect();
+    assert!(
+        counts[0] > 0 && counts[1] > counts[0] && counts[2] < counts[1],
+        "the commands moved the notebook: {now:#?}"
+    );
+    Ok(())
+}
+
 /// A derived attribute concludes the fields its labels name (gaps row
 /// 48, the maintainer's word, 2026-11-25): a head may write `is:` beside
 /// another label, and a read of both answers both. Its two terms
