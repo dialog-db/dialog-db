@@ -52,6 +52,21 @@ Under the integer lens 2.5 is 2 (F1). Where the constraint is placed on a scan (
 
 The long form says this outright: `(integer of: ?n is: ?m)` binds `?m` to `?n` read through the lens, so 2.5 is 2, -3 is -3, and `"x"` is no match.
 
+## (b2) A cast, at the lossy edge
+
+The maintainer, 2026-11-26, of #895 (one variable through a `natural:` field and a `float:` field stays a compile error): "if there should be way to cast though". The long form is that cast: `(float of: ?q is: ?f)` binds `?f` to `?q` read through the float lens, written where the author means the conversion, so the loss is chosen, not met. What it does at each edge, by the lenses as they are (F1) and #892's float arithmetic:
+
+| cast | of | gives | why |
+|---|---|---|---|
+| `float` | 3 | 3.0 | exact |
+| `float` | 2^53 + 1 | 2^53 as a float | a float holds 53 bits: the nearest float, ties to even, as #892 reads a whole number mixed with a float |
+| `integer` | 2.5 | 2 | the integer lens floors |
+| `integer` | -2.5 | -3 | floors, toward negative infinity, not toward zero |
+| `natural` | -1 | no match | the natural lens drops what is out of its range |
+| `integer` | `"x"` | no match | not a number |
+
+A cast never fails: it rounds, floors or gives no match, as the lens does. An author who wants the cast exact writes the round trip, `(float of: ?q is: ?f) (integer of: ?f is: ?q)`, which matches only where nothing was lost. Not decided: whether a cast that loses precision warns at compile time where the analyzer knows the value, a constant past 2^53 say. Not built.
+
 ## (c) Incompatible
 
 - **Known at compile time:** a compile error. A variable the analyzer has typed text, by a line `as: :text` say, meeting `(integer ?t)` is an inference conflict (`InferenceError::Conflict`), refused when the rule is compiled.

@@ -2072,3 +2072,31 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Learned.** Read in the engine for this entry, at `a79de3d2f` ([gaps](gaps.md) row 58): a durable layer has no upstream of its own, the primary's carry it, so propagation decides per repository, not per layer; and a claim names no writer, so a reader cannot tell a layer's propagated claims from ones written locally. Both are what the decision needs and the engine does not have yet.
 
+
+## 2026-11-26, Designing: four answers of the maintainer's, relayed
+
+**Asked.** The coordinating session relayed four answers; none is built.
+
+1. Of `when`: "I think we either keep `when` or drop it not flip flop around."
+2. Of a top-level write whose read left a rule out (#889's report has an entry): "Write partial and report."
+3. Of optional fields: he does not want `note?:`, "I fear too many `?` would make it really hard to read", and recalls that `note: ??n` was considered and readers were run.
+4. Of #895, one variable through a `natural:` field and a `float:` field staying a compile error: "if there should be way to cast though".
+
+**Learned.**
+
+- **`when`.** 2026-11-13 recorded "By the maintainer: no `when`" for rules. 2026-11-18 then put `when` back for a write at the top level, on the agent's decision, not his. It found no ambiguity in the premises themselves. What it found was that premises after a top-level write had compiled to an installed rule, while the design wanted a write that runs once; `when` was added to tell the two apart. `(rule (assert h) p…)` is the installed write today (tests/apply.rs), so the two are told apart without `when`.
+  Dropping it at the top level is one arm of the walker (`expand.rs`, the top-level write: premises after the head make the run-once rule `once: true`, where `(when …)` around them does today) and a refusal of `(when …)` as a former word. It also needs 21 test uses rewritten (apply.rs 11, notation.rs 7, lines.rs 2, transaction.rs 1) and 2 in `fixtures/notebook.clj`. `when` also stays in `FORMS` (`syntax.rs`), and only as Dialog-DB's descriptor field (`compile.rs`, not a word of the notation). Not read here: what tonk's library uses.
+- **Partial writes.** Decided by the maintainer; recorded in [design-pipeline](design-pipeline.md), What a query left out, item 1.
+- **`??`.** There is a record, on #728's branch and not on main or research-data. Round R08, 2026-11-05, 36 readers (`research/notation/results/r08.md`), tested markers saying "derive me if left out" on a parameter of a write: `(?u ?? {email:})` was left out 6 of 6, as were `(?u = {email:})` and `(= ?u {email:})`. `(?? ?u …)` was left out 4 of 6 and `(or ?u …)` 0 of 6. The journal there decided: "`=` and `??` read best; `or` reads as a choice". That is a defaulted entity, a parameter a write may leave out because its value is derived. It is not an optional field of a read, which is what `maybe:` is in tonk. For that, #728's design records `(option ?x)` in a head read rightly 1 of 6 (R2), and proposes `optional: true` on the line (`design.md`, Open).
+- **The candidates in today's reader** (a probe of `parse` and `check` on a concept head, not kept):
+  - `note: ??n` reads, as a variable named `?n`, a second variable, and is refused as a variable no line binds;
+  - `[note: ?n]` reads as the list `[:note ?n]` and is refused as a second unlabelled part;
+  - `note: [?n]` is accepted today as a list of one value, so it would change meaning silently;
+  - `(optional note: ?n)` is refused as an unlabelled part, and is a wrapper, which documents no longer write;
+  - `note: (optional ?n)` is accepted today and has the shape of an elector, `is: (max ?x)`;
+  - `| note: ?n` and `& note: ?n` read, the separator as a symbol, and are refused as an unlabelled part;
+  - `note: ?n default: ""` is accepted, as a field named `default`;
+  - `note: (?n or: "")` is accepted, and R08 found `or` read as a choice.
+- **Casting.** The long form of a type, `(float of: ?q is: ?f)`, is the explicit cast. What it does at the lossy edge is in [design-type-constraint](design-type-constraint.md), (b2).
+
+**Decided.** By the maintainer: a write whose read left a rule out writes the partial result and reports it. Not decided: `when` at the top level, which the coordinating session puts to him as drop or keep, its recommendation drop; how an optional field is spelled in a concept's head. No reader rounds run.
