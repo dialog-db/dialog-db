@@ -137,6 +137,8 @@ mod pattern_rule_tests;
 ))]
 mod read_amplification;
 #[cfg(test)]
+mod report_tests;
+#[cfg(test)]
 mod stratum_succession_tests;
 #[cfg(test)]
 mod typed_read_tests;
