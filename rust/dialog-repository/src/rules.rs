@@ -622,8 +622,12 @@ struct Bundle {
     /// The rules assembling it left out, reported again by every query
     /// that reuses it: `None` when it left out none, so reusing a set
     /// that left out nothing copies nothing.
-    skipped: Option<Arc<[Entry]>>,
+    skipped: Skipped,
 }
+
+/// The rules an assembled rule set left out: `None` when it left out
+/// none.
+pub(crate) type Skipped = Option<Arc<[Entry]>>;
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
@@ -786,7 +790,7 @@ impl RuleCache {
         &self,
         descriptor: &ConceptDescriptor,
         key: &RuleKey,
-    ) -> Option<(ConceptRules, RuleDemand, Option<Arc<[Entry]>>)> {
+    ) -> Option<(ConceptRules, RuleDemand, Skipped)> {
         let inner = self.inner.read();
         let bundle = inner
             .bundles

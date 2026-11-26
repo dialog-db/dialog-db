@@ -241,7 +241,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use std::pin::Pin;
-    use std::task::{Context, Poll};
+    use std::task::Context;
 
     use futures_util::Stream as _;
     use futures_util::task::noop_waker;
