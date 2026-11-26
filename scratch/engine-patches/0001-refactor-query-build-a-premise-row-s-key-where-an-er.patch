@@ -1,0 +1,179 @@
+From ad9db6b98c06ee37abca4b68400b8eea76b7f726 Mon Sep 17 00:00:00 2001
+From: "R. Daneel Olivaw" <rdaneel@gozala.io>
+Date: Thu, 26 Nov 2026 14:55:38 +0000
+Subject: [PATCH] refactor(query): build a premise row's key where an error can
+ carry it
+
+The entity a row with none is kept under is parsed in realize, as a
+fold's ungrouped entity is, failing as EvaluationError::Store, not by an
+expect in a static. PremiseRow's fields are private, read through
+entity, values and get. No behaviour changes; the supplied tests pin it.
+---
+ CHANGELOG.md                                  |  3 +-
+ rust/dialog-query/src/query/premises.rs       | 42 +++++++++++++++----
+ .../src/repository/branch/supplied_tests.rs   | 22 ++++++----
+ 3 files changed, 49 insertions(+), 18 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cbe6a84f0..254b5273c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -38,7 +38,8 @@ What this changes for you:
+ - New: `dialog_query::query::{PremiseQuery, PremiseRow}`, a query of
+   premises planned as a rule's body is and asked with no rule. It needs
+   no entity: its rows are the values it selects, and the entity a
+-  variable binds only when asked with `.this(variable)`. So
++  variable binds only when asked with `.this(variable)`
++  (`PremiseRow::entity`, `values`, `get`). So
+   `notation/read` of a constant text, alone, answers on a branch holding
+   nothing. A selected variable a row binds to no value is absent from
+   that row.
+diff --git a/rust/dialog-query/src/query/premises.rs b/rust/dialog-query/src/query/premises.rs
+index a5a623340..8f0738655 100644
+--- a/rust/dialog-query/src/query/premises.rs
++++ b/rust/dialog-query/src/query/premises.rs
+@@ -1,7 +1,7 @@
+ //! A query of premises: what a rule's body is, asked with no rule.
+ 
+ use std::collections::BTreeMap;
+-use std::sync::{Arc, LazyLock};
++use std::sync::Arc;
+ 
+ use dialog_corpus::Entity;
+ 
+@@ -20,11 +20,14 @@ use super::Application;
+ /// stands for, as a fold's row with no entity among its groups does.
+ /// What keeps a subscription's rows indexes them by an entity; a premise
+ /// query is never restricted to one, so they all share this one.
++///
++/// It cannot be taken for an entity a user's facts hold: it is never
++/// written, read or joined, only the key of the rows of one query in the
++/// index of that query's own subscription, and the rows of one query
++/// are either all keyed by the entity `this` binds or all by this one.
++/// A row is told from another by its values and its `this` too.
+ const UNKEYED: &str = "premises:";
+ 
+-static UNKEYED_ENTITY: LazyLock<Entity> =
+-    LazyLock::new(|| UNKEYED.parse().expect("a bare scheme is an entity"));
+-
+ /// A query of premises, planned as a rule's body is and asked with no
+ /// rule: each row is the values of the variables it selects, and the
+ /// entity a variable binds when it is asked for one ([`this`](Self::this)).
+@@ -86,18 +89,35 @@ impl PremiseQuery {
+ /// the query asked for one.
+ #[derive(Clone, Debug, PartialEq)]
+ pub struct PremiseRow {
++    this: Option<Entity>,
++    values: BTreeMap<String, Value>,
++    /// What the row is kept under: `this`, or [`UNKEYED`].
++    key: Entity,
++}
++
++impl PremiseRow {
+     /// The entity the query's [`this`](PremiseQuery::this) variable
+     /// bound, when it named one.
+-    pub this: Option<Entity>,
++    pub fn entity(&self) -> Option<&Entity> {
++        self.this.as_ref()
++    }
++
+     /// Each selected variable's value, where the row binds one: a
+     /// variable the row binds to no value, an optional field the entity
+     /// has no claim of, is absent here.
+-    pub values: BTreeMap<String, Value>,
++    pub fn values(&self) -> &BTreeMap<String, Value> {
++        &self.values
++    }
++
++    /// The value of the selected `variable`, where the row binds one.
++    pub fn get(&self, variable: &str) -> Option<&Value> {
++        self.values.get(variable)
++    }
+ }
+ 
+ impl Conclusion for PremiseRow {
+     fn this(&self) -> &Entity {
+-        self.this.as_ref().unwrap_or(&UNKEYED_ENTITY)
++        &self.key
+     }
+ }
+ 
+@@ -140,6 +160,12 @@ impl Application for PremiseQuery {
+             .iter()
+             .filter_map(|variable| Some((variable.clone(), input.value_of(variable)?.clone())))
+             .collect();
+-        Ok(PremiseRow { this, values })
++        let key = match &this {
++            Some(this) => this.clone(),
++            None => UNKEYED
++                .parse()
++                .map_err(|_| EvaluationError::Store("the unkeyed premise entity".into()))?,
++        };
++        Ok(PremiseRow { this, values, key })
+     }
+ }
+diff --git a/rust/dialog-repository/src/repository/branch/supplied_tests.rs b/rust/dialog-repository/src/repository/branch/supplied_tests.rs
+index f20cd7d68..624c9f8aa 100644
+--- a/rust/dialog-repository/src/repository/branch/supplied_tests.rs
++++ b/rust/dialog-repository/src/repository/branch/supplied_tests.rs
+@@ -201,7 +201,7 @@ fn analyze_document(forms: &[&str]) -> Result<Premise, TypeError> {
+ fn outs<'a>(rows: impl IntoIterator<Item = &'a PremiseRow>) -> Vec<(Entity, Value)> {
+     let mut outs: Vec<(Entity, Value)> = rows
+         .into_iter()
+-        .filter_map(|row| Some((row.this.clone()?, row.values.get("out")?.clone())))
++        .filter_map(|row| Some((row.entity()?.clone(), row.get("out")?.clone())))
+         .collect();
+     outs.sort_by(|a, b| {
+         a.0.cmp(&b.0)
+@@ -544,7 +544,7 @@ async fn it_analyzes_a_document_and_says_which_form_each_row_is_about() -> Resul
+         .await?;
+     let said: Vec<(Option<&Value>, Option<&Value>)> = rows
+         .iter()
+-        .map(|row| (row.values.get("at"), row.values.get("out")))
++        .map(|row| (row.get("at"), row.get("out")))
+         .collect();
+     assert_eq!(
+         said,
+@@ -587,7 +587,7 @@ fn read_text(text: &str) -> Result<Premise, TypeError> {
+ fn placed(rows: &[PremiseRow], cell: &str) -> Vec<(Value, Value)> {
+     let mut placed: Vec<(Value, Value)> = rows
+         .iter()
+-        .filter_map(|row| Some((row.values.get("at")?.clone(), row.values.get(cell)?.clone())))
++        .filter_map(|row| Some((row.get("at")?.clone(), row.get(cell)?.clone())))
+         .collect();
+     placed.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+     placed
+@@ -609,7 +609,7 @@ async fn it_reads_a_constant_text_with_nothing_stored() -> Result<()> {
+         .perform(&session)
+         .try_vec()
+         .await?;
+-    assert!(rows.iter().all(|row| row.this.is_none()), "{rows:?}");
++    assert!(rows.iter().all(|row| row.entity().is_none()), "{rows:?}");
+     assert_eq!(
+         placed(&rows, "tree"),
+         vec![
+@@ -688,12 +688,16 @@ async fn it_leaves_a_selected_variable_a_row_does_not_bind_out_of_the_row() -> R
+         .perform(&session)
+         .try_vec()
+         .await?;
++    let answered: Vec<_> = rows
++        .iter()
++        .map(|row| (row.entity(), row.values()))
++        .collect();
+     assert_eq!(
+-        rows,
+-        vec![PremiseRow {
+-            this: Some(a),
+-            values: BTreeMap::from([("text".to_string(), text("hi"))]),
+-        }]
++        answered,
++        vec![(
++            Some(&a),
++            &BTreeMap::from([("text".to_string(), text("hi"))])
++        )]
+     );
+     Ok(())
+ }
+-- 
+2.43.0
+
