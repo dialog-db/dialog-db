@@ -2050,3 +2050,11 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 
 **Decided.** Not decided. What the short form does where no scan binds its variable is the open matrix: filtering by kind or by the type's reading each make compile time and run time disagree on numbers; refusing there, or lowering every short form to the long one, do not. For the maintainer.
 
+## 2026-11-26, Designing: every phase as a query, now
+
+**Asked.** The maintainer: "walkthrough did not actually show how I could use formula to parse source or analyze etc.. I was hoping it would", and an LSP in the notebook that is "not a separate thing but rather leverage regular queries utilizing formulas and resolvers". The `(integer ?t)` note is parked where it is.
+
+**Learned.** From the code ([design-pipeline](design-pipeline.md), Every phase as a query): formulas are a closed enum the notation cannot add to; a formula yields many rows and can be cached; a resolver may read only content-addressed storage, so what reads the definitions in force is a scan, not a resolver; the analyzer still holds definitions in memory, and the driver puts none on the branch.
+
+**Decided.** Not decided. The agent recommends an extension point in dialog-query, a registered formula, in queries only, pure; branch-dependent diagnostics and completions as joins with definitions on the branch, a later step. For the maintainer.
+

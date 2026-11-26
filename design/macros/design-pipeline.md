@@ -88,3 +88,74 @@ Proposed by the agent, not decided: this table; that order is held a node and no
 - A kept form's relations to what it references: needs syntax kept on the branch, which waits on the composite value (#778, #748).
 - The phases behind a formula and a resolver in `dialog-query`, and `(dialog/evaluate (source "…"))`.
 - An application lowered to a query of the definition's concept, in place of the reads it stands for.
+
+## Every phase as a query
+
+**Decision:** how a notebook cell parses a text, gets its diagnostics and gets completions with ordinary `select`s, and what dialog-query needs for that. **For:** the maintainer, 2026-11-26: "I also want us to manifest LSP we talked about through query engine … it would not be a separate thing but rather leverage regular queries utilizing formulas and resolvers to do it." It is his decision of 2026-11-12 (claims: "every phase is available to the query engine"), decided and not built. **Not decided:** the matrix below, for the maintainer.
+
+### What the code is today
+
+Read at `87e56fdc0`; facts unless marked.
+
+- Formulas are a closed set: `define_formulas!` in `dialog-query/src/formula/query.rs` lists every one, and `FormulaQuery` is an enum of them. `dialog-notation` depends on `dialog-query`, so it cannot add one without a change below it.
+- A formula yields any number of rows for one row in: `Formula::compute` returns a `Vec` (`formula.rs`). A diagnostic a row, a completion a row, needs nothing new of the shape.
+- A pure formula may keep its outputs: `#[formula(cached)]` keeps them by its input values in a cache the environment holds (`formula/cache.rs`).
+- A resolver, by its admission rule, selects only from content-addressed storage (`resolver.rs`): what is read from the branch head is a scan, which records demand. So nothing that reads the definitions in force is a resolver; it is a scan, and a formula fed by one.
+- The definitions a document's forms are checked against are held by `Analyzer`, in memory, across the documents it has checked (`expand.rs`). The driver installs compiled rules and keeps no concept, query or macro on the branch (`apply.rs`). The 2026-11-12 blocker, "the analyzer reads definitions from memory, not the branch", holds.
+- The parser and the analyzer (`form.rs`, `syntax.rs`, `written.rs`, `expand.rs`) import nothing from `dialog-query`; the analyzer calls the crate's own `compile` module (`write_refusal`, `DESCRIBED`), which does. Diagnostics are `Diagnostic { severity, message, path, span, refusal }`, a span's column counted in characters (`written.rs`); an editor speaking LSP counts UTF-16 units by default.
+
+### How a cell writes it
+
+Proposed spellings, the agent's; the names are open.
+
+```clj
+; (a) parse: a row a form, its tree a composite value a pattern can read
+(select (cell/form of: ?f at: ?n tree: ?tree)
+  (xyz.cell/source of: cell:1 is: ?src cardinality: :one)
+  (notation/parse text: ?src at: ?n tree: ?tree form: ?f))
+
+; (b) diagnostics: a row a diagnostic
+(select (cell/diagnostic of: cell:1 from-line: ?fl from-column: ?fc
+                         to-line: ?tl to-column: ?tc severity: ?s code: ?k message: ?m)
+  (xyz.cell/source of: cell:1 is: ?src cardinality: :one)
+  (notation/check text: ?src from-line: ?fl from-column: ?fc to-line: ?tl
+                  to-column: ?tc severity: ?s code: ?k message: ?m))
+
+; (c) completions at a place: what the text expects there, from the formula,
+;     and the candidates the branch holds, joined
+(select (cell/completion label: ?l kind: ?k detail: ?d)
+  (xyz.cell/source of: cell:1 is: ?src cardinality: :one)
+  (notation/complete text: ?src line: 3 column: 7 label: ?l kind: ?k detail: ?d))
+```
+
+What each reads. (a) is the text alone. (b) and (c) are the text against the prelude alone, as the formula is pure: refusals of the text as written (names, wrappers, shapes, a read's `...`, a view's markup) and the words of the notation. What a document checks against the branch, the concepts, queries and macros it uses, is not in the text and is not a formula's to read. Where it is needed, an unknown concept's diagnostic or a concept's labels as completions, the formula yields what the text uses at a place (`notation/use`: a name, a kind, a span) and the query joins it with a scan of the definitions on the branch: unknown is `unless` a definition holds; candidates are the definitions that do. That needs the definitions on the branch, which the driver does not write today.
+
+### Approaches
+
+| Decision: how `notation/*` reaches the query engine, for: a notebook cell parses, checks and completes with `select`s |
+|---|---|---|---|---|
+| criterion \ approach | A. Status quo: `check(analyzer, text)` from Rust, beside the queries | B. An extension point: dialog-query evaluates a formula an embedder registers by name, in queries only | C. Below the engine: the parser and the analyzer move into a crate dialog-query depends on, their formulas built in | D. The notation's own driver evaluates `notation/*` premises and lays their rows for the engine, as it lays a write's rule (`TransactionQuery::with_rule`) |
+| a cell asks with a `select`, a view and a subscription alike | 🔴 a separate API | 🟢 a formula like any other; `Live` re-asks it | 🟢 | 🟡 a `select` and a view through the notation's driver; an engine query or subscription that did not come from the notation cannot |
+| a replica or a rule that does not have the notation | | 🟢 a stored rule holding one is refused, so no replica holds a rule it cannot run | 🟢 every replica has them | 🟡 only the notation's driver runs them |
+| what changes in dialog-query | none | 🟡 a `FormulaQuery` variant evaluated through a registry the embedder fills, with each formula's cells known when a query is planned | 🔴 a new crate below the engine, and the analyzer's calls into `compile` cut first | none |
+| sound: rows are a function of the inputs, demand recorded for what is read from the branch | | 🟢 pure formulas; branch reads stay scans in the same query | 🟢 | 🟢 |
+| wasm, and the engine with no notation | | ? a registry filled at start in a browser worker: not tried | 🟢 | 🟢 |
+| cost of a keystroke | each cell's `check` is the caller's | 🟢 the changed cell's formula runs again; the others hit the formula cache | 🟢 the same | 🟡 the driver computes again what it laid, a cell at a time |
+
+Recommendation, the agent's: **B**, queries only, the formulas pure. It is the smallest change that makes `notation/*` an ordinary formula wherever a query runs; C is B with a crate split it does not need; D answers only what comes through the notation's driver, which is not "not a separate thing". The branch-dependent half (definitions on the branch, joined) is a later step either way.
+
+### Rows
+
+Proposed, to be checked against what tonk's plugin consumes (forwarded by the coordinator):
+
+- **diagnostic:** `from-line`, `from-column`, `to-line`, `to-column` (from zero), `severity` (`:error`, `:warning`), `code` (a stable word for the kind, `refused`, `reserved`, `unknown`, ...; today `Error`'s variant), `message`. Columns in characters, as `Span` counts them; if the plugin speaks LSP's default, UTF-16, the formula converts, and the rows say which.
+- **completion:** `label`, `kind` (`:concept`, `:field`, `:form`, `:type`, `:attribute`), `detail` (a concept's head, a form's shape), and the span it replaces.
+- **form:** `at` (its place among the forms), `tree` (the tree, `Syntax::encode`, a composite value), and its span.
+
+### A keystroke
+
+A cell's text is a fact (`xyz.cell/source`) or a constant in the query. A keystroke changes it, so the query is asked again: under a subscription only the row of that cell's text changes, and the formula runs again on that text alone, parse and analysis whole, as `check` does today; there is no incremental parser. Every other cell's text is unchanged, so its formula is a cache hit when the formula is marked cached. What a keystroke costs is one `check` of one cell; how long that is for a cell of tonk's size is not measured (hypothesis: under a frame for a cell of 50 lines, release build, the prelude analyzed once and kept, not per call; `Analyzer::new` analyzes the prelude every time today).
+
+### Not in this step
+
+An HTTP endpoint, the LSP wire protocol, `(dialog/evaluate …)`, the definitions on the branch, and completions (after parse and diagnostics).
