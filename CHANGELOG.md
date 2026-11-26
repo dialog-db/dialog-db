@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule with a comparison runs its body once for all its fields
+
+A concept read through one rule takes each field from one run of the
+rule's body only when the body binds at most one row per entity. A
+comparison (`<`, `<=`, `>`, `>=`) or an equality in the body made the
+engine assume it might bind more, so the body ran once per field of the
+head and the fields joined on the entity. A rule that reads a window of
+a sorted list, such as `segment { number, text }` over `message` with
+`?number >= 150` and `?number < 170`, paid for each field of its head
+once more for every other field. Such a body now runs once.
+
+What this changes for you:
+
+- A body that holds comparisons, and equalities with one side a
+  constant or a variable an earlier premise determined, reads about F x
+  N facts for F fields over N rows, where it read F x F x N. A segment of
+  5 fields over 200 messages reads 1,200 rows where it read 6,000.
+- The rows a query answers do not change.
+- `Subscription::rows_read` is new: the rows the fact scans of a
+  subscription gave to its evaluations so far, to compare across polls.
+
+Why: a comparison only removes rows and an equality with one side known
+adds none, so a body that holds them still binds one row per entity, and
+running it once per field cost the square of what the read needs.
+
 ### A whole number and a float compute as floats
 
 [#892](https://github.com/dialog-db/dialog-db/pull/892)
