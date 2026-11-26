@@ -201,7 +201,7 @@ fn analyze_document(forms: &[&str]) -> Result<Premise, TypeError> {
 fn outs<'a>(rows: impl IntoIterator<Item = &'a PremiseRow>) -> Vec<(Entity, Value)> {
     let mut outs: Vec<(Entity, Value)> = rows
         .into_iter()
-        .filter_map(|row| Some((row.this.clone()?, row.values.get("out")?.clone())))
+        .filter_map(|row| Some((row.entity()?.clone(), row.get("out")?.clone())))
         .collect();
     outs.sort_by(|a, b| {
         a.0.cmp(&b.0)
@@ -544,7 +544,7 @@ async fn it_analyzes_a_document_and_says_which_form_each_row_is_about() -> Resul
         .await?;
     let said: Vec<(Option<&Value>, Option<&Value>)> = rows
         .iter()
-        .map(|row| (row.values.get("at"), row.values.get("out")))
+        .map(|row| (row.get("at"), row.get("out")))
         .collect();
     assert_eq!(
         said,
@@ -587,7 +587,7 @@ fn read_text(text: &str) -> Result<Premise, TypeError> {
 fn placed(rows: &[PremiseRow], cell: &str) -> Vec<(Value, Value)> {
     let mut placed: Vec<(Value, Value)> = rows
         .iter()
-        .filter_map(|row| Some((row.values.get("at")?.clone(), row.values.get(cell)?.clone())))
+        .filter_map(|row| Some((row.get("at")?.clone(), row.get(cell)?.clone())))
         .collect();
     placed.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
     placed
@@ -609,7 +609,7 @@ async fn it_reads_a_constant_text_with_nothing_stored() -> Result<()> {
         .perform(&session)
         .try_vec()
         .await?;
-    assert!(rows.iter().all(|row| row.this.is_none()), "{rows:?}");
+    assert!(rows.iter().all(|row| row.entity().is_none()), "{rows:?}");
     assert_eq!(
         placed(&rows, "tree"),
         vec![
@@ -688,12 +688,16 @@ async fn it_leaves_a_selected_variable_a_row_does_not_bind_out_of_the_row() -> R
         .perform(&session)
         .try_vec()
         .await?;
+    let answered: Vec<_> = rows
+        .iter()
+        .map(|row| (row.entity(), row.values()))
+        .collect();
     assert_eq!(
-        rows,
-        vec![PremiseRow {
-            this: Some(a),
-            values: BTreeMap::from([("text".to_string(), text("hi"))]),
-        }]
+        answered,
+        vec![(
+            Some(&a),
+            &BTreeMap::from([("text".to_string(), text("hi"))])
+        )]
     );
     Ok(())
 }

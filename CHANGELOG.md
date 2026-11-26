@@ -38,7 +38,8 @@ What this changes for you:
 - New: `dialog_query::query::{PremiseQuery, PremiseRow}`, a query of
   premises planned as a rule's body is and asked with no rule. It needs
   no entity: its rows are the values it selects, and the entity a
-  variable binds only when asked with `.this(variable)`. So
+  variable binds only when asked with `.this(variable)`
+  (`PremiseRow::entity`, `values`, `get`). So
   `notation/read` of a constant text, alone, answers on a branch holding
   nothing. A selected variable a row binds to no value is absent from
   that row.

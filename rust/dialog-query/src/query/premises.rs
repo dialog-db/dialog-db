@@ -1,7 +1,7 @@
 //! A query of premises: what a rule's body is, asked with no rule.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use dialog_corpus::Entity;
 
@@ -20,10 +20,13 @@ use super::Application;
 /// stands for, as a fold's row with no entity among its groups does.
 /// What keeps a subscription's rows indexes them by an entity; a premise
 /// query is never restricted to one, so they all share this one.
+///
+/// It cannot be taken for an entity a user's facts hold: it is never
+/// written, read or joined, only the key of the rows of one query in the
+/// index of that query's own subscription, and the rows of one query
+/// are either all keyed by the entity `this` binds or all by this one.
+/// A row is told from another by its values and its `this` too.
 const UNKEYED: &str = "premises:";
-
-static UNKEYED_ENTITY: LazyLock<Entity> =
-    LazyLock::new(|| UNKEYED.parse().expect("a bare scheme is an entity"));
 
 /// A query of premises, planned as a rule's body is and asked with no
 /// rule: each row is the values of the variables it selects, and the
@@ -86,18 +89,35 @@ impl PremiseQuery {
 /// the query asked for one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PremiseRow {
+    this: Option<Entity>,
+    values: BTreeMap<String, Value>,
+    /// What the row is kept under: `this`, or [`UNKEYED`].
+    key: Entity,
+}
+
+impl PremiseRow {
     /// The entity the query's [`this`](PremiseQuery::this) variable
     /// bound, when it named one.
-    pub this: Option<Entity>,
+    pub fn entity(&self) -> Option<&Entity> {
+        self.this.as_ref()
+    }
+
     /// Each selected variable's value, where the row binds one: a
     /// variable the row binds to no value, an optional field the entity
     /// has no claim of, is absent here.
-    pub values: BTreeMap<String, Value>,
+    pub fn values(&self) -> &BTreeMap<String, Value> {
+        &self.values
+    }
+
+    /// The value of the selected `variable`, where the row binds one.
+    pub fn get(&self, variable: &str) -> Option<&Value> {
+        self.values.get(variable)
+    }
 }
 
 impl Conclusion for PremiseRow {
     fn this(&self) -> &Entity {
-        self.this.as_ref().unwrap_or(&UNKEYED_ENTITY)
+        &self.key
     }
 }
 
@@ -140,6 +160,12 @@ impl Application for PremiseQuery {
             .iter()
             .filter_map(|variable| Some((variable.clone(), input.value_of(variable)?.clone())))
             .collect();
-        Ok(PremiseRow { this, values })
+        let key = match &this {
+            Some(this) => this.clone(),
+            None => UNKEYED
+                .parse()
+                .map_err(|_| EvaluationError::Store("the unkeyed premise entity".into()))?,
+        };
+        Ok(PremiseRow { this, values, key })
     }
 }
