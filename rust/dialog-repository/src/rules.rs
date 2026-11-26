@@ -631,10 +631,14 @@ struct Bundle {
 pub(crate) type Skipped = Option<Arc<[Entry]>>;
 
 /// Where a rule body sits in a rule cache: the entity it is stored under
-/// and the hash of its bytes. It hashes as a prefix of the body's hash,
-/// which is uniform already, rather than as the entity's whole name and
-/// all of the hash: a cache probes once per read of a body, and a commit
-/// once per body it writes. Two keys are equal only when both halves are.
+/// and the hash of its bytes. A cache probes once per read of a body, and
+/// a commit once per body it writes, so the key hashes as little as keeps
+/// it apart: the entity's name once (its derived hash also covers the
+/// key bytes the name determines) and a prefix of the body's hash, which
+/// is uniform already. The entity is hashed in full, by the cache's keyed
+/// hasher: a refused body is remembered under every entity a writer
+/// stores it under, and those entries must not share a bucket. Two keys
+/// are equal only when both halves are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BodyKey(Entity, Blake3Hash);
 
@@ -646,6 +650,7 @@ impl BodyKey {
 
 impl Hash for BodyKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(self.0.as_str().as_bytes());
         let digest = self.1.as_bytes();
         let mut prefix = [0u8; 8];
         prefix.copy_from_slice(&digest[..8]);
@@ -1081,5 +1086,29 @@ mod tests {
             analysis.is_recursive(&node),
             "the step rule's self-reference makes the concept recursive"
         );
+    }
+
+    /// A body a writer stores under many entities is refused under each,
+    /// and each refusal is remembered under its own key. Those keys hash
+    /// apart, so the entries do not share a bucket, however many there
+    /// are: the hash covers the entity, not the body alone.
+    #[test]
+    fn it_keeps_one_body_under_many_entities_in_buckets_of_their_own() {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+
+        let cache = RuleCache::default();
+        let bytes = [0xff, 0x00];
+        let hasher = BuildHasherDefault::<DefaultHasher>::default();
+        let mut hashes = BTreeSet::new();
+        for index in 0..256 {
+            let entity: Entity = format!("rule:forged-{index}").parse().expect("an entity");
+            assert!(cache.judged(&entity, &bytes).is_err());
+            assert!(
+                cache.failure(&entity, &bytes).is_some(),
+                "a refused verdict is remembered under its entity"
+            );
+            hashes.insert(hasher.hash_one(BodyKey::of(&entity, &bytes)));
+        }
+        assert_eq!(hashes.len(), 256, "every entity's key hashes apart");
     }
 }
