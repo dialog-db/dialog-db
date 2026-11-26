@@ -69,7 +69,7 @@ struct Envelope<'a, T> {
 }
 
 #[derive(Deserialize)]
-struct Stamped<T> {
+struct Enveloped<T> {
     rule: T,
 }
 
@@ -80,36 +80,46 @@ struct StampField {
     format: Option<u64>,
 }
 
-/// The stamp of a stored body, read once: whether the bytes are a
-/// dag-cbor map, and the format it names if it names one. Reading it
-/// skips the whole rule, which dag-cbor orders before the `format` key,
-/// so a reader that needs it more than once reads it here and passes it
-/// on.
+/// A stored body with its stamp, read once: whether the bytes are a
+/// dag-cbor map, and the format it names if it names one. Reading the
+/// stamp skips the whole rule, which dag-cbor orders before the `format`
+/// key, so a reader that needs it more than once reads it here and
+/// passes this on. The stamp is held with the bytes it was read from, so
+/// no reader can check one body by another's format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stamp(Option<Option<u64>>);
+pub struct Stamp<'a> {
+    bytes: &'a [u8],
+    format: Option<Option<u64>>,
+}
 
-impl Stamp {
-    /// The stamp `bytes` carry.
-    pub fn of(bytes: &[u8]) -> Self {
-        Self(
-            serde_ipld_dagcbor::from_slice::<StampField>(bytes)
+impl<'a> Stamp<'a> {
+    /// `bytes` with the stamp they carry.
+    pub fn of(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            format: serde_ipld_dagcbor::from_slice::<StampField>(bytes)
                 .ok()
                 .map(|stamp| stamp.format),
-        )
+        }
+    }
+
+    /// The bytes the stamp was read from.
+    pub fn bytes(self) -> &'a [u8] {
+        self.bytes
     }
 
     /// The format the body names, `0` for the bare descriptor the
     /// release before formats wrote, or `None` when the bytes are no
     /// dag-cbor map.
     pub fn format(self) -> Option<u64> {
-        self.0.map(|format| format.unwrap_or(0))
+        self.format.map(|format| format.unwrap_or(0))
     }
 
     /// The format the body's envelope names: `None` for a bare
     /// descriptor and for bytes that are no dag-cbor map, which decode
     /// as a bare descriptor or not at all.
     fn enveloped(self) -> Option<u64> {
-        self.0.flatten()
+        self.format.flatten()
     }
 }
 
@@ -146,7 +156,7 @@ pub(crate) fn encode_as<T: Serialize>(format: u64, rule: &T) -> Option<Vec<u8>> 
 /// format 5 writes one. `held` names the pattern the rule holds, and is
 /// asked only of a body in an earlier format.
 pub(crate) fn check_pattern(
-    stamp: Stamp,
+    stamp: Stamp<'_>,
     held: impl FnOnce() -> Option<String>,
 ) -> Result<(), String> {
     match stamp.format() {
@@ -186,11 +196,12 @@ impl Error for BodyError {}
 /// The descriptor a stored body holds, in [`FORMAT`] or any earlier.
 #[cfg(test)]
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    decode_stamped(bytes, Stamp::of(bytes))
+    decode_stamped(Stamp::of(bytes))
 }
 
 /// [`decode`] of a body whose stamp is read.
-pub(crate) fn decode_stamped<T: DeserializeOwned>(bytes: &[u8], stamp: Stamp) -> Result<T, String> {
+pub(crate) fn decode_stamped<T: DeserializeOwned>(stamp: Stamp<'_>) -> Result<T, String> {
+    let bytes = stamp.bytes();
     match stamp.enveloped() {
         None => serde_ipld_dagcbor::from_slice::<T>(bytes),
         Some(format) if format > FORMAT => {
@@ -198,7 +209,7 @@ pub(crate) fn decode_stamped<T: DeserializeOwned>(bytes: &[u8], stamp: Stamp) ->
                 "the rule body is in format {format}, and this release reads up to {FORMAT}"
             ));
         }
-        Some(_) => serde_ipld_dagcbor::from_slice::<Stamped<T>>(bytes).map(|body| body.rule),
+        Some(_) => serde_ipld_dagcbor::from_slice::<Enveloped<T>>(bytes).map(|body| body.rule),
     }
     .map_err(|error| format!("dag-cbor decode failed: {error}"))
 }

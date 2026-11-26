@@ -154,11 +154,11 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
     if let Some(format) = format.filter(|format| *format > FORMAT) {
         return Err(RuleError::Newer { format });
     }
-    let deductive = match hydrate_deductive(bytes, stamp) {
+    let deductive = match hydrate_deductive(stamp) {
         Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Deductive(rule)),
         other => other,
     };
-    let inductive = match InductiveRule::read_stamped(bytes, stamp) {
+    let inductive = match InductiveRule::read_stamped(stamp) {
         Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Inductive(rule)),
         other => other,
     };
@@ -177,8 +177,8 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
 /// The deductive rule `bytes` hold, in the `hydrate_rule` span: one per
 /// body decoded as a deductive rule, which the cost matrix counts.
 #[tracing::instrument(skip_all, name = "hydrate_rule")]
-fn hydrate_deductive(bytes: &[u8], stamp: Stamp) -> Result<DeductiveRule, BodyError> {
-    DeductiveRule::read_stamped(bytes, stamp)
+fn hydrate_deductive(stamp: Stamp<'_>) -> Result<DeductiveRule, BodyError> {
+    DeductiveRule::read_stamped(stamp)
 }
 
 #[cfg(test)]

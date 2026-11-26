@@ -217,14 +217,14 @@ impl InductiveRule {
     /// [`decode`](Self::decode), saying which way it failed: the bytes
     /// decode to no descriptor, or the descriptor does not compile.
     pub fn read(bytes: &[u8]) -> Result<Self, body::BodyError> {
-        Self::read_stamped(bytes, body::Stamp::of(bytes))
+        Self::read_stamped(body::Stamp::of(bytes))
     }
 
     /// [`read`](Self::read) of a body whose [`Stamp`](body::Stamp) the
-    /// caller has read.
-    pub fn read_stamped(bytes: &[u8], stamp: body::Stamp) -> Result<Self, body::BodyError> {
+    /// caller has read, which holds the bytes it was read from.
+    pub fn read_stamped(stamp: body::Stamp<'_>) -> Result<Self, body::BodyError> {
         let descriptor: InductiveRuleDescriptor =
-            body::decode_stamped(bytes, stamp).map_err(body::BodyError::Undecodable)?;
+            body::decode_stamped(stamp).map_err(body::BodyError::Undecodable)?;
         let rule = descriptor
             .compile()
             .map_err(|error| body::BodyError::IllTyped(error.to_string()))?;
