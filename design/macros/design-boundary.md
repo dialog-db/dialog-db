@@ -36,7 +36,7 @@ The analyzer stays synchronous. `Resolve` is asked once per document, before ana
 ## What needs an engine change
 
 1. **A subscription that takes its rule.** `Stack::subscribe(query)` and `Stack::fold_subscription(groups, inputs)` take no rule. `Read` has one (`QueryLayer::with`), and `Watch` needs the same. With it, `Live`'s overlay lease goes: the `HOLDERS` and `LAYING` statics (`live.rs:161`, `170`), the `dialog.n.live/*` facts and about 245 lines. This is what the audit found, and it is the one change everything waits on.
-2. **Rules held in `session:`.** The decided naming puts a rule defined `in: :session` in the session layer. The stack routes every write under `dialog.` to the primary whatever layer is selected (`stack.rs:683-685`), and I found no read of rules from another layer. Open: whether a rule stored as facts in `session:` is evaluated at all. If not, either the engine assembles a stack's rules from every layer it reads, or a session definition is resolved from `session:` and its rule laid per read (change 1 again).
+2. **Rules held in `session:`: no change needed** (the rules session, from the engine's code, 2026-11-26). A rule statement placed `.at(session_layer())` lands its own `dialog.rule/*` facts in `session:`. Only a stack's *selection* skips `dialog.` writes (`batch.rs:1239-1253`, `placement.rs:191-192`). A stack's rule set takes rules held only in `session:` or a declared memory layer (`resolve_rules`, `session.rs:2533-2543`; `Stack::query`, `stack.rs:796-809`), and `session:` never syncs (`stack/sync.rs:117-172`). So a definition is placed by `.at(layer)` on the statement that writes it, not by a descriptor's `in`, which places a rule's *head cells*. Today the notation has no spelling for the first. `in: :session` on a line (c00bd87f3) is the second: a rule whose head line says it concludes into `session:`, while the rule itself is written to the primary. A definition's layer is the driver's argument, or a `Stage` that places what it writes (`definitions-plan.md`, (2)), never `in:`.
 3. **Not needed to move:** a query that nests (#837). Without it, the evaluator keeps nesting (below).
 
 ## The order, each step building with its tests green
@@ -45,12 +45,12 @@ The analyzer stays synchronous. `Resolve` is asked once per document, before ana
 2. **`answer` and `rows` take `Read`.** Tests pass a `Branch` unchanged. A new test on a stack: a document that writes `in: :session` then selects it answers its own write (it cannot today).
 3. **`Live` takes `Read + Watch`.** The overlay code moves from `live.rs` into the `Branch` and `Stack` implementations of `Watch`, and `Live` names no `Branch`. `tests/live.rs` and `tests/view.rs` run on both implementations.
 4. **Definitions written as facts** (`definitions-plan.md`, commits a to d). `Resolve` over `Read` gives the snapshot, and `Analyzer::open` builds one. `tests/model.rs`: an analyzer opened from the facts gives the same `Checked` as the in-memory one on every document it runs.
-5. **`session:` definitions** (plan commit e), once engine change 2 is answered. Tests: a bare name defined in both resolves to the session's; one in the primary alone resolves to it.
+5. **`session:` definitions** (plan commit e): the driver places a definition's statements `.at(session_layer())` when asked to. Tests: a bare name defined in both resolves to the session's; one in the primary alone resolves to it.
 6. **Engine change 1 lands.** Each `Watch` implementation drops its lease and passes the rule. The statics and `dialog.n.live/*` go. Every earlier test stands.
 7. **`select` hands what it can to folds** (below). The standing-select tests gain a counter of how often an answer is rebuilt whole.
 8. **The `repository` feature holds the implementations alone.** `Branch` is named only there and in tests.
 
-Steps 1 to 3 need nothing from the engine and nothing from the maintainer. Step 4 needs the plan's open questions answered: who owns `db.*`, and what is written for `pick`. Step 5 needs change 2.
+Steps 1 to 3 need nothing from the engine and nothing from the maintainer. Step 4 needs the plan's open questions answered: who owns `db.*`, and what is written for `pick`. Step 5 needs the spelling of "define this in the session" decided, and it is not `in:`.
 
 ## What `select`'s evaluator keeps
 
