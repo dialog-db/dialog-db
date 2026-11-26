@@ -1283,3 +1283,74 @@ async fn it_fires_a_stored_rule_that_holds_a_composite_constant_on_a_filesystem_
     let (session, peer) = filesystem_session_with_peer(root.path()).await?;
     composite_scenario(&session, &peer).await
 }
+
+/// `rule`, a canonical descriptor, stamped with `format` as a release
+/// that wrote that format enveloped it, or bare when `format` is `None`.
+fn stamped<T: serde::Serialize>(format: Option<u64>, rule: &T) -> Result<Vec<u8>> {
+    #[derive(serde::Serialize)]
+    struct Envelope<'a, T> {
+        format: u64,
+        rule: &'a T,
+    }
+    Ok(match format {
+        Some(format) => serde_ipld_dagcbor::to_vec(&Envelope { format, rule })?,
+        None => serde_ipld_dagcbor::to_vec(rule)?,
+    })
+}
+
+/// A body that holds a pattern under a format below 5 is no body a
+/// release wrote, deductive or inductive, and is judged no rule. Under
+/// format 4 each reader refuses it, and the judgement names the other
+/// reader's refusal: the deductive body's is the inductive reading's
+/// missing head, the inductive body's the deductive reading's missing
+/// `deduce`. Under an older format, or bare, it is judged older, for
+/// `upgrade_rules` to read. The same rule under format 5 is judged the
+/// rule it is. Pinned as it stands so that reading each body's format
+/// once changes none of it.
+#[dialog_common::test]
+fn a_pattern_under_an_earlier_format_is_judged_by_that_format() -> Result<()> {
+    use crate::rules::error::{Hydrated, RuleError, judge};
+    let deductive = deductive()?;
+    let inductive = inductive()?;
+
+    let four = stamped(Some(4), &deductive.canonical_descriptor())?;
+    let judged = judge(&deductive.this(), &four);
+    assert!(
+        matches!(&judged, Err(RuleError::IllTyped { reason }) if reason.contains("must have an `assert!` or `retract!` head")),
+        "{judged:?}"
+    );
+    let four = stamped(Some(4), &inductive.canonical_descriptor())?;
+    let judged = judge(&inductive.this(), &four);
+    assert!(
+        matches!(&judged, Err(RuleError::Undecodable { reason }) if reason.contains("missing field `deduce`")),
+        "{judged:?}"
+    );
+
+    for this in [deductive.this(), inductive.this()] {
+        let descriptor = |format| -> Result<Vec<u8>> {
+            if this == deductive.this() {
+                stamped(format, &deductive.canonical_descriptor())
+            } else {
+                stamped(format, &inductive.canonical_descriptor())
+            }
+        };
+        let judged = judge(&this, &descriptor(Some(3))?);
+        assert!(
+            matches!(judged, Err(RuleError::Older { format: 3 })),
+            "{judged:?}"
+        );
+        let judged = judge(&this, &descriptor(None)?);
+        assert!(
+            matches!(judged, Err(RuleError::Older { format: 0 })),
+            "{judged:?}"
+        );
+        assert!(
+            matches!(
+                judge(&this, &descriptor(Some(5))?),
+                Ok(Hydrated::Deductive(_) | Hydrated::Inductive(_))
+            ),
+            "format 5 holds a pattern"
+        );
+    }
+    Ok(())
+}
