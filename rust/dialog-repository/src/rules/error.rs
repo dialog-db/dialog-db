@@ -16,7 +16,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::LazyLock;
 
-use dialog_corpus::{Change, Entity, Relation, Selector, Value};
+use dialog_corpus::{Change, Changes, Entity, Relation, Selector, Value};
 use dialog_query::rule::body::{BodyError, FORMAT, Stamp, TERMS_FORMAT};
 use dialog_query::session::Quarantine;
 use dialog_query::{DeductiveRule, InductiveRule};
@@ -190,8 +190,7 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
 pub(crate) fn refuse_invalid_rules(written: &Staged, cache: &RuleCache) -> Result<(), CommitError> {
     // A commit that writes no rule body pays for a look and nothing
     // more: no selector, no scan, no list.
-    static SOURCE: LazyLock<Relation> = LazyLock::new(source_attr);
-    let source = &*SOURCE;
+    let source = source();
     let primary = if written.holds_attribute(source) {
         written.scan(&Selector::new().the(source.clone()))
     } else {
@@ -206,17 +205,54 @@ pub(crate) fn refuse_invalid_rules(written: &Staged, cache: &RuleCache) -> Resul
         })
     });
     for (rule, body) in primary.chain(shares.collect::<Vec<_>>()) {
-        let judged = match &body {
-            Value::Bytes(bytes) => cache.judged(&rule, bytes).err(),
-            other => Some(RuleError::Undecodable {
-                reason: format!("the body is {other:?}, not bytes"),
-            }),
-        };
-        if let Some(reason) = judged {
-            return Err(CommitError::InvalidRule { rule, reason });
+        refuse_body(rule, &body, cache)?;
+    }
+    Ok(())
+}
+
+/// [`refuse_invalid_rules`] over writes a commit derived rather than
+/// staged: what the rules it fires write, round by round. An inductive
+/// rule whose head writes `dialog.rule/source` would otherwise plant a
+/// body that is no rule through a transaction that stages only innocent
+/// facts. A round that writes no rule body is walked once and builds
+/// nothing.
+pub(crate) fn refuse_derived_invalid_rules(
+    derived: &Changes,
+    cache: &RuleCache,
+) -> Result<(), CommitError> {
+    let source = source();
+    let primary = derived.iter().map(|(of, the, change)| (of, the, change));
+    let layered = derived
+        .iter_in()
+        .map(|(_, of, the, change)| (of, the, change));
+    for (of, the, change) in primary.chain(layered) {
+        if let Change::Assert(is, _) = change
+            && the == source
+        {
+            refuse_body(of.clone(), is, cache)?;
         }
     }
     Ok(())
+}
+
+/// The relation a rule body is stored under, built once.
+fn source() -> &'static Relation {
+    static SOURCE: LazyLock<Relation> = LazyLock::new(source_attr);
+    &SOURCE
+}
+
+/// Refuse `body` written under `rule` unless it is a rule there.
+fn refuse_body(rule: Entity, body: &Value, cache: &RuleCache) -> Result<(), CommitError> {
+    let judged = match body {
+        Value::Bytes(bytes) => cache.judged(&rule, bytes).err(),
+        other => Some(RuleError::Undecodable {
+            reason: format!("the body is {other:?}, not bytes"),
+        }),
+    };
+    match judged {
+        Some(reason) => Err(CommitError::InvalidRule { rule, reason }),
+        None => Ok(()),
+    }
 }
 
 /// The deductive rule `bytes` hold, in the `hydrate_rule` span: one per

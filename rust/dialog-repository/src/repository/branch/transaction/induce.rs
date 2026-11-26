@@ -98,6 +98,7 @@ use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::error::Hydrated;
+use crate::rules::error::refuse_derived_invalid_rules;
 use crate::rules::{TriggerFootprint, on_attr, reads_attr, source_attr, transient_attr};
 use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
@@ -161,6 +162,8 @@ where
         + ConditionalSync
         + 'static,
 {
+    // The line's rule cache, which judges what the rounds derive.
+    let rule_cache = view.rule_cache();
     // A write into the loopback is a dispatch: it is this tick's
     // stimulus, read as a row of `control:`, and lands nowhere.
     let dispatched = take_dispatched(&mut transients);
@@ -448,6 +451,9 @@ where
         // The round's writes into layers are its tick: kept apart, so
         // each layer takes them as one instant, and folded into
         // `changes` too, so the next round's view reads them.
+        // What the round derived is judged as staged writes are: a rule
+        // head under `dialog.rule/source` writes a body like any other.
+        refuse_derived_invalid_rules(&novelty, &rule_cache)?;
         stimulus = layered_instructions(&novelty);
         stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
