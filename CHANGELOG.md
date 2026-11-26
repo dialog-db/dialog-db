@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A write refuses an entity this dialog would not read back
 
+[#890](https://github.com/dialog-db/dialog-db/pull/890)
+
 Every way of building an `Entity` checks that it is a URI in its
 canonical rendering, save `Uri::stored_unchecked`, which adopts a string
 as it is. An entity built through it as `Ref:qq` (whose canonical

@@ -213,10 +213,12 @@ impl Branch {
 
 #[cfg(feature = "helpers")]
 impl Branch {
-    /// A commit of raw index `entries`, written as they are: for a test
-    /// that stands in for a writer this release does not control, such as
+    /// A commit of raw index `entries`, written as they are, past every
+    /// check a write makes (an entity this dialog would not read back
+    /// included). It exists to imitate a foreign writer in tests, such as
     /// another implementation storing bytes this release would refuse to
-    /// write itself.
+    /// write itself, and grants nothing a pull from such a peer does not.
+    /// An embedder must not call it.
     #[doc(hidden)]
     pub fn commit_entries(
         &self,
