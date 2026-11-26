@@ -60,6 +60,10 @@ impl Extension for Shout {
         &SHOUT
     }
 
+    fn outputs(&self) -> &'static [&'static str] {
+        &["is"]
+    }
+
     fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
         let of: String = bindings.read("of")?;
         Ok(vec![vec![(
@@ -95,12 +99,49 @@ impl Extension for Words {
         &WORDS
     }
 
+    fn outputs(&self) -> &'static [&'static str] {
+        &["word"]
+    }
+
     fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
         let of: String = bindings.read("of")?;
         Ok(of
             .split_whitespace()
             .map(|word| vec![("word", Value::String(word.into()))])
             .collect())
+    }
+}
+
+/// `test/broken`: `test/shout`'s cells, and a row that breaks them as
+/// it is told to: a number for the text `is`, a value for a cell it does
+/// not declare, or no value for `is` at all.
+#[derive(Debug)]
+enum Broken {
+    Mistyped,
+    Undeclared,
+    Missing,
+}
+
+impl Extension for Broken {
+    fn name(&self) -> &'static str {
+        "test/broken"
+    }
+
+    fn cells(&self) -> &'static Cells {
+        &SHOUT
+    }
+
+    fn outputs(&self) -> &'static [&'static str] {
+        &["is"]
+    }
+
+    fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
+        let of: String = bindings.read("of")?;
+        Ok(vec![match self {
+            Broken::Mistyped => vec![("is", Value::UnsignedInt(3))],
+            Broken::Undeclared => vec![("is", Value::String(of)), ("of", text("other"))],
+            Broken::Missing => vec![],
+        }])
     }
 }
 
@@ -410,5 +451,69 @@ async fn it_keeps_a_premise_query_subscription_current() -> Result<()> {
     assert_eq!(outs(&moved.retracted), vec![(a.clone(), text("HI!"))]);
     let held: BTreeMap<Entity, Value> = outs(subscription.results()).into_iter().collect();
     assert_eq!(held, BTreeMap::from([(a, text("HELLO!"))]));
+    Ok(())
+}
+
+/// What a premise query asking `broken` over one text answers.
+async fn broken_answer(broken: Broken) -> Result<Result<Vec<PremiseRow>, EvaluationError>> {
+    let (session, peer) = test_session_with_peer().await;
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    write(&branch, &session, &"id:a".parse()?, "hi").await?;
+    let held = Extensions::new().with(broken);
+    let query = PremiseQuery::new(
+        vec![
+            texts(),
+            Premise::Assert(Proposition::Formula(applied(&held, "test/broken", "is")?)),
+        ],
+        "this",
+        ["out"],
+    )?;
+    Ok(branch
+        .query()
+        .select(query)
+        .perform(&session)
+        .try_vec()
+        .await)
+}
+
+/// An extension whose row gives a cell a value of another type than the
+/// cell declares fails the query, naming the extension and the cell,
+/// and never answers the value.
+#[dialog_common::test]
+async fn it_fails_a_query_an_extension_mistypes_an_output_in() -> Result<()> {
+    let answered = broken_answer(Broken::Mistyped).await?;
+    assert!(
+        matches!(&answered, Err(EvaluationError::MistypedOutput { formula, cell, .. })
+            if formula == "test/broken" && cell == "is"),
+        "{answered:?}"
+    );
+    Ok(())
+}
+
+/// An extension whose row gives a value for a cell it does not declare
+/// as an output fails the query, naming the extension and the cell.
+#[dialog_common::test]
+async fn it_fails_a_query_an_extension_writes_an_undeclared_cell_in() -> Result<()> {
+    let answered = broken_answer(Broken::Undeclared).await?;
+    assert!(
+        matches!(&answered, Err(EvaluationError::UndeclaredOutput { formula, cell })
+            if formula == "test/broken" && cell == "of"),
+        "{answered:?}"
+    );
+    Ok(())
+}
+
+/// An extension whose row leaves out an output it declares fails the
+/// query, naming the extension and the cell, and is never read as a row
+/// that did not match.
+#[dialog_common::test]
+async fn it_fails_a_query_an_extension_leaves_an_output_out_of() -> Result<()> {
+    let answered = broken_answer(Broken::Missing).await?;
+    assert!(
+        matches!(&answered, Err(EvaluationError::MissingOutput { formula, cell })
+            if formula == "test/broken" && cell == "is"),
+        "{answered:?}"
+    );
     Ok(())
 }

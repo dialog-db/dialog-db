@@ -48,6 +48,10 @@ pub trait Extension: fmt::Debug + Send + Sync {
     /// Its cells, inputs and outputs, as a derived formula's.
     fn cells(&self) -> &'static Cells;
 
+    /// The cells it gives a value for in every row it computes. Every
+    /// other cell is an input.
+    fn outputs(&self) -> &'static [&'static str];
+
     /// What one row in costs, for planning.
     fn cost(&self) -> usize {
         PARAM_COST * self.cells().count()
@@ -55,7 +59,11 @@ pub trait Extension: fmt::Debug + Send + Sync {
 
     /// The rows for the input `bindings` holds: read each input cell
     /// with [`Bindings::read`], and give each output row as the values
-    /// of its output cells. The same inputs give the same rows.
+    /// of its output cells, each once, each of the type its cell
+    /// declares. The same inputs give the same rows. A row that names a
+    /// cell outside [`outputs`](Self::outputs), leaves one out, or gives
+    /// one a value its type does not admit is the extension's fault, and
+    /// fails the query naming the extension and the cell.
     fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError>;
 }
 

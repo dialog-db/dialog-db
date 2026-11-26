@@ -722,6 +722,44 @@ pub enum EvaluationError {
         parameter: String,
     },
 
+    /// A formula an embedder supplies gave a value for a cell it does not
+    /// declare as an output: a fault in the embedder's code.
+    #[error(
+        "The formula \"{formula}\" gave a value for \"{cell}\", which it does not declare as an output"
+    )]
+    UndeclaredOutput {
+        /// The extension's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+    },
+
+    /// A formula an embedder supplies gave a value its own cell's type
+    /// does not admit: a fault in the embedder's code.
+    #[error(
+        "The formula \"{formula}\" gave {actual:?} for \"{cell}\", which it declares as {expected}"
+    )]
+    MistypedOutput {
+        /// The extension's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+        /// The type the cell declares.
+        expected: Box<crate::type_system::Type>,
+        /// The value's own type.
+        actual: crate::corpus::Type,
+    },
+
+    /// A formula an embedder supplies gave a row without a value for one
+    /// of the outputs it declares: a fault in the embedder's code.
+    #[error("The formula \"{formula}\" gave a row with no value for its output \"{cell}\"")]
+    MissingOutput {
+        /// The extension's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+    },
+
     /// A selector matched no facts.
     #[error("Empty selector: {message}")]
     EmptySelector {
