@@ -44,6 +44,40 @@ What this changes for you:
 
 Why: a rule's entity should be one per rule, not one per writer's
 habit of naming what it does not read.
+### A whole number and a float compute as floats
+
+[#892](https://github.com/dialog-db/dialog-db/pull/892)
+
+A formula over a whole number and a float (`math/sum`, `math/difference`,
+`math/product`, `math/quotient`, `math/modulo`) gave no row, with no
+error, and a fold's `sum` over whole numbers and floats in one group
+failed. A read of the number band yields each number as its narrowest
+type, so a rule that compiled met this on the data alone: `3 + 2.5` over
+an untyped or a `number:` read derived nothing. Such a pair now computes
+as floats, each whole number read as the float nearest it, and a `sum`
+over a group mixing them sums as floats. Two whole numbers compute as
+before, a natural and an integer as the integer they make.
+
+What this changes for you:
+
+- `3 + 2.5` is `5.5`, `-5 + 2.5` is `-2.5`, `3 * 2.5` is `7.5`, where
+  each was no row. A field that reads the result through a narrower type
+  reads it as a stored float is read: `natural:` floors `5.5` to `5`.
+- A whole number past `2^53` mixed with a float loses what a float
+  cannot hold: `2^53 + 1` plus `0.5` is `2^53` as a float.
+- `sum` over a group holding whole numbers and floats is the float sum.
+  It failed with "mixed integer and float inputs". The whole numbers sum
+  exactly first and their total meets the floats once: `2^53 + 1`,
+  `-(2^53)` and `0.5` sum to `1.5`. Whole numbers whose total overflows
+  fail the group, as they do without a float.
+- A rule whose two operands are declared of two number types
+  (`natural:` and `float:`) is still refused when it compiles.
+
+Why: a rule that passes analysis must not drop a row because of the type
+a number happened to be read as; computing at the wider precision and
+letting a narrower reader truncate the result is what a stored float
+already gets.
+
 ### A query reports the rules it left out, as it runs
 
 [#889](https://github.com/dialog-db/dialog-db/pull/889)
@@ -1729,6 +1763,12 @@ and names the rule.
   this change reads what this one writes: the body spells the variable
   as a blank, which both releases hash alike. 0.5.0 reads neither
   format. Run `Branch::upgrade_rules`.
+- A whole number and a float compute as floats: nothing stored or
+  synced changes, no identity moves and nothing is rewritten. A stored
+  rule keeps its identity and now derives the rows its formula dropped;
+  an older release still drops them, so a mixed fleet differs in what
+  such a rule derives until every replica upgrades.
+
 - A query's report: nothing stored or synced changes. An embedder runs
   nothing.
 - One number held as two types groups, counts and joins as one: nothing
