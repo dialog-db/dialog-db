@@ -75,18 +75,49 @@ struct Stamped<T> {
 
 /// Only the stamp of a body: every other key is skipped.
 #[derive(Deserialize)]
-struct Stamp {
+struct StampField {
     #[serde(default)]
     format: Option<u64>,
+}
+
+/// The stamp of a stored body, read once: whether the bytes are a
+/// dag-cbor map, and the format it names if it names one. Reading it
+/// skips the whole rule, which dag-cbor orders before the `format` key,
+/// so a reader that needs it more than once reads it here and passes it
+/// on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp(Option<Option<u64>>);
+
+impl Stamp {
+    /// The stamp `bytes` carry.
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(
+            serde_ipld_dagcbor::from_slice::<StampField>(bytes)
+                .ok()
+                .map(|stamp| stamp.format),
+        )
+    }
+
+    /// The format the body names, `0` for the bare descriptor the
+    /// release before formats wrote, or `None` when the bytes are no
+    /// dag-cbor map.
+    pub fn format(self) -> Option<u64> {
+        self.0.map(|format| format.unwrap_or(0))
+    }
+
+    /// The format the body's envelope names: `None` for a bare
+    /// descriptor and for bytes that are no dag-cbor map, which decode
+    /// as a bare descriptor or not at all.
+    fn enveloped(self) -> Option<u64> {
+        self.0.flatten()
+    }
 }
 
 /// The format a stored body names, `0` for the bare descriptor the
 /// release before formats wrote, or `None` when the bytes are no
 /// dag-cbor map.
 pub fn format_of(bytes: &[u8]) -> Option<u64> {
-    serde_ipld_dagcbor::from_slice::<Stamp>(bytes)
-        .ok()
-        .map(|stamp| stamp.format.unwrap_or(0))
+    Stamp::of(bytes).format()
 }
 
 /// The format a body is written in: [`FORMAT`] when the rule holds a
@@ -112,12 +143,19 @@ pub(crate) fn encode_as<T: Serialize>(format: u64, rule: &T) -> Option<Vec<u8>> 
 }
 
 /// Refuses a body that holds a pattern in a format that has none: only
-/// format 5 writes one.
-pub(crate) fn check_pattern(bytes: &[u8], held: Option<String>) -> Result<(), String> {
-    match (held, format_of(bytes)) {
-        (Some(pattern), Some(format)) if format < FORMAT => Err(format!(
-            "the rule body is in format {format}, which writes no pattern, and holds the pattern {pattern}"
-        )),
+/// format 5 writes one. `held` names the pattern the rule holds, and is
+/// asked only of a body in an earlier format.
+pub(crate) fn check_pattern(
+    stamp: Stamp,
+    held: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
+    match stamp.format() {
+        Some(format) if format < FORMAT => match held() {
+            Some(pattern) => Err(format!(
+                "the rule body is in format {format}, which writes no pattern, and holds the pattern {pattern}"
+            )),
+            None => Ok(()),
+        },
         _ => Ok(()),
     }
 }
@@ -146,11 +184,14 @@ impl Display for BodyError {
 impl Error for BodyError {}
 
 /// The descriptor a stored body holds, in [`FORMAT`] or any earlier.
+#[cfg(test)]
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    let format = serde_ipld_dagcbor::from_slice::<Stamp>(bytes)
-        .ok()
-        .and_then(|stamp| stamp.format);
-    match format {
+    decode_stamped(bytes, Stamp::of(bytes))
+}
+
+/// [`decode`] of a body whose stamp is read.
+pub(crate) fn decode_stamped<T: DeserializeOwned>(bytes: &[u8], stamp: Stamp) -> Result<T, String> {
+    match stamp.enveloped() {
         None => serde_ipld_dagcbor::from_slice::<T>(bytes),
         Some(format) if format > FORMAT => {
             return Err(format!(
