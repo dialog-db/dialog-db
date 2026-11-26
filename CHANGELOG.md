@@ -46,6 +46,14 @@ What this changes for you:
   variable no premise binds. A query or a rule written as data cannot
   name an extension: it does not deserialize, and an extension's
   premise has no serialized form.
+- An extension declares its output cells (`Extension::outputs`), and a
+  row it computes is held to its own declaration before it is written:
+  a value for a cell it does not declare as an output, an output left
+  out, or a value its cell's type does not admit fails the query with
+  `EvaluationError::UndeclaredOutput`, `MissingOutput` or
+  `MistypedOutput`, naming the extension and the cell. Only a value that
+  disagrees with what the row already binds is a row that does not
+  match.
 - `FormulaQuery` has a variant more. A `match` on it outside this crate
   needs an arm for it.
 - An `Extension` is `Send + Sync` on every target, the browser's

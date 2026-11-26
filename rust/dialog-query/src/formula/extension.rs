@@ -141,21 +141,58 @@ impl ExtensionQuery {
 
     /// The matches the extension's rows make of `bindings`.
     ///
-    /// Each row is written to its own copy of the row in, and a write that
-    /// disagrees with what that row holds filters the row, as every
-    /// formula's does ([`emit`](crate::formula::emit)).
+    /// Each row is first held to the extension's own declaration: a
+    /// value for a cell it does not declare as an output, an output left
+    /// out, or a value its cell's type does not admit is the extension's
+    /// fault and fails the query, naming the extension and the cell.
+    /// Only then is the row written to its own copy of the row in, and a
+    /// write that disagrees with what that row already binds filters the
+    /// row, as every formula's does ([`emit`](crate::formula::emit)).
     pub(crate) fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
+        let formula = self.extension.name();
+        let outputs = self.extension.outputs();
+        let cells = self.extension.cells();
         let mut matches = Vec::new();
         for output in self.extension.compute(bindings)? {
+            for (cell, value) in &output {
+                if !outputs.contains(cell) {
+                    return Err(EvaluationError::UndeclaredOutput {
+                        formula: formula.into(),
+                        cell: (*cell).into(),
+                    });
+                }
+                if let Some(kind) = cells.get(cell).and_then(|cell| cell.content_type().clone())
+                    && !kind.admits(value)
+                {
+                    return Err(EvaluationError::MistypedOutput {
+                        formula: formula.into(),
+                        cell: (*cell).into(),
+                        expected: Box::new(kind),
+                        actual: value.data_type(),
+                    });
+                }
+            }
+            if let Some(cell) = outputs
+                .iter()
+                .find(|cell| !output.iter().any(|(given, _)| given == *cell))
+            {
+                return Err(EvaluationError::MissingOutput {
+                    formula: formula.into(),
+                    cell: (*cell).into(),
+                });
+            }
             let mut row = bindings.clone();
+            // An output the premise gives no term is one its asker did not
+            // ask for.
             let written = output
                 .iter()
+                .filter(|(cell, _)| bindings.terms().get(cell).is_some())
                 .try_for_each(|(cell, value)| row.write(cell, value));
             match written {
                 Ok(()) => matches.push(row.source),
-                Err(EvaluationError::Conflict { .. })
-                | Err(EvaluationError::Absent { .. })
-                | Err(EvaluationError::TypeMismatch { .. }) => continue,
+                // The value disagrees with what the row binds already: the
+                // row does not match.
+                Err(EvaluationError::Conflict { .. }) => continue,
                 Err(error) => return Err(error),
             }
         }
