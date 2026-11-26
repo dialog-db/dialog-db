@@ -49,6 +49,13 @@ futures-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 wasm-bindgen-test = { workspace = true }
 
+# The filesystem provider the layer tests also run on is the native one.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+dialog-capability = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-varsig = { workspace = true }
+tempfile = { workspace = true }
+
 [lints.rust]
 # `dialog_common::test` asks whether its caller runs web integration
 # tests. This crate has none.
