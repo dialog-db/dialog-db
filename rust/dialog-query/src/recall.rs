@@ -291,8 +291,11 @@ impl Recall {
     }
 }
 
+/// The bytes a bound `this` is remembered by: its identity
+/// ([`Value::identity_key`]), so one number held as two types is one
+/// key.
 fn encode(value: &Value) -> Result<Vec<u8>, EvaluationError> {
-    serde_ipld_dagcbor::to_vec(value).map_err(|error| EvaluationError::Store(error.to_string()))
+    Ok(value.identity_key())
 }
 
 #[cfg(test)]

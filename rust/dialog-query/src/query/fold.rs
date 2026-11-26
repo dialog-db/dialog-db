@@ -170,9 +170,7 @@ fn key(row: &Match, groups: &[String]) -> Result<Vec<u8>, EvaluationError> {
             Binding::Absent => Ok(None),
         })
         .collect::<Result<_, EvaluationError>>()?;
-    serde_ipld_dagcbor::to_vec(&values).map_err(|error| EvaluationError::Serialization {
-        message: error.to_string(),
-    })
+    Ok(crate::reduce::group_key(&values))
 }
 
 impl<G, Q> Application for Fold<G, Q>

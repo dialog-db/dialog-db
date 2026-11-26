@@ -267,9 +267,7 @@ impl Accumulator {
                 true
             }
             Accumulator::Distinct(values) => {
-                let Ok(bytes) = encode(&input.0) else {
-                    return false;
-                };
+                let bytes = input.0.identity_key();
                 match step {
                     Step::Add => *values.entry(bytes).or_insert(0) += 1,
                     Step::Remove => match values.get_mut(&bytes) {

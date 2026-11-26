@@ -86,6 +86,7 @@
 //! ```
 
 use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Display;
@@ -501,12 +502,27 @@ impl Table {
                 Binding::Absent => key.push(None),
             }
         }
-        let key_bytes = encode(&key)?;
+        let key_bytes = group_key(&key);
         let entries = &self.entries;
-        let group = self.groups.entry(key_bytes).or_insert_with(|| Group {
-            key,
-            columns: vec![Vec::new(); entries.len()],
-        });
+        let group = match self.groups.entry(key_bytes) {
+            Entry::Vacant(vacant) => vacant.insert(Group {
+                key,
+                columns: vec![Vec::new(); entries.len()],
+            }),
+            // One number held as two types is one group, whose key reads
+            // as the narrowest of them, whatever order its rows arrive in.
+            Entry::Occupied(occupied) => {
+                let group = occupied.into_mut();
+                for (held, value) in group.key.iter_mut().zip(key) {
+                    if let (Some(held), Some(value)) = (held, value)
+                        && value.narrower(held)
+                    {
+                        *held = value;
+                    }
+                }
+                group
+            }
+        };
         for (column, entry) in group.columns.iter_mut().zip(entries) {
             match row.lookup(&entry.input)? {
                 Binding::Present(value) => {
@@ -615,6 +631,26 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, EvaluationError> {
     })
 }
 
+/// The bytes a group is keyed by: each component's identity
+/// ([`Value::identity_key`]), so one number held as two types is one
+/// group, or a marker for an absent one. Each component is written with
+/// its length, so no two keys run together.
+pub(crate) fn group_key(key: &[Option<Value>]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for component in key {
+        match component {
+            Some(value) => {
+                let identity = value.identity_key();
+                bytes.push(1);
+                bytes.extend_from_slice(&(identity.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&identity);
+            }
+            None => bytes.push(0),
+        }
+    }
+    bytes
+}
+
 /// A fold failure scoped to its entry.
 fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
     EvaluationError::Reduce {
@@ -704,7 +740,7 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
         Aggregator::CountDistinct => {
             let mut distinct = BTreeSet::new();
             for value in &values {
-                distinct.insert(encode(value)?);
+                distinct.insert(value.identity_key());
             }
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
         }
