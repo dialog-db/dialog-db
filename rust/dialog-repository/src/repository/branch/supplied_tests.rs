@@ -201,7 +201,7 @@ fn analyze_document(forms: &[&str]) -> Result<Premise, TypeError> {
 fn outs<'a>(rows: impl IntoIterator<Item = &'a PremiseRow>) -> Vec<(Entity, Value)> {
     let mut outs: Vec<(Entity, Value)> = rows
         .into_iter()
-        .filter_map(|row| Some((row.this.clone(), row.values.get("out")?.clone())))
+        .filter_map(|row| Some((row.this.clone()?, row.values.get("out")?.clone())))
         .collect();
     outs.sort_by(|a, b| {
         a.0.cmp(&b.0)
@@ -255,7 +255,7 @@ async fn it_asks_the_reader_the_environment_holds() -> Result<()> {
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
     write(&branch, &session, the!("note/text"), &a, "hello there").await?;
-    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
+    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], ["out"])?.this("this")?;
     let rows = branch
         .query()
         .select(query)
@@ -282,7 +282,7 @@ async fn it_fails_a_query_asking_what_no_implementation_is_held_for() -> Result<
         (read_premise("tree")?, "notation/read"),
         (analyze_premise()?, "notation/analyze"),
     ] {
-        let query = PremiseQuery::new(vec![texts(), premise], "this", ["out"])?;
+        let query = PremiseQuery::new(vec![texts(), premise], ["out"])?.this("this")?;
         let answered = empty
             .query()
             .select(query)
@@ -300,7 +300,7 @@ async fn it_fails_a_query_asking_what_no_implementation_is_held_for() -> Result<
         (read_premise("tree")?, "notation/read"),
         (analyze_premise()?, "notation/analyze"),
     ] {
-        let query = PremiseQuery::new(vec![texts(), premise], "this", ["out"])?;
+        let query = PremiseQuery::new(vec![texts(), premise], ["out"])?.this("this")?;
         let answered = branch
             .query()
             .select(query)
@@ -419,14 +419,21 @@ async fn it_refuses_a_rule_holding_a_supplied_formula_on_a_filesystem_branch() -
 }
 
 /// A premise query selecting a variable none of its premises binds is
-/// refused as it is built, naming it.
+/// refused as it is built, naming it, and so is one keyed by such a
+/// variable as its entity.
 #[dialog_common::test]
-fn it_refuses_a_premise_query_selecting_what_nothing_binds() {
-    let refused = PremiseQuery::new(vec![texts()], "this", ["nowhere"]);
+fn it_refuses_a_premise_query_selecting_what_nothing_binds() -> Result<()> {
+    let refused = PremiseQuery::new(vec![texts()], ["nowhere"]);
     assert!(
         matches!(&refused, Err(TypeError::UnselectedVariable { variable }) if variable == "nowhere"),
         "{refused:?}"
     );
+    let refused = PremiseQuery::new(vec![texts()], ["text"])?.this("nowhere");
+    assert!(
+        matches!(&refused, Err(TypeError::UnselectedVariable { variable }) if variable == "nowhere"),
+        "{refused:?}"
+    );
+    Ok(())
 }
 
 /// A subscription over a premise query asking `notation/read` follows
@@ -440,7 +447,7 @@ async fn it_keeps_a_subscription_to_what_is_read_current() -> Result<()> {
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
     write(&branch, &session, the!("note/text"), &a, "hi").await?;
-    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
+    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], ["out"])?.this("this")?;
     let mut subscription = branch.subscribe(query);
     let first = subscription.poll(&session).await?.expect("initial");
     assert_eq!(outs(&first.asserted), vec![(a.clone(), text("hi"))]);
@@ -478,7 +485,7 @@ async fn it_follows_the_definitions_a_resolver_reads() -> Result<()> {
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
     write(&branch, &session, the!("note/text"), &a, "hi").await?;
-    let query = PremiseQuery::new(vec![texts(), analyze_premise()?], "this", ["out"])?;
+    let query = PremiseQuery::new(vec![texts(), analyze_premise()?], ["out"])?.this("this")?;
     let mut subscription = branch.subscribe(query);
     let first = subscription.poll(&session).await?.expect("initial");
     assert_eq!(first.asserted.len(), 1, "hi is unknown: {first:?}");
@@ -526,9 +533,9 @@ async fn it_analyzes_a_document_and_says_which_form_each_row_is_about() -> Resul
     .await?;
     let query = PremiseQuery::new(
         vec![texts(), analyze_document(&["known", "unknown"])?],
-        "this",
         ["out", "at"],
-    )?;
+    )?
+    .this("this")?;
     let rows = branch
         .query()
         .select(query)
@@ -564,6 +571,133 @@ fn it_refuses_an_analysis_of_what_is_not_a_list_of_forms() {
     );
 }
 
+/// `notation/read` of the constant `text`, its `at` as `?at` and its
+/// `tree` as `?tree`.
+fn read_text(text: &str) -> Result<Premise, TypeError> {
+    let mut terms = Parameters::new();
+    terms.insert("text".into(), Term::Constant(self::text(text)));
+    terms.insert("at".into(), Term::var("at"));
+    terms.insert("tree".into(), Term::var("tree"));
+    Ok(Premise::Assert(Proposition::Formula(
+        FormulaQuery::NotationRead(NotationReadQuery::new(terms)?),
+    )))
+}
+
+/// Each row's `at` and `out` or `tree`, in order of `at`.
+fn placed(rows: &[PremiseRow], cell: &str) -> Vec<(Value, Value)> {
+    let mut placed: Vec<(Value, Value)> = rows
+        .iter()
+        .filter_map(|row| Some((row.values.get("at")?.clone(), row.values.get(cell)?.clone())))
+        .collect();
+    placed.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+    placed
+}
+
+/// A premise query needs no entity: `notation/read` asked of a constant
+/// text, and no other premise, answers a row a form on a branch that
+/// holds nothing, each row the values it selects and no entity.
+#[dialog_common::test]
+async fn it_reads_a_constant_text_with_nothing_stored() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    supply_read(&session, Arc::new(Words));
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    let query = PremiseQuery::new(vec![read_text("hello world")?], ["at", "tree"])?;
+    let rows = branch
+        .query()
+        .select(query)
+        .perform(&session)
+        .try_vec()
+        .await?;
+    assert!(rows.iter().all(|row| row.this.is_none()), "{rows:?}");
+    assert_eq!(
+        placed(&rows, "tree"),
+        vec![
+            (Value::UnsignedInt(0), text("hello")),
+            (Value::UnsignedInt(1), text("world")),
+        ]
+    );
+    Ok(())
+}
+
+/// `notation/analyze` asked of a constant document, and no other
+/// premise, answers its rows on a branch that holds nothing; a
+/// subscription over it is evaluated again when a definition the
+/// analyzer read changes, though nothing it answers has an entity.
+#[dialog_common::test]
+async fn it_analyzes_constant_forms_with_nothing_stored_and_follows_definitions() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    supply_analyze(&session, Arc::new(Defined::default()));
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    let query = PremiseQuery::new(vec![analyze_document(&["x", "y"])?], ["at", "out"])?;
+    let mut subscription = branch.subscribe(query);
+    let first = subscription.poll(&session).await?.expect("initial");
+    assert_eq!(
+        placed(&first.asserted, "out"),
+        vec![
+            (Value::UnsignedInt(0), text("nothing defines String(\"x\")")),
+            (Value::UnsignedInt(1), text("nothing defines String(\"y\")")),
+        ]
+    );
+    write(&branch, &session, the!("def/name"), &"id:d".parse()?, "x").await?;
+    let moved = subscription
+        .poll(&session)
+        .await?
+        .expect("a definition it read changed");
+    assert_eq!(
+        placed(&moved.retracted, "out"),
+        vec![(Value::UnsignedInt(0), text("nothing defines String(\"x\")"))]
+    );
+    assert!(moved.asserted.is_empty(), "{moved:?}");
+    assert_eq!(
+        placed(subscription.results(), "out"),
+        vec![(Value::UnsignedInt(1), text("nothing defines String(\"y\")"))]
+    );
+    Ok(())
+}
+
+/// A selected variable a row binds to no value, an optional field the
+/// entity has no claim of, is absent from that row's values, and the
+/// row is answered: not an error.
+#[dialog_common::test]
+async fn it_leaves_a_selected_variable_a_row_does_not_bind_out_of_the_row() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    let a: Entity = "id:a".parse()?;
+    write(&branch, &session, the!("note/text"), &a, "hi").await?;
+    let noted: ConceptDescriptor = serde_json::from_value(serde_json::json!({
+        "with": {
+            "text": { "the": "note/text", "as": "text:", "cardinality": "many" },
+            "tag": { "the": "note/tag", "as": "text:", "cardinality": "many", "optional": true }
+        }
+    }))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.insert("text".into(), Term::var("text"));
+    terms.insert("tag".into(), Term::var("tag"));
+    let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+        predicate: noted,
+        terms,
+    }));
+    let query = PremiseQuery::new(vec![premise], ["text", "tag"])?.this("this")?;
+    let rows = branch
+        .query()
+        .select(query)
+        .perform(&session)
+        .try_vec()
+        .await?;
+    assert_eq!(
+        rows,
+        vec![PremiseRow {
+            this: Some(a),
+            values: BTreeMap::from([("text".to_string(), text("hi"))]),
+        }]
+    );
+    Ok(())
+}
+
 /// What a premise query asking `broken` over one text answers.
 async fn broken_answer(broken: Broken) -> Result<Result<Vec<PremiseRow>, EvaluationError>> {
     let (session, peer) = test_session_with_peer().await;
@@ -571,7 +705,7 @@ async fn broken_answer(broken: Broken) -> Result<Result<Vec<PremiseRow>, Evaluat
     let repo = test_repo(&session, &peer).await;
     let branch = repo.branch("main").open().perform(&session).await?;
     write(&branch, &session, the!("note/text"), &"id:a".parse()?, "hi").await?;
-    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
+    let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], ["out"])?.this("this")?;
     Ok(branch
         .query()
         .select(query)
