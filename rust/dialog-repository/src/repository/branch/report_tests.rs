@@ -22,7 +22,7 @@ use serde_json::json;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::helpers::filesystem_session_with_peer;
-use crate::helpers::test_repo;
+use crate::helpers::{arrive, test_repo};
 use crate::{Branch, Entry, RuleError};
 
 /// `doc/tag(x) := label :- doc/label(x) = label`.
@@ -91,18 +91,6 @@ async fn seeded<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Res
         Value::String("Notes".into()),
         dialog_corpus::Cardinality::Many,
     );
-    changes.associate(
-        "dialog.rule/derives".parse()?,
-        broken(),
-        Value::Entity(on_tag()),
-        dialog_corpus::Cardinality::Many,
-    );
-    changes.associate(
-        "dialog.rule/source".parse()?,
-        broken(),
-        Value::Bytes(vec![0xff, 0x00]),
-        dialog_corpus::Cardinality::Many,
-    );
     branch
         .transaction()
         .assert(tag_rule()?)
@@ -111,6 +99,22 @@ async fn seeded<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Res
         .publish()
         .perform(session)
         .await?;
+    // A commit refuses a body that is no rule, so the broken one arrives
+    // as another writer's data does.
+    let mut foreign = Changes::new();
+    foreign.associate(
+        "dialog.rule/derives".parse()?,
+        broken(),
+        Value::Entity(on_tag()),
+        dialog_corpus::Cardinality::Many,
+    );
+    foreign.associate(
+        "dialog.rule/source".parse()?,
+        broken(),
+        Value::Bytes(vec![0xff, 0x00]),
+        dialog_corpus::Cardinality::Many,
+    );
+    arrive(&branch, session, foreign).await?;
     branch.refresh(session).await?;
     Ok(branch)
 }
@@ -332,6 +336,14 @@ fn unrelated() -> Entity {
 /// index of `doc/other`.
 async fn chained<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Result<Branch> {
     let branch = seeded(session, peer).await?;
+    branch
+        .transaction()
+        .assert(relay("badge", "tag")?)
+        .assert(relay("medal", "badge")?)
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
     let mut changes = Changes::new();
     changes.associate(
         "dialog.rule/derives".parse()?,
@@ -345,15 +357,7 @@ async fn chained<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Re
         Value::Bytes(vec![0xfe, 0x01]),
         dialog_corpus::Cardinality::Many,
     );
-    branch
-        .transaction()
-        .assert(relay("badge", "tag")?)
-        .assert(relay("medal", "badge")?)
-        .assert(changes)
-        .commit()
-        .publish()
-        .perform(session)
-        .await?;
+    arrive(&branch, session, changes).await?;
     branch.refresh(session).await?;
     Ok(branch)
 }

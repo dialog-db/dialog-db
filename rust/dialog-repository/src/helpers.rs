@@ -923,6 +923,46 @@ pub(crate) async fn prune_unreachable<Env: RegistryEnv>(
     Ok(())
 }
 
+/// Land `changes` on `branch` as facts that arrive from elsewhere, a
+/// replica on another release or another implementation: through the
+/// machinery's commit, which neither refuses a rule body that does not
+/// compile here, nor induces, nor settles successions, as a pull lands
+/// what another replica wrote. What a test of foreign or older data
+/// writes with; a transaction refuses a rule body that is no rule here.
+#[cfg(test)]
+pub(crate) async fn arrive<Env>(
+    branch: &Branch,
+    env: &Env,
+    changes: dialog_corpus::Changes,
+) -> Result<crate::Revision, crate::CommitError>
+where
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<BlobLoad>
+        + Provider<Fork<crate::RemoteSite, Resolve>>
+        + dialog_common::Holds
+        + ConditionalSync
+        + 'static,
+{
+    use futures_util::stream::iter;
+    branch
+        .commit(iter(changes.into_instructions()))
+        .perform(env)
+        .await
+}
+
 #[cfg(test)]
 mod prune_tests {
     #[cfg(target_arch = "wasm32")]

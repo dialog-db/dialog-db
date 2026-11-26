@@ -16,7 +16,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use crate::helpers::test_repo;
+use crate::helpers::{arrive, test_repo};
 use crate::{Branch, Transient};
 use anyhow::Result;
 use dialog_corpus::{Entity, Relation as CorpusRelation, Selector, Value};
@@ -101,16 +101,21 @@ fn source_from_main(name: &str) -> Vec<u8> {
         .expect("a source fact")
 }
 
+/// Land `facts`, rule facts an earlier release or another writer
+/// stored, as they arrive from elsewhere: a rule body this release does
+/// not read as it stands is not refused when it arrives, only when a
+/// commit here writes it.
 async fn install(
     branch: &Branch,
     operator: &Operator,
     facts: Vec<AttributeStatement>,
 ) -> Result<()> {
-    let mut transaction = branch.transaction();
+    use dialog_corpus::{Changes, Statement as _};
+    let mut changes = Changes::new();
     for fact in facts {
-        transaction = transaction.assert(fact);
+        fact.assert(&mut changes);
     }
-    transaction.commit().publish().perform(operator).await?;
+    arrive(branch, operator, changes).await?;
     branch.refresh(operator).await?;
     Ok(())
 }

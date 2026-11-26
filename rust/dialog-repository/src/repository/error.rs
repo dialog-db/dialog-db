@@ -1,8 +1,9 @@
+use crate::RuleError;
 use crate::{Fetched, Revision, Target, TreeReference};
 use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
-use dialog_corpus::DialogCorpusError;
+use dialog_corpus::{DialogCorpusError, Entity};
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
@@ -578,6 +579,21 @@ pub enum CommitError {
     /// A cell resolve during commit failed.
     #[error("Failed to resolve during commit: {0}")]
     Resolve(#[from] ResolveError),
+
+    /// The commit writes a rule body (`dialog.rule/source`) that is no
+    /// rule this release reads as it stands under its entity: bytes that
+    /// are no body, a body that does not compile, one in a format this
+    /// release does not read as it stands, or one stored under an entity
+    /// it does not hash to. Nothing is written. A rule installed through
+    /// the API compiles before it is written; this refuses one written as
+    /// a plain fact.
+    #[error("the rule {rule} does not compile here: {reason}")]
+    InvalidRule {
+        /// The entity the body was written under.
+        rule: Entity,
+        /// Why it is no rule here.
+        reason: RuleError,
+    },
 
     /// Commit-time induction still emitted novelty or transients after
     /// the round bound — a self-feeding cascade (e.g. a transient

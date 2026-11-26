@@ -55,6 +55,7 @@ pub(crate) mod error;
 use crate::report::Entry;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -553,14 +554,14 @@ pub(crate) struct RuleContent {
     /// the reader read itself, so the cache decodes and never answers
     /// whether a rule exists, and forged bytes under a known entity miss
     /// it and fail their content-address check as they would cold.
-    bodies: Cache<(Entity, Blake3Hash), DeductiveRule>,
+    bodies: Cache<BodyKey, DeductiveRule>,
     /// Hydrated inductive bodies, keyed like `bodies`.
-    inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
+    inductive: Cache<BodyKey, InductiveRule>,
     /// Why a stored body is no rule on this release, keyed like
     /// `bodies`: what [`judge`](error::judge) found, so a body that did
     /// not compile is judged once, as one that did. Built on the first
     /// such body: they are rare, and a cache reserves its room up front.
-    failures: OnceLock<Cache<(Entity, Blake3Hash), error::RuleError>>,
+    failures: OnceLock<Cache<BodyKey, error::RuleError>>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -628,6 +629,34 @@ struct Bundle {
 /// The rules an assembled rule set left out: `None` when it left out
 /// none.
 pub(crate) type Skipped = Option<Arc<[Entry]>>;
+
+/// Where a rule body sits in a rule cache: the entity it is stored under
+/// and the hash of its bytes. A cache probes once per read of a body, and
+/// a commit once per body it writes, so the key hashes as little as keeps
+/// it apart: the entity's name once (its derived hash also covers the
+/// key bytes the name determines) and a prefix of the body's hash, which
+/// is uniform already. The entity is hashed in full, by the cache's keyed
+/// hasher: a refused body is remembered under every entity a writer
+/// stores it under, and those entries must not share a bucket. Two keys
+/// are equal only when both halves are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BodyKey(Entity, Blake3Hash);
+
+impl BodyKey {
+    fn of(rule: &Entity, bytes: &[u8]) -> Self {
+        Self(rule.clone(), Blake3Hash::hash(bytes))
+    }
+}
+
+impl Hash for BodyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(self.0.as_str().as_bytes());
+        let digest = self.1.as_bytes();
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&digest[..8]);
+        state.write_u64(u64::from_le_bytes(prefix));
+    }
+}
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
@@ -881,7 +910,7 @@ impl RuleCache {
         rule: &Entity,
         bytes: &[u8],
     ) -> Result<error::Hydrated, error::RuleError> {
-        let key = (rule.clone(), Blake3Hash::hash(bytes));
+        let key = BodyKey::of(rule, bytes);
         if let Some(body) = self.content.bodies.get_cached(&key) {
             return Ok(error::Hydrated::Deductive(body));
         }
@@ -921,15 +950,13 @@ impl RuleCache {
         self.content
             .failures
             .get()?
-            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
+            .get_cached(&BodyKey::of(rule, bytes))
     }
 
     /// The body `rule` decoded to from `bytes`, if decoded before.
     #[cfg(test)]
     pub(crate) fn body(&self, rule: &Entity, bytes: &[u8]) -> Option<DeductiveRule> {
-        self.content
-            .bodies
-            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
+        self.content.bodies.get_cached(&BodyKey::of(rule, bytes))
     }
 
     /// The committed trigger footprint if scanned at `head`; `None` if
@@ -1059,5 +1086,29 @@ mod tests {
             analysis.is_recursive(&node),
             "the step rule's self-reference makes the concept recursive"
         );
+    }
+
+    /// A body a writer stores under many entities is refused under each,
+    /// and each refusal is remembered under its own key. Those keys hash
+    /// apart, so the entries do not share a bucket, however many there
+    /// are: the hash covers the entity, not the body alone.
+    #[test]
+    fn it_keeps_one_body_under_many_entities_in_buckets_of_their_own() {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+
+        let cache = RuleCache::default();
+        let bytes = [0xff, 0x00];
+        let hasher = BuildHasherDefault::<DefaultHasher>::default();
+        let mut hashes = BTreeSet::new();
+        for index in 0..256 {
+            let entity: Entity = format!("rule:forged-{index}").parse().expect("an entity");
+            assert!(cache.judged(&entity, &bytes).is_err());
+            assert!(
+                cache.failure(&entity, &bytes).is_some(),
+                "a refused verdict is remembered under its entity"
+            );
+            hashes.insert(hasher.hash_one(BodyKey::of(&entity, &bytes)));
+        }
+        assert_eq!(hashes.len(), 256, "every entity's key hashes apart");
     }
 }
