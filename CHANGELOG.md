@@ -1724,10 +1724,11 @@ and names the rule.
   it, and derives nothing and fires at no commit until
   `Branch::upgrade_rules` reinstalls it under its new entity. A body
   0.5.0 or earlier stored, holding such a rule, is judged `older` and is
-  reinstalled by the same upgrade, as other older bodies are. A rule with no such variable is not touched. A build
-  of `main` from before this change reads what this one writes: the
-  body spells the variable as a blank, which both releases hash alike.
-  0.5.0 reads neither format. Run `Branch::upgrade_rules`.
+  reinstalled by the same upgrade, as other older bodies are. A rule
+  with no such variable is not touched. A build of `main` from before
+  this change reads what this one writes: the body spells the variable
+  as a blank, which both releases hash alike. 0.5.0 reads neither
+  format. Run `Branch::upgrade_rules`.
 - A query's report: nothing stored or synced changes. An embedder runs
   nothing.
 - One number held as two types groups, counts and joins as one: nothing
