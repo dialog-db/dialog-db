@@ -11,16 +11,17 @@
 //! | the resolver `notation/analyze` | `form` | each thing said of the form: `severity`, `code`, `message`, `path` |
 //!
 //! Their implementation is supplied by the crate that has it, the
-//! notation, to the environment a query runs in ([`supply_read`],
-//! [`supply_analyze`]), which holds it ([`Holds`]), and a premise asking
+//! notation, to the environment a query runs in ([`supply_read`](crate::supplied::supply_read),
+//! [`supply_analyze`](crate::supplied::supply_analyze)), which holds it
+//! ([`Holds`](dialog_common::Holds)), and a premise asking
 //! one finds it there when it is evaluated. A row it computes is held to
 //! the cells declared here before it is written: a value for a cell not
-//! declared as an output ([`EvaluationError::UndeclaredOutput`]), an
-//! output left out ([`EvaluationError::MissingOutput`]) or a value its
-//! cell's type does not admit ([`EvaluationError::MistypedOutput`])
+//! declared as an output ([`EvaluationError::UndeclaredOutput`](crate::error::EvaluationError::UndeclaredOutput)), an
+//! output left out ([`EvaluationError::MissingOutput`](crate::error::EvaluationError::MissingOutput)) or a value its
+//! cell's type does not admit ([`EvaluationError::MistypedOutput`](crate::error::EvaluationError::MistypedOutput))
 //! fails the query, naming the formula and the cell. A premise asking
 //! one where the environment holds no implementation fails the query,
-//! naming it ([`EvaluationError::Unsupplied`]), before any row is read:
+//! naming it ([`EvaluationError::Unsupplied`](crate::error::EvaluationError::Unsupplied)), before any row is read:
 //! never a query that answers nothing.
 //!
 //! What is locked and what is not:
@@ -28,7 +29,7 @@
 //! - **Locked:** the names and the cells are the engine's. No crate adds
 //!   a formula: a premise names one of these or one of the built-ins,
 //!   and nothing else deserializes.
-//! - **Not locked:** [`Holds`] is open, so any code holding the
+//! - **Not locked:** [`Holds`](dialog_common::Holds) is open, so any code holding the
 //!   environment can supply an implementation under these names. That
 //!   is not offered as an extension point and not stable; it is how the
 //!   notation's code reaches the engine without the engine depending on
@@ -38,7 +39,7 @@
 //! replica. One whose implementation comes from another crate is only
 //! where that crate is linked, and what it does would become part of
 //! what a stored rule means. So a rule holding either is refused when it
-//! is compiled ([`TypeError::SuppliedInRule`]), and they are asked in a
+//! is compiled ([`TypeError::SuppliedInRule`](crate::error::TypeError::SuppliedInRule)), and they are asked in a
 //! [`PremiseQuery`](crate::query::PremiseQuery) alone. Opening rules to
 //! them later is that one refusal removed, once two things are true: what
 //! the implementation does is versioned in what a replica stores, as a
@@ -46,7 +47,7 @@
 //! and a replica whose environment holds no implementation judges such a
 //! rule when the rule set is assembled, as a rule it does not evaluate
 //! (`RuleError`, the quarantine every rule a replica cannot compile
-//! goes to), not as an [`EvaluationError`] when a query asks it.
+//! goes to), not as an [`EvaluationError`](crate::error::EvaluationError) when a query asks it.
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
