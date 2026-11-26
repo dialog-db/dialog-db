@@ -275,8 +275,11 @@ mod tests {
             panic!("expected the concept premise");
         };
         assert_eq!(query.terms.get("name").unwrap().name(), Some("is"));
-        let aside = query.terms.get("is").unwrap().name().expect("named");
-        assert_ne!(aside, "is", "the body variable moved out of the way");
+        // The split head reads the `is` field nowhere else, so the body
+        // variable is used once and spelled as a blank: either way it
+        // is not the head's `is`.
+        let aside = query.terms.get("is").unwrap().name();
+        assert_ne!(aside, Some("is"), "the body variable moved out of the way");
         Ok(())
     }
 
