@@ -455,6 +455,14 @@ pub fn reset_tally() {
     chain.round = None;
 }
 
+/// Forget the round the chain last saw issued: a new lockstep session
+/// counts its rounds from its own first request, one deeper than the
+/// chain so far.
+#[cfg(not(target_arch = "wasm32"))]
+fn forget_round() {
+    CHAIN.lock().expect("chain lock poisoned").round = None;
+}
+
 /// An in-flight simulated request: [`begin`] has taken a connection and
 /// charged the request's authorization and latency; [`InFlight::complete`]
 /// charges the payload's transfer time, records its bytes, and hands the
@@ -697,9 +705,24 @@ mod shaping {
     /// instant is served in the next, together: a request's depth is the
     /// round it was issued in, the same in every run of the same schedule.
     /// Modeled time then counts one millisecond per round.
+    ///
+    /// Turning it on starts a session: its rounds are counted from its own
+    /// first request, on the clock of the runtime that issues it. Each
+    /// test runs on a paused clock of its own, frozen where its runtime was
+    /// built, so an instant taken on one test's clock means nothing on
+    /// another's, and a session measured from another's first request
+    /// would read its rounds as that one's.
     pub fn lockstep(enabled: bool) {
+        if enabled {
+            *SESSION.lock().expect("lockstep session lock poisoned") = None;
+            super::forget_round();
+        }
         LOCKSTEP.store(enabled, Ordering::Relaxed);
     }
+
+    /// The instant the current lockstep session issued its first request
+    /// at, on the clock of the runtime that issued it.
+    static SESSION: Mutex<Option<Instant>> = Mutex::new(None);
 
     /// Serve a request's file operation: in lockstep with no shape
     /// configured, to completion on a thread of its own while the
@@ -741,14 +764,14 @@ mod shaping {
     }
 
     /// In lockstep, the instant a request issued now is issued at, as time
-    /// since the first one asked: its round (see `Chain`).
+    /// since the session's first request: its round (see `Chain`).
     pub(super) fn round() -> Option<Duration> {
-        static FIRST: OnceLock<Instant> = OnceLock::new();
         if !LOCKSTEP.load(Ordering::Relaxed) || active().is_some() {
             return None;
         }
         let now = Instant::now();
-        Some(now.duration_since(*FIRST.get_or_init(|| now)))
+        let mut session = SESSION.lock().expect("lockstep session lock poisoned");
+        Some(now.duration_since(*session.get_or_insert(now)))
     }
 
     /// Set (or, with `None`, clear) the active link model, overriding the
