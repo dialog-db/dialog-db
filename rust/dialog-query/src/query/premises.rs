@@ -1,6 +1,7 @@
 //! A query of premises: what a rule's body is, asked with no rule.
 
 use std::collections::BTreeMap;
+use std::iter;
 use std::sync::Arc;
 
 use dialog_corpus::Entity;
@@ -44,7 +45,7 @@ impl PremiseQuery {
         let this = this.into();
         let select: Vec<String> = select.into_iter().map(Into::into).collect();
         let plan = Planner::from(premises).plan(&Environment::new())?;
-        if let Some(variable) = std::iter::once(&this)
+        if let Some(variable) = iter::once(&this)
             .chain(&select)
             .find(|variable| !plan.binds.contains(variable))
         {
