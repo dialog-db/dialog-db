@@ -18,7 +18,9 @@ use dialog_corpus::{Entity, Fact, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
 use dialog_query::concept::query::ConceptQuery;
+use dialog_query::corpus::Type as ValueType;
 use dialog_query::error::{EvaluationError, TypeError};
+use dialog_query::formula::extension::Output;
 use dialog_query::formula::{Bindings, Cells, Extension, Extensions};
 use dialog_query::query::{Output as _, PremiseQuery, PremiseRow};
 use dialog_query::type_system::Type as Kind;
@@ -39,11 +41,11 @@ struct Shout;
 static SHOUT: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(dialog_query::corpus::Type::String)))
+            .cell("of", Some(Kind::from(ValueType::String)))
             .the("what is shouted")
             .required();
         builder
-            .cell("is", Some(Kind::from(dialog_query::corpus::Type::String)))
+            .cell("is", Some(Kind::from(ValueType::String)))
             .the("it, shouted")
             .output(0);
     })
@@ -58,10 +60,7 @@ impl Extension for Shout {
         &SHOUT
     }
 
-    fn compute(
-        &self,
-        bindings: &mut Bindings,
-    ) -> Result<Vec<dialog_query::formula::extension::Output>, EvaluationError> {
+    fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
         let of: String = bindings.read("of")?;
         Ok(vec![vec![(
             "is",
@@ -77,11 +76,11 @@ struct Words;
 static WORDS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(dialog_query::corpus::Type::String)))
+            .cell("of", Some(Kind::from(ValueType::String)))
             .the("the text")
             .required();
         builder
-            .cell("word", Some(Kind::from(dialog_query::corpus::Type::String)))
+            .cell("word", Some(Kind::from(ValueType::String)))
             .the("one of its words")
             .output(0);
     })
@@ -96,10 +95,7 @@ impl Extension for Words {
         &WORDS
     }
 
-    fn compute(
-        &self,
-        bindings: &mut Bindings,
-    ) -> Result<Vec<dialog_query::formula::extension::Output>, EvaluationError> {
+    fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
         let of: String = bindings.read("of")?;
         Ok(of
             .split_whitespace()
