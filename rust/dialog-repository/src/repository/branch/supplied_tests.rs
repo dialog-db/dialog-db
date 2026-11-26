@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Entity, Fact, Selector, Value};
+use dialog_corpus::{Composite, Entity, Fact, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
 use dialog_query::attribute::Relation;
@@ -98,16 +98,17 @@ impl NotationRead for Broken {
     }
 }
 
-/// An analyzer that says a form, a word, is unknown where no
-/// `def/name` fact names it: it reads the definitions through the
-/// environment, and counts the forms it analyzed.
+/// An analyzer that says each form of a document, a word, is unknown
+/// where no `def/name` fact names it, at the form's place: it reads the
+/// definitions through the environment, and counts the documents it
+/// analyzed.
 #[derive(Debug, Default)]
 struct Defined {
     analyzed: AtomicUsize,
 }
 
 impl NotationAnalyze for Defined {
-    fn analyze<'s>(&'s self, form: &'s Value, facts: &'s dyn Facts) -> Selected<'s> {
+    fn analyze<'s>(&'s self, forms: &'s [Value], facts: &'s dyn Facts) -> Selected<'s> {
         Box::pin(async move {
             self.analyzed.fetch_add(1, Ordering::SeqCst);
             let defined = facts
@@ -119,18 +120,23 @@ impl NotationAnalyze for Defined {
                     ),
                 )
                 .await?;
-            if defined.iter().any(|fact| &fact.is == form) {
-                return Ok(Vec::new());
-            }
-            Ok(vec![vec![
-                ("severity", Value::String("error".into())),
-                ("code", Value::String("unknown".into())),
-                (
-                    "message",
-                    Value::String(format!("nothing defines {form:?}")),
-                ),
-                ("path", Value::String(String::new())),
-            ]])
+            Ok(forms
+                .iter()
+                .enumerate()
+                .filter(|(_, form)| !defined.iter().any(|fact| &fact.is == *form))
+                .map(|(at, form)| {
+                    vec![
+                        ("at", Value::UnsignedInt(at as u128)),
+                        ("severity", Value::String("error".into())),
+                        ("code", Value::String("unknown".into())),
+                        (
+                            "message",
+                            Value::String(format!("nothing defines {form:?}")),
+                        ),
+                        ("path", Value::String(String::new())),
+                    ]
+                })
+                .collect())
         })
     }
 }
@@ -167,11 +173,25 @@ fn read_premise(cell: &str) -> Result<Premise, TypeError> {
     )))
 }
 
-/// `notation/analyze` of the form `?text`, its `message` as `?out`.
+/// A document of `forms`, each a word, as the list `notation/analyze`
+/// takes.
+fn document(forms: &[&str]) -> Value {
+    Value::Composite(Composite::list(forms.iter().map(|form| text(form))).expect("a list"))
+}
+
+/// `notation/analyze` of the document of the one form `hi`, its
+/// `message` as `?out`.
 fn analyze_premise() -> Result<Premise, TypeError> {
+    analyze_document(&["hi"])
+}
+
+/// `notation/analyze` of the document of `forms`, its `message` as
+/// `?out` and its `at` as `?at`.
+fn analyze_document(forms: &[&str]) -> Result<Premise, TypeError> {
     let mut terms = Parameters::new();
-    terms.insert("form".into(), Term::var("text"));
+    terms.insert("forms".into(), Term::Constant(document(forms)));
     terms.insert("message".into(), Term::var("out"));
+    terms.insert("at".into(), Term::var("at"));
     Ok(Premise::Assert(Proposition::Resolver(Box::new(
         ResolverQuery::NotationAnalyze(NotationAnalyzeQuery::new(terms)?),
     ))))
@@ -310,7 +330,7 @@ fn it_reads_a_declared_formula_written_as_data() -> Result<()> {
     );
     let written = serde_json::json!({
         "assert": "notation/analyze",
-        "where": { "form": { "?": { "name": "form" } }, "message": { "?": { "name": "out" } } }
+        "where": { "forms": { "?": { "name": "forms" } }, "message": { "?": { "name": "out" } } }
     });
     let analyze: Proposition = serde_json::from_value(written)?;
     assert!(
@@ -481,6 +501,67 @@ async fn it_follows_the_definitions_a_resolver_reads() -> Result<()> {
     assert_eq!(moved.retracted.len(), 1, "hi is defined now: {moved:?}");
     assert!(subscription.results().is_empty());
     Ok(())
+}
+
+/// `notation/analyze` takes a document's forms at once, so what it says
+/// of one form can depend on the others; each row says which form it is
+/// about, by its place in the list, from zero, as `notation/read`'s `at`
+/// does. Given two forms, the first defined, it answers one row, for the
+/// second.
+#[dialog_common::test]
+async fn it_analyzes_a_document_and_says_which_form_each_row_is_about() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    supply_analyze(&session, Arc::new(Defined::default()));
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    let a: Entity = "id:a".parse()?;
+    write(&branch, &session, the!("note/text"), &a, "a note").await?;
+    write(
+        &branch,
+        &session,
+        the!("def/name"),
+        &"id:d".parse()?,
+        "known",
+    )
+    .await?;
+    let query = PremiseQuery::new(
+        vec![texts(), analyze_document(&["known", "unknown"])?],
+        "this",
+        ["out", "at"],
+    )?;
+    let rows = branch
+        .query()
+        .select(query)
+        .perform(&session)
+        .try_vec()
+        .await?;
+    let said: Vec<(Option<&Value>, Option<&Value>)> = rows
+        .iter()
+        .map(|row| (row.values.get("at"), row.values.get("out")))
+        .collect();
+    assert_eq!(
+        said,
+        vec![(
+            Some(&Value::UnsignedInt(1)),
+            Some(&text("nothing defines String(\"unknown\")"))
+        )],
+        "{rows:?}"
+    );
+    Ok(())
+}
+
+/// `forms` is a list: a premise giving it another value is refused as it
+/// is built, naming the cell.
+#[dialog_common::test]
+fn it_refuses_an_analysis_of_what_is_not_a_list_of_forms() {
+    let mut terms = Parameters::new();
+    terms.insert("forms".into(), Term::Constant(text("(concept)")));
+    terms.insert("message".into(), Term::var("out"));
+    let refused = NotationAnalyzeQuery::new(terms);
+    assert!(
+        matches!(&refused, Err(TypeError::KindMismatch { binding, .. }) if binding == "forms"),
+        "{refused:?}"
+    );
 }
 
 /// What a premise query asking `broken` over one text answers.
