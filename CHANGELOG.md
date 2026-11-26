@@ -44,6 +44,7 @@ What this changes for you:
 
 Why: a rule's entity should be one per rule, not one per writer's
 habit of naming what it does not read.
+
 ### A claim this replica cannot read yet is treated as if it did not exist
 
 [#884](https://github.com/dialog-db/dialog-db/pull/884)
