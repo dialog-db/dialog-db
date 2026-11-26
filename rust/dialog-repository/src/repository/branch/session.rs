@@ -49,13 +49,13 @@ use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
+use crate::rules::error::{Hydrated, RuleError, judge};
 #[cfg(test)]
 use crate::rules::is_rule_attribute;
 use crate::rules::{
     RuleKey, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
-    conclusion_attr, derives_attr, derives_keys, derives_selector, head_onto, hydrate,
-    hydrate_inductive, invalid_attr, quarantined_attr, rule_entities, source_attr, source_bytes,
-    source_selector,
+    conclusion_attr, derives_attr, derives_keys, derives_selector, error_attr, head_onto,
+    invalid_attr, quarantined_attr, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -1297,6 +1297,10 @@ impl<'a> QueryEnv<'a> {
                 let rows = Box::pin(self.select_invalid(input)).await?;
                 return Ok(A::rows(rows));
             }
+            if input.attribute() == Some(&*ERROR) {
+                let rows = Box::pin(self.select_error(input)).await?;
+                return Ok(A::rows(rows));
+            }
             let format = self.format().await?;
             let manifest = format.manifest.clone();
             self.record_demand(&input, &manifest);
@@ -1868,26 +1872,21 @@ impl<'a> QueryEnv<'a> {
         rule_entity: Entity,
         bytes: &[u8],
     ) -> Result<Option<DeductiveRule>, EvaluationError> {
-        let cache = self
-            .sources
-            .first()
-            .map(|source| source.as_view().rule_cache());
-        if let Some(body) = cache
-            .as_ref()
-            .and_then(|cache| cache.body(&rule_entity, bytes))
-        {
-            return Ok(Some(body));
+        Ok(match self.judged(&rule_entity, bytes) {
+            Ok(Hydrated::Deductive(rule)) => Some(rule),
+            _ => None,
+        })
+    }
+
+    /// What the body `bytes` stored under `entity` is on this release,
+    /// through the first line's rule cache, which remembers either
+    /// outcome: a body that did not compile is judged once, as one that
+    /// did.
+    fn judged(&self, entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError> {
+        match self.sources.first() {
+            Some(source) => source.as_view().rule_cache().judged(entity, bytes),
+            None => judge(entity, bytes),
         }
-        let Ok(rule) = hydrate(bytes) else {
-            return Ok(None);
-        };
-        if !rule.stored_as(&rule_entity) {
-            return Ok(None);
-        }
-        if let Some(cache) = cache {
-            cache.record_body(rule_entity, bytes, rule.clone());
-        }
-        Ok(Some(rule))
     }
 
     /// The committed rule entities under `index` at `key` on `source`,
@@ -2130,40 +2129,8 @@ static QUARANTINED: LazyLock<CorpusRelation> = LazyLock::new(quarantined_attr);
 /// The `dialog.rule/invalid` attribute, compared on every select.
 static INVALID: LazyLock<CorpusRelation> = LazyLock::new(invalid_attr);
 
-/// Why a stored rule body is not read, or `None` when it is: a rule
-/// this release decodes, stored under the identity it hashes to. The
-/// body's format is probed before it is decoded, so a body an older or
-/// a newer release wrote is told apart from one that is no rule at all.
-fn invalid_reason(entity: &Entity, bytes: &[u8]) -> Option<String> {
-    use dialog_query::rule::body::{FORMAT, TERMS_FORMAT, format_of};
-    match format_of(bytes) {
-        Some(format) if format > FORMAT => {
-            return Some(format!(
-                "newer: the body is in format {format}, and this release reads up to {FORMAT}"
-            ));
-        }
-        Some(format) if format < TERMS_FORMAT => {
-            // A body an earlier format spelled the same way still reads.
-            if hydrate(bytes).is_ok_and(|rule| rule.stored_as(entity))
-                || hydrate_inductive(bytes).is_ok()
-            {
-                return None;
-            }
-            return Some(format!(
-                "older: the body is in format {format}, which `upgrade_rules` rewrites to {TERMS_FORMAT}"
-            ));
-        }
-        _ => {}
-    }
-    match hydrate(bytes) {
-        Ok(rule) if rule.stored_as(entity) => None,
-        Ok(_) => Some("forged: the body does not hash to the identity it is stored under".into()),
-        Err(error) => match hydrate_inductive(bytes) {
-            Ok(_) => None,
-            Err(_) => Some(format!("undecodable: {error}")),
-        },
-    }
-}
+/// The `dialog.rule/error` attribute, compared on every select.
+static ERROR: LazyLock<CorpusRelation> = LazyLock::new(error_attr);
 
 impl<'a> QueryEnv<'a> {
     /// The rule facts of the layers this query reads rules from.
@@ -2246,7 +2213,7 @@ impl<'a> QueryEnv<'a> {
             .filter_map(|(entity, bytes)| {
                 Some(Fact {
                     the: INVALID.clone(),
-                    is: Value::String(invalid_reason(&entity, &bytes)?),
+                    is: Value::String(self.judged(&entity, &bytes).err()?.invalid_reason()?),
                     of: entity,
                     cause: None,
                 })
@@ -2260,6 +2227,61 @@ impl<'a> QueryEnv<'a> {
         Ok(Box::pin(stream::iter(
             rows.into_iter().map(|row| Ok(row.into())),
         )))
+    }
+
+    /// `dialog.rule/error` rows: one per rule the layers hold and this
+    /// release does not evaluate, of the rule's entity and valued with
+    /// the diagnostic: every stored body that is no rule here, for its
+    /// own reason, and every rule the program analysis sets aside, as a
+    /// cycle. Narrowed by the selector's entity and value. Nothing stored
+    /// under the attribute is read.
+    async fn select_error(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
+        let errors = self
+            .rule_errors()
+            .await
+            .map_err(|error| DialogCorpusError::Storage(format!("rule errors: {error}")))?;
+        let rows: Vec<Fact> = errors
+            .into_iter()
+            .map(|(rule, error)| Fact {
+                the: ERROR.clone(),
+                of: rule,
+                is: Value::String(error.to_string()),
+                cause: None,
+            })
+            .filter(|row| {
+                input.entity().is_none_or(|of| *of == row.of)
+                    && input.value().is_none_or(|is| *is == row.is)
+            })
+            .collect();
+        Ok(Box::pin(stream::iter(
+            rows.into_iter().map(|row| Ok(row.into())),
+        )))
+    }
+
+    /// Every rule the layers hold that this release does not evaluate,
+    /// with why, sorted by rule: each stored body that is no rule here
+    /// (judged once and remembered, see [`judged`](Self::judged)), and
+    /// each rule the program analysis sets aside for closing a cycle.
+    pub(crate) async fn rule_errors(&self) -> Result<Vec<(Entity, RuleError)>, EvaluationError> {
+        let bodies = self.rule_bodies().await?;
+        let mut seen: HashSet<Entity> = HashSet::new();
+        let mut errors: Vec<(Entity, RuleError)> = Vec::new();
+        for (entity, bytes) in bodies {
+            if !seen.insert(entity.clone()) {
+                continue;
+            }
+            if let Err(error) = self.judged(&entity, &bytes) {
+                errors.push((entity, error));
+            }
+        }
+        for quarantine in self.quarantined().await? {
+            errors.push((quarantine.rule.clone(), RuleError::from(&quarantine)));
+        }
+        errors.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(errors)
     }
 
     /// Every rule the program analysis sets aside, over every deductive
@@ -2336,26 +2358,17 @@ impl<'a> QueryEnv<'a> {
     /// inert, as at resolution.
     async fn every_rule(&self) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let bodies = self.rule_bodies().await?;
-        let cache = self
-            .sources
-            .first()
-            .map(|source| source.as_view().rule_cache());
         let mut rules: Vec<DeductiveRule> = Vec::new();
         let mut seen: HashSet<Entity> = HashSet::new();
         for (entity, bytes) in bodies {
             if !seen.insert(entity.clone()) {
                 continue;
             }
-            let cached = cache.as_ref().and_then(|cache| cache.body(&entity, &bytes));
-            let rule = match cached {
-                Some(rule) => rule,
-                // Inductive rules share the attribute and do not decode.
-                None => match hydrate(&bytes) {
-                    Ok(rule) if rule.stored_as(&entity) => rule,
-                    _ => continue,
-                },
-            };
-            rules.push(rule);
+            // Inductive rules share the attribute and are no deductive
+            // rule; a body that is no rule is inert.
+            if let Ok(Hydrated::Deductive(rule)) = self.judged(&entity, &bytes) {
+                rules.push(rule);
+            }
         }
         Ok(rules)
     }

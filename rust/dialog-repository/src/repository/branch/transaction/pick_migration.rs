@@ -597,3 +597,150 @@ async fn a_branch_lists_the_rule_bodies_it_does_not_read() -> Result<()> {
     );
     Ok(())
 }
+
+/// The rule bodies `branch` does not read, as `dialog.rule/error`
+/// answers: each rule's entity and the diagnostic, sorted by entity.
+async fn errors(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, String)>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(json!({ "with": {
+        "error": { "the": "dialog.rule/error", "as": "text:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("error".to_string(), Term::<Any>::var("error"));
+    let rows: Vec<ConceptConclusion> = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(operator)
+        .try_vec()
+        .await?;
+    let mut listed: Vec<(Entity, String)> = rows
+        .iter()
+        .map(|row| Ok((row.get::<Entity>("this")?, row.get::<String>("error")?)))
+        .collect::<Result<_>>()?;
+    listed.sort();
+    Ok(listed)
+}
+
+/// A body in the current format that decodes and does not compile: a
+/// head declared `integer:` whose variable the body binds from a field
+/// declared `text:`, which the analysis refuses.
+fn ill_typed_body() -> Result<Vec<u8>> {
+    Ok(serde_ipld_dagcbor::to_vec(&json!({
+        "format": 4,
+        "rule": {
+            "deduce": { "with": { "n": { "the": "org/n", "as": "integer:" } } },
+            "when": [{
+                "assert": { "with": { "label": { "the": "doc/label", "as": "text:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "label": { "?": { "name": "n" } }
+                }
+            }]
+        }
+    }))?)
+}
+
+/// "A rule a branch cannot read is answered as a compile error." Every
+/// body `dialog.rule/invalid` lists is answered under `dialog.rule/error`
+/// with a diagnostic naming its kind: older, newer, undecodable, forged,
+/// and a body that decodes and does not type-check, which is
+/// `ill-typed` there and still `undecodable` under the older relation.
+/// The rule that reads still derives beside them.
+#[dialog_common::test]
+async fn a_branch_answers_each_rule_it_does_not_read_as_an_error() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let doc: Entity = "doc:1".parse()?;
+    install(&branch, &operator, &["tag_from_label"]).await?;
+    let older = stored_by_release("tag_from_label");
+    assert_eq!(
+        errors(&branch, &operator).await?,
+        vec![(
+            older.clone(),
+            "older: the body is in format 3, which `upgrade_rules` rewrites to 4".to_string()
+        )]
+    );
+
+    upgrade(&branch, &operator).await?;
+    let rewritten = branch
+        .claims()
+        .select(Selector::new().the("dialog.rule/source".parse()?))
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|item| item.and_then(|view| view.to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [current] = rewritten.as_slice() else {
+        anyhow::bail!("the upgrade leaves one rule body: {}", rewritten.len());
+    };
+    assert_eq!(
+        errors(&branch, &operator).await?,
+        vec![],
+        "the rewritten rule is read"
+    );
+
+    let newer: Entity = "rule:newer".parse()?;
+    let garbage: Entity = "rule:garbage".parse()?;
+    let forged: Entity = "rule:forged".parse()?;
+    let ill_typed: Entity = "rule:ill-typed".parse()?;
+    write(
+        &branch,
+        &operator,
+        vec![
+            (
+                "dialog.rule/source",
+                &newer,
+                Value::Bytes(serde_ipld_dagcbor::to_vec(&json!({ "format": 99 }))?),
+            ),
+            (
+                "dialog.rule/source",
+                &garbage,
+                Value::Bytes(vec![0xff, 0x00]),
+            ),
+            ("dialog.rule/source", &forged, current.is.clone()),
+            (
+                "dialog.rule/source",
+                &ill_typed,
+                Value::Bytes(ill_typed_body()?),
+            ),
+            ("doc/label", &doc, Value::String("draft".into())),
+        ],
+    )
+    .await?;
+
+    let listed = errors(&branch, &operator).await?;
+    let reason = |entity: &Entity| {
+        listed
+            .iter()
+            .find(|(listed, _)| listed == entity)
+            .map(|(_, reason)| reason.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert_eq!(
+        reason(&newer),
+        "newer: the body is in format 99, and this release reads up to 5"
+    );
+    assert!(reason(&garbage).starts_with("undecodable: "), "{listed:?}");
+    assert_eq!(
+        reason(&forged),
+        "forged: the body does not hash to the identity it is stored under"
+    );
+    assert!(reason(&ill_typed).starts_with("ill-typed: "), "{listed:?}");
+
+    let invalid = invalid(&branch, &operator).await?;
+    assert!(
+        invalid
+            .iter()
+            .any(|(entity, reason)| *entity == ill_typed && reason.starts_with("undecodable: ")),
+        "the older relation still answers the ill-typed body as undecodable: {invalid:?}"
+    );
+    assert_eq!(
+        read(&branch, &operator, "org/tag", "text:", "many", &doc).await?,
+        vec![Value::String("draft".into())],
+        "the rule that reads still derives, beside four that do not"
+    );
+    Ok(())
+}
