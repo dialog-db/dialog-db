@@ -3777,8 +3777,8 @@ const NOTEBOOK_REWRITES: [(&str, &str); 3] = [
     ),
     // At the tail, as the chain's premise says.
     (
-        "(block/insert of: ?b notebook: ?n source: ?s next: case:none prev: ?p)",
-        "(block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)",
+        "(block/chain ?b next: case:none)\n  (block/insert of: ?b notebook: ?n source: ?s next: case:none prev: ?p)",
+        "(block/chain ?b next: case:none)\n  (block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)",
     ),
     // The fields the premise binds, retracted by value rather than each
     // field's every claim: both are of cardinality one.

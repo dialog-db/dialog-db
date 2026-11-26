@@ -473,7 +473,7 @@
 ; agent's opinion and not the design's. YAML 773.
 (rule (block/position ?b at: ?at)
   (block/chain ?b next: case:none)
-  (block/insert of: ?b notebook: ?n source: ?s next: case:none prev: ?p)
+  (block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)
   (block/position ?p at: ?lo)
   (dialog/position ?b after: ?lo before: "" is: ?at))
 
@@ -487,7 +487,7 @@
 ; agent's opinion and not the design's. YAML 811.
 (rule (block/position ?b at: ?at)
   (block/chain ?b next: ?x)
-  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p)
+  (block/insert of: ?b notebook: ?n source: ?s next: _ prev: ?p)
   (block/position ?p at: ?lo)
   (block/position ?x at: ?hi)
   (dialog/position ?b after: ?lo before: ?hi is: ?at))
@@ -557,7 +557,7 @@
 ; would come back.
 
 ; Retract a removed block's own facts.
-(rule (retract (notebook/block ?b))
+(rule (retract (notebook/block ?b notebook: ?n source: ?s))
   (block/remove subject: ?b notebook: ?n ...)
   (notebook/block ?b notebook: ?n source: ?s))
 
