@@ -26,6 +26,8 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Current, Publish, Resolve};
 use dialog_search_tree::nodes;
+#[cfg(feature = "helpers")]
+use futures_util::stream::{Empty, empty};
 use futures_util::{Stream, StreamExt as _, stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -219,9 +221,8 @@ impl Branch {
     pub fn commit_entries(
         &self,
         entries: Vec<(Key, State<Datum>)>,
-    ) -> Commit<'_, futures_util::stream::Empty<Instruction>> {
-        self.commit(futures_util::stream::empty())
-            .with_entries(entries)
+    ) -> Commit<'_, Empty<Instruction>> {
+        self.commit(empty()).with_entries(entries)
     }
 }
 
