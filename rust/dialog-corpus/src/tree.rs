@@ -1289,17 +1289,8 @@ fn reconstruct(
 /// `user:a b`). Anything else is refused as an invalid entity.
 fn check_written_entity(entity: &crate::Entity) -> Result<(), DialogCorpusError> {
     let uri = entity.as_str();
-    if uri
-        .chars()
-        .any(|c| c.is_ascii_whitespace() || c.is_control())
-    {
-        return Err(DialogCorpusError::InvalidEntity(format!(
-            "an entity holds whitespace or a control character: {uri:?}"
-        )));
-    }
-    Uri::check_stored(uri).map_err(|_| {
-        DialogCorpusError::InvalidEntity(format!("an entity is not a canonical URI: {uri:?}"))
-    })
+    Uri::check_written(uri)
+        .map_err(|error| DialogCorpusError::InvalidEntity(format!("{error}: {uri:?}")))
 }
 
 /// The inclusive key range a selector's scan reads.
