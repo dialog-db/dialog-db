@@ -78,6 +78,7 @@ pub use revision_ext::*;
 
 /// Pluggable deductive-rule resolution seam for query sessions.
 pub(crate) mod rules;
+pub use rules::error::RuleError;
 pub use rules::{RuleCache, Transient};
 
 pub use dialog_corpus::{Exporter, Importer};
