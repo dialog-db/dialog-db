@@ -2120,3 +2120,16 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
   The shape stands in about 300 places on this branch, almost all of them query heads. Which form he means is asked of him: the derived attribute, the query head, or a stored attribute with its entity first.
 - On 2: `session:` under the bare name makes a bare name resolve differently on two replicas of one space, since `session:` is not synced. And when it and the primary both define one name, no precedence is decided.
 - On 4: 2026-11-14 decided that a quoted `( )` where a value stands is a list value, and a variable in it binds, as a list pattern. Under 4, `'(1 2 3)` is a form, and `?x` in a quote is literal. The reader reads `'` only: a backtick and `~` are not tokens.
+
+## 2026-11-26, Decided: the domain form, shadowing, and quotes
+
+**Asked.** The maintainer answered what the entry above left open, relayed.
+
+**Decided.** By the maintainer:
+
+- **5, the domain form.** The dropped form is an operator that is a dotted domain with no `/name`: `(xyz.todo ?t title: ?x …)`, `(xyz.list ?t in: … key: …)`, as a premise, a head or an assert. It is neither an attribute (`xyz.todo/title`) nor a concept. A stored attribute with its entity first is fine, and so are an undotted `word/field` derived read and a query's head. No example writes the domain form.
+- **2b, shadowing.** When `session:` and the primary both define a name, the session's definition shadows. A bare name can resolve differently on two devices, and he accepts that.
+- **4, quotes.** `[ ]` is the only spelling of a list. `'( )` is always a form as data, and `?x` in it is a literal variable. A backtick with `~` substitutes. The coordinating session's call on the type, which he delegated: a quoted form is the value `notation/read` gives for that text. It is a plain value, not an entity, and nothing is stored; two such values are equal by content, so `'(todo ?t)` equals what reading `"(todo ?t)"` gives, and either can be passed to `notation/analyze`. Source positions do not make them unequal.
+- **6.** Cells not yet evaluated are not seen by analysis, as expected. Layers of another repository are deferred until the notation is rolled out.
+
+**Learned.** The reader and the walker accept the domain form today. It is the primitive read, the form a line is expanded to (`primitive.rs`, `design/macros/primitive.md`). A select of a stored attribute answers in it (`Query::row`, `(xyz.c x:1 name: "r")`). It is written 764 times in the crate's sources, tests and these notes, most of them trees the walker makes or tests of the primitive forms. Refusing it where a document writes it is the wrapper refusal of 2026-11-25 again: the walker still writes it, and the primitive forms still read it.
