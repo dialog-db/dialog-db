@@ -50,11 +50,13 @@ One form per name `as:` takes: `text`, `natural`, `integer`, `float`, `boolean`,
 
 Under the integer lens 2.5 is 2 (F1). Where the constraint is placed on a scan (F3), that is what it does, because it is the lens: `(integer ?t)` over a claim of 2.5 binds `?t` to 2. This matches what `natural:` does (it floors) and for the same reason: number types are views over one domain of numbers, which coerce only where precision is lost and filter what is out of range (`notes/identity-storage-notation.md`, Views read and write, cited by `viewed_as`). A constraint that dropped 2.5 instead would answer otherwise than `as: :integer` on the same line, for the same claims: two spellings of one type would disagree, which is the wrong answer the constraint above rules out.
 
-The long form says this outright: `(integer of: ?n is: ?m)` binds `?m` to `?n` read through the lens, so 2.5 is 2, -3 is -3, and `"x"` is no match.
+The conversion says this outright: `(integer/from ?n is: ?m)` binds `?m` to `?n` read through the lens, so 2.5 is 2, -3 is -3, and `"x"` is no match.
+
+**Decided, by the maintainer, 2026-11-26:** conversion is spelled `(float/from ?n is: ?f)`, `(integer/from ?n is: ?m)`, the source positional and the result under `is:`. `(integer ?t)` alone stays the constraint that narrows or filters. The spelling `(integer of: ?n is: ?m)`, quoted above as his first wording, is rejected: one name doing both jobs, constraining and converting, confused him. Not built.
 
 ## (b2) A cast, at the lossy edge
 
-The maintainer, 2026-11-26, of #895 (one variable through a `natural:` field and a `float:` field stays a compile error): "if there should be way to cast though". The long form is that cast: `(float of: ?q is: ?f)` binds `?f` to `?q` read through the float lens, written where the author means the conversion, so the loss is chosen, not met. What it does at each edge, by the lenses as they are (F1) and #892's float arithmetic:
+The maintainer, 2026-11-26, of #895 (one variable through a `natural:` field and a `float:` field stays a compile error): "if there should be way to cast though". The conversion is that cast: `(float/from ?q is: ?f)` binds `?f` to `?q` read through the float lens, written where the author means the conversion, so the loss is chosen, not met. What it does at each edge, by the lenses as they are (F1) and #892's float arithmetic:
 
 | cast | of | gives | why |
 |---|---|---|---|
@@ -65,7 +67,7 @@ The maintainer, 2026-11-26, of #895 (one variable through a `natural:` field and
 | `natural` | -1 | no match | the natural lens drops what is out of its range |
 | `integer` | `"x"` | no match | not a number |
 
-A cast never fails: it rounds, floors or gives no match, as the lens does. An author who wants the cast exact writes the round trip, `(float of: ?q is: ?f) (integer of: ?f is: ?q)`, which matches only where nothing was lost. Not decided: whether a cast that loses precision warns at compile time where the analyzer knows the value, a constant past 2^53 say. Not built.
+A cast never fails: it rounds, floors or gives no match, as the lens does. An author who wants the cast exact writes the round trip, `(float/from ?q is: ?f) (integer/from ?f is: ?q)`, which matches only where nothing was lost. Not decided: whether a cast that loses precision warns at compile time where the analyzer knows the value, a constant past 2^53 say. Not built.
 
 ## (c) Incompatible
 
@@ -76,7 +78,7 @@ A cast never fails: it rounds, floors or gives no match, as the lens does. An au
 ## (d) How it lowers, and what is stored
 
 - **Short form**, `(integer ?t)`: the `type` constraint, `{"assert": "type", "where": {"of": {"?": {"name": "t"}}, "is": {"type": {"int": {}}}}}`. The engine change: `TypeOf.is` read and written in the stable wire form of `type_system/wire.rs` (F7), so that a stored body holds a spelling that does not move when a value type is added. Nothing else in the grammar changes.
-- **Long form**, `(integer of: ?n is: ?m)`: no engine formula reads a value through a type and binds the result. It needs one, a formula of `of:` and `is:` that binds `is` to `Type::view(of)` and is no match where the view sees nothing; its name in the descriptor (`type/int`, or one name with the type as a parameter) is open.
+- **Conversion**, `(integer/from ?n is: ?m)`: no engine formula reads a value through a type and binds the result. It needs one per type, a formula of the source and `is:` that binds `is` to `Type::view(source)` and is no match where the view sees nothing; `text/from` already exists in that shape, so `integer/from`, `float/from` and `natural/from` follow it.
 - **Format:** a body that holds either is written in format 5. A format 4 reader cannot read the wire form, so such a body is not one format 4 can say, as a pattern was not; format 5 is unreleased (F8), so no new format number is needed, provided no released body holds a `TypeOf` already (H2).
 
 ## (e) What the analyzer infers from `(integer ?t)`
@@ -89,10 +91,10 @@ Where `?t` is bound by a formula, `(+ ?a : 1 is: ?t)`, or by any premise inferen
 
 | Decision: what `(integer ?t)` does where inference places it on no scan, for: compile time and run time never disagree on a type |
 |---|---|---|---|---|
-| criterion \ approach | A. `TypeOf` as it is: keep the rows whose value is of the kind | B. keep the rows the type reads: `Type::reads` | C. accept the short form only where it reaches a scan; elsewhere refuse it, naming the long form | D. lower every short form to the long form, a fresh variable for what the lens read |
+| criterion \ approach | A. `TypeOf` as it is: keep the rows whose value is of the kind | B. keep the rows the type reads: `Type::reads` | C. accept the short form only where it reaches a scan; elsewhere refuse it, naming the conversion, `(integer/from ?n is: ?m)` | D. lower every short form to the conversion, `(integer/from ?n is: ?m)`, a fresh variable for what the lens read |
 | agrees with `as:` and with itself on a scan | 🔴 2.5 is dropped here and read as 2 on a scan; an integer 5 under `natural` is dropped here and kept on a scan | 🟡 2.5 is kept, as the scan keeps it, but kept as 2.5 | 🟢 only the scan case exists | 🟢 2.5 is 2 wherever it stands |
 | the inferred type is the value's type | 🟢 a kept value is of the kind | 🔴 `?t` is inferred integer and holds the float 2.5: downstream arithmetic computes on a float | 🟢 | 🟢 `?m` is what the lens gave |
-| what the author writes | the short form anywhere | the short form anywhere | 🟡 the long form where no scan binds the variable; the refusal names it | the short form anywhere; the head shows the narrowed value |
+| what the author writes | the short form anywhere | the short form anywhere | 🟡 the conversion where no scan binds the variable; the refusal names it | the short form anywhere; the head shows the narrowed value |
 | how the notation tells the two cases apart | no need | no need | 🟡 it asks the engine's analysis whether `?t`'s binder was retyped, when the rule is compiled | no need |
 | engine change | the wire form only (d) | the wire form, and `TypeOf` evaluated by `reads` | the wire form, and a way to ask where a constraint was placed | 🟡 the wire form and the new view formula (d) |
 | meets the maintainer's "filters out other types" | 🟢 as said | 🟢 by the lens's reading of "other" | 🟡 refuses where he would filter | filters what the lens does not see, and narrows what it does |
