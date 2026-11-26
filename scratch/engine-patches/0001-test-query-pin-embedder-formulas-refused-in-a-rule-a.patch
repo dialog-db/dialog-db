@@ -1,7 +1,7 @@
 From 3ce8cb3bdc00876f3da92bba55f18a474279da2e Mon Sep 17 00:00:00 2001
 From: "R. Daneel Olivaw" <rdaneel@gozala.io>
 Date: Thu, 26 Nov 2026 01:07:41 +0000
-Subject: [PATCH 1/4] test(query): pin embedder formulas, refused in a rule and
+Subject: [PATCH 1/7] test(query): pin embedder formulas, refused in a rule and
  as data, asked in a premise query
 
 ---

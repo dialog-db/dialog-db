@@ -1,7 +1,7 @@
 From 4e948620f1054969ffef797621a942fe81bdb1f3 Mon Sep 17 00:00:00 2001
 From: "R. Daneel Olivaw" <rdaneel@gozala.io>
 Date: Thu, 26 Nov 2026 01:42:42 +0000
-Subject: [PATCH 3/4] style(query): import what the premise query uses
+Subject: [PATCH 3/7] style(query): import what the premise query uses
 
 ---
  rust/dialog-query/src/query/premises.rs | 3 ++-

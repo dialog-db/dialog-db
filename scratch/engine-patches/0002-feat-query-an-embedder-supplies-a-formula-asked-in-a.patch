@@ -1,7 +1,7 @@
 From 62824650115823de7825110880969682c63efbd4 Mon Sep 17 00:00:00 2001
 From: "R. Daneel Olivaw" <rdaneel@gozala.io>
 Date: Thu, 26 Nov 2026 01:40:53 +0000
-Subject: [PATCH 2/4] feat(query)!: an embedder supplies a formula, asked in a
+Subject: [PATCH 2/7] feat(query)!: an embedder supplies a formula, asked in a
  premise query and held by no rule
 
 `Extension` and `Extensions` give the engine an embedder's pure formula,

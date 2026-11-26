@@ -1,7 +1,7 @@
 From 0746922b0e76b309d937fc8cc742cef5b9c32b41 Mon Sep 17 00:00:00 2001
 From: "R. Daneel Olivaw" <rdaneel@gozala.io>
 Date: Thu, 26 Nov 2026 01:47:22 +0000
-Subject: [PATCH 4/4] style(repository): import what the extension tests use
+Subject: [PATCH 4/7] style(repository): import what the extension tests use
 
 ---
  .../src/repository/branch/extension_tests.rs  | 20 ++++++++-----------
