@@ -1856,7 +1856,7 @@ impl<'a> QueryEnv<'a> {
             let fact = match row.to_owned() {
                 Ok(fact) => fact,
                 Err(DialogCorpusError::CorruptEntry(reason)) => {
-                    tracing::warn!(%reason, "ignoring corrupt stored row");
+                    dialog_corpus::pass_over(row.key(), reason);
                     continue;
                 }
                 Err(error) => return Err(error),
