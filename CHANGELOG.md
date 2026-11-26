@@ -36,7 +36,12 @@ What this changes for you:
   `NotationAnalyzeQuery` (`ResolverQuery::NotationAnalyze`), and `Facts`,
   the reads an analyzer makes through the query's environment.
 - New: `dialog_query::query::{PremiseQuery, PremiseRow}`, a query of
-  premises planned as a rule's body is and asked with no rule.
+  premises planned as a rule's body is and asked with no rule. It needs
+  no entity: its rows are the values it selects, and the entity a
+  variable binds only when asked with `.this(variable)`. So
+  `notation/read` of a constant text, alone, answers on a branch holding
+  nothing. A selected variable a row binds to no value is absent from
+  that row.
   `TypeError::UnselectedVariable` refuses one that selects what no
   premise binds.
 - `notation/analyze`'s `forms` is a list, the document's forms in the
