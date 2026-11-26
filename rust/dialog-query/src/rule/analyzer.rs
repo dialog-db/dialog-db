@@ -32,6 +32,7 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 use crate::corpus::Type as ValueType;
 use crate::error::{AnalysisError, TypeError};
+use crate::formula::FormulaQuery;
 use crate::planner::categorize;
 use crate::premise::Negation;
 use crate::proposition::Proposition;
@@ -421,6 +422,19 @@ pub fn analyze_with(
     kind: RuleKind,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<AnalyzedRule, AnalysisError> {
+    // No rule holds a formula an embedder supplies: a rule is stored and
+    // read back from its body, which cannot say the embedder's code.
+    if let Some(formula) = premises.iter().find_map(|premise| match premise {
+        Premise::Assert(Proposition::Formula(FormulaQuery::Extension(extension)))
+        | Premise::Unless(Negation(Proposition::Formula(FormulaQuery::Extension(extension)))) => {
+            Some(extension.name())
+        }
+        _ => None,
+    }) {
+        return Err(AnalysisError::EmbedderFormula {
+            formula: formula.to_string(),
+        });
+    }
     let head: Vec<(String, Kind)> = conclusion
         .with()
         .iter()

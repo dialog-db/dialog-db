@@ -14,6 +14,61 @@ says how to cut a release.
 
 ## Unreleased
 
+### An embedder supplies a formula of its own, asked in a premise query and held by no rule
+
+[#TBD](https://github.com/dialog-db/dialog-db/pulls). The formulas the engine knows are a closed
+set. An embedder whose code is a pure function of a premise's inputs, a
+notation's parser or checker say, now gives it to the engine as an
+`Extension` and builds premises of it through an `Extensions` value it
+owns: nothing is registered globally, and a premise carries the
+extension it was built of. Such a premise is evaluated by the new
+`PremiseQuery`, a query of premises planned as a rule's body is and asked
+with no rule, whose rows are an entity and the values of the variables it
+selects.
+
+What this changes for you:
+
+- `dialog_query::formula::{Extension, Extensions, ExtensionQuery}`: an
+  extension names itself, declares its cells as a derived formula does,
+  and computes any number of rows for a row in. `Extensions::apply(name,
+  terms)` gives the premise, `FormulaQuery::Extension`.
+- `dialog_query::query::{PremiseQuery, PremiseRow}`:
+  `PremiseQuery::new(premises, "this", ["out", ...])` plans when it is
+  built; `select` and `subscribe` take it as any query. A subscription
+  over it evaluates it again in full when what its premises read
+  changes: it is never restricted to one entity.
+- New refusals, each before any evaluation:
+  `TypeError::UnknownFormula` for a premise naming an extension the
+  `Extensions` does not hold; `TypeError::EmbedderFormula` (from the new
+  `AnalysisError::EmbedderFormula`) for a deductive or inductive rule
+  holding one, directly or compiled from its descriptor; and
+  `TypeError::UnselectedVariable` for a premise query selecting a
+  variable no premise binds. A query or a rule written as data cannot
+  name an extension: it does not deserialize, and an extension's
+  premise has no serialized form.
+- `FormulaQuery` has a variant more. A `match` on it outside this crate
+  needs an arm for it.
+- An `Extension` is `Send + Sync` on every target, the browser's
+  included, since premises are held in statics.
+
+Why: a notebook asks the notation to parse and check its source with
+ordinary queries, and the notation's code cannot be one of the engine's
+formulas. A rule is stored and read back from its body, and even a rule
+laid over one query only is written as facts and read back, so a rule
+holding an embedder's code would run only where that embedder is, or
+not at all. Keeping extensions out of every rule, and asking them in a
+query of premises, makes that refusal one check at rule compile, with
+nothing about the embedder's code frozen into what a replica stores.
+What this gives up: a rule, and so a command a rule answers, cannot ask
+an extension. That would take a formula every replica has, with its
+behaviour versioned in what is stored.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs changes: no rule body, fact or
+  format moves, and an older release reads everything this one writes.
+  An extension is never stored.
+
 ### A cardinality-one write succeeds only the claims of its own type
 
 [#882](https://github.com/dialog-db/dialog-db/pull/882)

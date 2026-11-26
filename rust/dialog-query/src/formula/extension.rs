@@ -22,8 +22,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use dialog_common::{ConditionalSend, ConditionalSync};
-
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::bindings::Bindings;
 use crate::formula::cell::Cells;
@@ -37,7 +35,13 @@ pub type Output = Vec<(&'static str, Value)>;
 
 /// A formula an embedder supplies: a pure function of its input cells,
 /// giving any number of rows.
-pub trait Extension: fmt::Debug + ConditionalSend + ConditionalSync {
+///
+/// `Send` and `Sync` on every target, the browser's too, where
+/// `ConditionalSend` asks for neither: a premise is held in `static`s
+/// (the rules a `#[derive(Concept)]` writes), and a static is `Sync`
+/// wherever it is compiled, so every premise is, and the extension a
+/// premise carries with it.
+pub trait Extension: fmt::Debug + Send + Sync {
     /// Its name, as a premise names it: `notation/parse`.
     fn name(&self) -> &'static str;
 
@@ -80,8 +84,14 @@ impl Extensions {
 
     /// The premise applying the extension `name` to `terms`.
     pub fn apply(&self, name: &str, terms: Parameters) -> Result<FormulaQuery, TypeError> {
-        let _ = (name, terms);
-        todo!("Extensions::apply")
+        let extension = self
+            .by_name
+            .get(name)
+            .ok_or_else(|| TypeError::UnknownFormula { name: name.into() })?;
+        Ok(FormulaQuery::Extension(ExtensionQuery {
+            terms: extension.cells().conform(terms)?,
+            extension: extension.clone(),
+        }))
     }
 }
 
@@ -122,9 +132,26 @@ impl ExtensionQuery {
     }
 
     /// The matches the extension's rows make of `bindings`.
+    ///
+    /// Each row is written to its own copy of the row in, and a write that
+    /// disagrees with what that row holds filters the row, as every
+    /// formula's does ([`emit`](crate::formula::emit)).
     pub(crate) fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-        let _ = bindings;
-        todo!("ExtensionQuery::resolve")
+        let mut matches = Vec::new();
+        for output in self.extension.compute(bindings)? {
+            let mut row = bindings.clone();
+            let written = output
+                .iter()
+                .try_for_each(|(cell, value)| row.write(cell, value));
+            match written {
+                Ok(()) => matches.push(row.source),
+                Err(EvaluationError::Conflict { .. })
+                | Err(EvaluationError::Absent { .. })
+                | Err(EvaluationError::TypeMismatch { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(matches)
     }
 }
 

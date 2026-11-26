@@ -7,8 +7,10 @@ use dialog_corpus::Entity;
 
 use crate::Value;
 use crate::concept::Conclusion;
+use crate::corpus::Type as ValueType;
+use crate::environment::Environment;
 use crate::error::{EvaluationError, TypeError};
-use crate::planner::Conjunction;
+use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::selection::{self, Match};
 
@@ -21,9 +23,9 @@ use super::Application;
 /// It is where a formula an embedder supplies
 /// ([`Extension`](crate::formula::Extension)) is evaluated, since no rule
 /// may hold one. It is planned when it is built, so a premise it cannot
-/// plan is refused then. A subscription over it evaluates it again
-/// whenever what its premises read changes: it is never restricted to
-/// one entity.
+/// plan, or a selected variable no premise binds, is refused then. A
+/// subscription over it evaluates it again whenever what its premises
+/// read changes: it is never restricted to one entity.
 #[derive(Clone, Debug)]
 pub struct PremiseQuery {
     plan: Arc<Conjunction>,
@@ -39,12 +41,22 @@ impl PremiseQuery {
         this: impl Into<String>,
         select: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, TypeError> {
-        let _ = (
-            premises,
-            this.into(),
-            select.into_iter().map(Into::into).collect::<Vec<String>>(),
-        );
-        todo!("PremiseQuery::new")
+        let this = this.into();
+        let select: Vec<String> = select.into_iter().map(Into::into).collect();
+        let plan = Planner::from(premises).plan(&Environment::new())?;
+        if let Some(variable) = std::iter::once(&this)
+            .chain(&select)
+            .find(|variable| !plan.binds.contains(variable))
+        {
+            return Err(TypeError::UnselectedVariable {
+                variable: variable.clone(),
+            });
+        }
+        Ok(Self {
+            plan: Arc::new(plan),
+            this,
+            select,
+        })
     }
 }
 
@@ -74,12 +86,29 @@ impl Application for PremiseQuery {
     where
         Env: crate::Scope<'a>,
     {
-        let _ = (&self.plan, &self.this, &self.select);
         (*self.plan).clone().evaluate(selection, env)
     }
 
     fn realize(&self, input: Match) -> Result<PremiseRow, EvaluationError> {
-        let _ = input;
-        todo!("PremiseQuery::realize")
+        let this = match input.value_of(&self.this) {
+            Some(Value::Entity(entity)) => entity.clone(),
+            Some(other) => {
+                return Err(EvaluationError::TypeMismatch {
+                    expected: ValueType::Entity,
+                    actual: other.data_type(),
+                });
+            }
+            None => {
+                return Err(EvaluationError::UnboundVariable {
+                    variable_name: self.this.clone(),
+                });
+            }
+        };
+        let values = self
+            .select
+            .iter()
+            .filter_map(|variable| Some((variable.clone(), input.value_of(variable)?.clone())))
+            .collect();
+        Ok(PremiseRow { this, values })
     }
 }
