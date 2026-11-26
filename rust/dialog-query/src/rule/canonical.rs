@@ -50,7 +50,9 @@ use crate::pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
-use crate::rule::deductive::rename::{Rename, rename_premises, rename_term, variables};
+use crate::rule::deductive::rename::{
+    Rename, blank_premises, rename_premises, rename_term, variables,
+};
 use crate::rule::reference;
 use crate::term::Term;
 use crate::types::Any;
@@ -132,6 +134,10 @@ pub(crate) fn canonicalize(
             field: field.to_string(),
         });
     }
+    // A body variable used once matches what a blank matches and binds
+    // nothing anything else reads, so it is spelled as one.
+    let blanked = blank_premises(premises, &once_used(conclusion, premises, reduce))?;
+    let premises = blanked.as_slice();
     let fields: Vec<(String, Option<String>)> = conclusion
         .with()
         .iter()
@@ -273,6 +279,53 @@ pub(crate) fn canonicalize(
         reduce,
         identity,
     }))
+}
+
+/// The variables other than `this` that a rule concluding
+/// `conclusion` uses exactly once: in one place of one premise, and
+/// nowhere in the head or the reduce clause.
+fn once_used(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+) -> BTreeSet<String> {
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    let mut count = |name: &str| {
+        if name != "this" {
+            *uses.entry(name.to_string()).or_default() += 1;
+        }
+    };
+    for premise in premises {
+        let parameters = premise.parameters();
+        if parameters.has_shapes() {
+            parameters
+                .leaves()
+                .filter_map(Term::name)
+                .for_each(&mut count);
+        } else {
+            parameters
+                .iter()
+                .filter_map(|(_, term)| term.name())
+                .for_each(&mut count);
+        }
+    }
+    let mut used: BTreeSet<String> = uses
+        .into_iter()
+        .filter(|(_, uses)| *uses == 1)
+        .map(|(name, _)| name)
+        .collect();
+    for (name, field) in conclusion.with().iter() {
+        used.remove(name);
+        if let The::Collection { .. } = field.the() {
+            used.remove(&The::key_operand(name));
+        }
+    }
+    for (_, spec) in reduce {
+        if let Some(name) = spec.of.name() {
+            used.remove(name);
+        }
+    }
+    used
 }
 
 /// The names a labeling assigns the variables: the spelling with the
