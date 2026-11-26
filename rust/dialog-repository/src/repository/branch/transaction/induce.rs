@@ -2029,7 +2029,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::Composite;
-    use crate::helpers::test_repo;
+    use crate::helpers::{arrive, test_repo};
     use crate::repository::source::Live;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
@@ -3386,33 +3386,74 @@ mod tests {
     }
 
     /// Forged facts in the carved-out `dialog.rule/*` namespace are
-    /// inert: bytes stored under an entity that is not their content
-    /// address fail the hydration check and never fire — the semantic
-    /// integrity that makes the reserved-namespace carve-out safe.
+    /// refused when a commit here writes them: a rule body stored under
+    /// an entity that is not its content address fails the commit with
+    /// `InvalidRule`, and nothing of it is written.
     #[dialog_common::test]
-    async fn it_ignores_forged_rule_facts() -> Result<()> {
+    async fn it_refuses_to_write_forged_rule_facts() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // A real rule body stored under a *wrong* entity, with a
-        // trigger-index entry pointing at it — the shape a buggy or
-        // malicious writer could produce now that dialog.rule/* is
-        // writable.
         let forged: Entity = "rule:forged".parse()?;
         let on: Entity = "on:doc/title".parse()?;
-        branch
+        let before = branch.revision();
+        let refused = branch
             .transaction()
             .assert(
                 dialog_query::the!("dialog.rule/source")
                     .of(forged.clone())
                     .is(tagger().encode()),
             )
-            .assert(dialog_query::the!("dialog.rule/on").of(forged).is(on))
+            .assert(
+                dialog_query::the!("dialog.rule/on")
+                    .of(forged.clone())
+                    .is(on),
+            )
             .commit()
             .publish()
             .perform(&operator)
-            .await?;
+            .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(CommitError::InvalidRule { rule, reason: crate::RuleError::Forged })
+                    if *rule == forged
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(branch.revision(), before, "nothing is written");
+        Ok(())
+    }
+
+    /// Forged facts in the carved-out `dialog.rule/*` namespace that
+    /// arrive from elsewhere are inert: bytes stored under an entity
+    /// that is not their content address fail the hydration check and
+    /// never fire: the semantic integrity that makes the
+    /// reserved-namespace carve-out safe.
+    #[dialog_common::test]
+    async fn it_ignores_forged_rule_facts_that_arrive() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // A real rule body stored under a *wrong* entity, with a
+        // trigger-index entry pointing at it: the shape a buggy or
+        // malicious writer elsewhere could produce, landed as a pull
+        // lands it.
+        let forged: Entity = "rule:forged".parse()?;
+        let on: Entity = "on:doc/title".parse()?;
+        use dialog_corpus::Statement as _;
+        let mut changes = Changes::new();
+        dialog_query::the!("dialog.rule/source")
+            .of(forged.clone())
+            .is(tagger().encode())
+            .assert(&mut changes);
+        dialog_query::the!("dialog.rule/on")
+            .of(forged)
+            .is(on)
+            .assert(&mut changes);
+        arrive(&branch, &operator, changes).await?;
         branch.refresh(&operator).await?;
 
         let doc: Entity = "doc:1".parse()?;

@@ -35,6 +35,7 @@ use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::{Caches, Live, View};
+use crate::rules::error::refuse_invalid_rules;
 use crate::stack::durable::{Durables, Pinned};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -1304,6 +1305,7 @@ where
         transients.merge(recorded.stimulus().into_layer(session_layer()));
         transients.merge(stack.received.clone());
     }
+    refuse_invalid_rules(&changes, &view.rule_cache())?;
     let mut changes = Box::pin(succession::settle(
         composite.clone(),
         shared_metadata(from_ref(&view), &operator),

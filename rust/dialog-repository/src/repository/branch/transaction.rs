@@ -29,6 +29,7 @@ use crate::placement::{Observed, control_layer};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
+use crate::rules::error::refuse_invalid_rules;
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 pub(crate) use crate::stack::durable::DurableLayer;
 use crate::stack::durable::{Durables, Pinned};
@@ -445,6 +446,7 @@ impl TransactionCommit<&Snapshot> {
         let view = View::at(Live::Snapshot(snapshot), Some(&previous));
         let operator = Identify.perform(env).await?;
         let composite = Composite::of(view.to_source());
+        refuse_invalid_rules(&self.changes, &view.rule_cache())?;
         let mut changes = Box::pin(succession::settle(
             composite.clone(),
             shared_metadata(from_ref(&view), &operator),

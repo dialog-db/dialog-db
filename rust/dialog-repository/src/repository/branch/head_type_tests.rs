@@ -22,7 +22,7 @@ use dialog_query::{
 use futures_util::TryStreamExt as _;
 use serde_json::{Value as Json, json};
 
-use crate::helpers::test_repo;
+use crate::helpers::{arrive, test_repo};
 use crate::{Branch, Repository};
 
 fn fixture() -> Json {
@@ -128,6 +128,23 @@ async fn commit<S: PeerSpace>(
     }
     #[allow(deprecated)]
     transaction.commit().publish().perform(session).await?;
+    Ok(())
+}
+
+/// Lands `statements` on `branch` as they arrive from a replica on the
+/// release that stored them: a body this release does not compile is
+/// refused when a commit here writes it, not when it arrives.
+async fn arrived<S: PeerSpace>(
+    branch: &Branch,
+    session: &Peer<S, Session>,
+    statements: Vec<AttributeStatement>,
+) -> Result<()> {
+    use dialog_corpus::{Changes, Statement as _};
+    let mut changes = Changes::new();
+    for statement in statements {
+        statement.assert(&mut changes);
+    }
+    arrive(branch, session, changes).await?;
     Ok(())
 }
 
@@ -292,7 +309,7 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
 
     // A branch holding the rule as the release installed it.
     let holding = repo.branch("holding").open().perform(session).await?;
-    commit(&holding, session, installed_by_release()).await?;
+    arrived(&holding, session, installed_by_release()).await?;
     commit(&holding, session, seeded()?).await?;
     assert!(
         held(&repo, "holding", session).await? > 0,

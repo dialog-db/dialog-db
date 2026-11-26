@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A commit refuses a rule body that does not compile here
+
+Pull request: to be linked when it opens.
+
+A rule installed through the API compiles before it is written, but a
+transaction could also write `dialog.rule/source` as a plain fact, and a
+body that is no rule here landed: inert where it was read, and answered
+under `dialog.rule/error`. A commit now judges every rule body it writes,
+bound for the primary or into a layer, and refuses the first that is no
+rule under the entity it is written under. Nothing of the commit is
+written. A body that arrives from elsewhere (a pull, a merge, another
+implementation) is not judged when it arrives: it stays inert where it
+is read, as before.
+
+What this changes for you:
+
+- New: `CommitError::InvalidRule { rule, reason: RuleError }`. A
+  `match` over `CommitError` with no wildcard arm needs one more arm.
+- A commit that writes a `dialog.rule/source` body that is undecodable,
+  ill-typed, in a format this release does not read as it stands, or
+  stored under an entity it does not hash to now fails with it, where
+  it landed before. That includes a body copied from an earlier
+  release's store into a transaction: land such data the way a pull
+  does, or reinstall the rule through the API.
+- A rule that closes a cycle with the rules a branch holds is not
+  refused: that is a property of the rule set, not of the rule, and it
+  is still set aside where it is read.
+
+Why: a rule that would not compile is refused when it is asserted, and
+writing its facts by hand is asserting it.
+
 ### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
 
 Pull request: to be linked when it opens.
@@ -1561,6 +1592,11 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A commit refusing a rule body that does not compile: nothing stored
+  changes and nothing is rewritten. What a replica already holds stays
+  as it is, inert where it is not a rule here. An older release does
+  not refuse such a write, and what it writes arrives here as before.
+  An embedder runs nothing.
 - `dialog.rule/error`: nothing is stored under it and nothing stored
   changes; it is answered from the rule bodies a branch holds, as
   `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older

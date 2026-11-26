@@ -15,10 +15,13 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use dialog_corpus::Entity;
+use dialog_corpus::{Change, Entity, Selector, Value};
 use dialog_query::rule::body::{BodyError, FORMAT, TERMS_FORMAT, format_of};
 use dialog_query::session::Quarantine;
 use dialog_query::{DeductiveRule, InductiveRule};
+
+use crate::rules::source_attr;
+use crate::{CommitError, RuleCache, Staged};
 
 /// Why a rule a branch holds is not evaluated there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +172,41 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
         }
         (Err(BodyError::Undecodable(reason)), Err(_)) => Err(RuleError::Undecodable { reason }),
     }
+}
+
+/// Refuse a commit writing a rule body that is no rule here: every
+/// `dialog.rule/source` the commit's writes `written` assert, bound for
+/// the primary or into a layer, is judged under the entity it is written
+/// under, and the first that is no rule is refused with its error. A
+/// rule installed through the API compiles before it is written, so this
+/// refuses only what is written as a plain fact. A body that arrives from
+/// elsewhere is not written through a commit, and is not refused: it is
+/// inert where it is read. Judged through the line's rule `cache`, so the
+/// body a commit judged is the one its first read finds.
+pub(crate) fn refuse_invalid_rules(written: &Staged, cache: &RuleCache) -> Result<(), CommitError> {
+    let source = source_attr();
+    let primary = written
+        .scan(&Selector::new().the(source.clone()))
+        .into_iter()
+        .map(|fact| (fact.of, fact.is));
+    let shares = written.shares().iter().flat_map(|(_, share)| {
+        share.iter().filter_map(|(of, the, change)| match change {
+            Change::Assert(is, _) if *the == source => Some((of.clone(), is.clone())),
+            _ => None,
+        })
+    });
+    for (rule, body) in primary.chain(shares.collect::<Vec<_>>()) {
+        let judged = match &body {
+            Value::Bytes(bytes) => cache.judged(&rule, bytes).err(),
+            other => Some(RuleError::Undecodable {
+                reason: format!("the body is {other:?}, not bytes"),
+            }),
+        };
+        if let Some(reason) = judged {
+            return Err(CommitError::InvalidRule { rule, reason });
+        }
+    }
+    Ok(())
 }
 
 /// The deductive rule `bytes` hold, in the `hydrate_rule` span: one per
