@@ -47,4 +47,6 @@ that do not depend on the type.
 
 ## Approach
 
-Not decided. See the [matrix](unknown-value-type/direction.md).
+Not decided. See the [matrix](unknown-value-type/direction.md). A
+sibling question the same migration answers, how an entity is spelled
+in a key, is in [entity spelling](unknown-value-type/entity-spelling.md).
