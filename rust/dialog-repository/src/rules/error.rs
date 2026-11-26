@@ -14,8 +14,9 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::LazyLock;
 
-use dialog_corpus::{Change, Entity, Selector, Value};
+use dialog_corpus::{Change, Entity, Relation, Selector, Value};
 use dialog_query::rule::body::{BodyError, FORMAT, Stamp, TERMS_FORMAT};
 use dialog_query::session::Quarantine;
 use dialog_query::{DeductiveRule, InductiveRule};
@@ -187,14 +188,20 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
 /// inert where it is read. Judged through the line's rule `cache`, so the
 /// body a commit judged is the one its first read finds.
 pub(crate) fn refuse_invalid_rules(written: &Staged, cache: &RuleCache) -> Result<(), CommitError> {
-    let source = source_attr();
-    let primary = written
-        .scan(&Selector::new().the(source.clone()))
-        .into_iter()
-        .map(|fact| (fact.of, fact.is));
+    // A commit that writes no rule body pays for a look and nothing
+    // more: no selector, no scan, no list.
+    static SOURCE: LazyLock<Relation> = LazyLock::new(source_attr);
+    let source = &*SOURCE;
+    let primary = if written.holds_attribute(source) {
+        written.scan(&Selector::new().the(source.clone()))
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|fact| (fact.of, fact.is));
     let shares = written.shares().iter().flat_map(|(_, share)| {
         share.iter().filter_map(|(of, the, change)| match change {
-            Change::Assert(is, _) if *the == source => Some((of.clone(), is.clone())),
+            Change::Assert(is, _) if the == source => Some((of.clone(), is.clone())),
             _ => None,
         })
     });

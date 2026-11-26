@@ -394,6 +394,12 @@ impl Staged {
         self.0.facts.scan(selector)
     }
 
+    /// Whether any written fact is of attribute `the`: a look that
+    /// builds nothing.
+    pub(crate) fn holds_attribute(&self, the: &Relation) -> bool {
+        self.0.facts.holds_attribute(the)
+    }
+
     /// The held facts a window's selector matches, in the order a scan
     /// of a tree written under `manifest` would produce them: what a
     /// query merges with that tree's rows. The window is shared with the

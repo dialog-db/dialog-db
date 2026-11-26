@@ -317,7 +317,7 @@ impl Facts {
     }
 
     /// Whether any held fact is of attribute `the`.
-    fn holds_attribute(&self, the: &Relation) -> bool {
+    pub(crate) fn holds_attribute(&self, the: &Relation) -> bool {
         self.attributes
             .as_ref()
             .is_some_and(|attributes| attributes.contains_key(the))
