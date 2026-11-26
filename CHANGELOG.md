@@ -44,6 +44,114 @@ What this changes for you:
 
 Why: a rule's entity should be one per rule, not one per writer's
 habit of naming what it does not read.
+### A query reports the rules it left out, as it runs
+
+[#889](https://github.com/dialog-db/dialog-db/pull/889)
+
+A rule a branch holds that did not compile here works as if it were not
+there (see the entry below on `dialog.rule/error`), and a query whose
+derivation reaches one answered without it and said nothing. A query
+now comes with a report of what it left out. The report is filled as
+the query runs and readable at any point: the rules of a concept are
+assembled before the first row that concept gives, so a report read
+when a row arrives already lists the rules left out of what produced
+it. A report read before the rows are first polled is empty, since
+the query has not run yet. Nothing has to be drained to read it, and
+dropping the query early loses nothing reported. Only rules the
+query's derivation reaches are reported.
+
+What this changes for you:
+
+- `SelectQuery::perform` (a branch's `query().select(..)`) and
+  `TransactionSelectQuery::perform` (a transaction's `query()`) return
+  `dialog_repository::Answered<S>`, a stream of the same rows as
+  before, so code that reads rows is unchanged. Code that named the
+  returned type as `impl Output<..>` still compiles; code that relied
+  on it being exactly the inner stream type does not.
+- New: `Answered::report()`, a `Report` handle; `Report::entries()`,
+  what was reported so far; `Report::stream()`, each entry as it is
+  reported, ending when the query's stream ends or is dropped; and
+  `Answered::try_report()`, which drains the rows and returns them with
+  the report.
+- New: `dialog_repository::Entry`, `#[non_exhaustive]`, with
+  `RuleSkipped { rule, concludes, reason: RuleError }`. `concludes` is
+  the `on:` entity of the relation the rule would have concluded.
+- A rule left out for closing a cycle is reported too, as
+  `RuleError::Cycle`.
+
+Why: a query that answers without a rule it would have used should say
+so, and say it while it runs, not only after every row is read.
+### One number held as two types groups, counts and joins as one
+
+[#888](https://github.com/dialog-db/dialog-db/pull/888)
+
+A fold grouped its rows by the encoding of their key values, counted
+distinct values by their encoding, and a rule's memo of rows looked a
+bound entity up by its encoding, and each encoding tells the types of a
+number apart: `3` and `3.0` made two groups, counted as two distinct
+values, and missed each other in the memo. A variable joined across two
+premises held whichever representation bound it first, so a join
+answered `3` or `3.0` depending on the order the plan ran its premises
+in. Keys, distinct counts and the memo now go by a value's identity, as
+the band keys numbers, and the narrowest type stands for the number, as
+a read of the band yields it: a group of `3` and `3.0` is one group
+keyed `3`, `count-distinct` of them is 1, and a variable bound to both
+holds `3`, whichever came first.
+
+What this changes for you:
+
+- A fold over rows whose group field holds one number as two types gives
+  one row for that number, its key the narrowest type. It gave one row
+  per type.
+- `count-distinct` counts one number held as two types once, folded or
+  run as a subscription steps it.
+- A variable a join binds to one number in two types holds the narrowest
+  of them. It held the first.
+- A fold's rows come out in the order of the new keys, which differs
+  from the order before for groups keyed by more than one value.
+- `Value::narrower` is new: whether a value is a narrower representation
+  of a number than another.
+
+Why: an answer must not depend on the type a number happened to be read
+as, or on the order a plan ran its premises in.
+
+### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
+
+[#883](https://github.com/dialog-db/dialog-db/pull/883)
+
+A rule that does not compile reaches a branch only from elsewhere (a
+replica on another release, another implementation, a writer of raw
+`dialog.rule/*` facts), and works there as if it were not there. Why
+was answered by two relations: `dialog.rule/invalid` for a body this
+release does not read, and `dialog.rule/quarantined` for a rule the
+program analysis sets aside for closing a cycle. Both now come from one
+judgment, `RuleError`, and one more relation answers every such rule:
+`dialog.rule/error`, valued with a diagnostic that begins with its kind.
+A body that decodes and does not type-check is now told apart from
+bytes that are no body.
+
+What this changes for you:
+
+- New: `dialog.rule/error`, answered for every rule a branch holds and
+  does not evaluate, never stored. Its value is `<kind>: <message>`,
+  the kind one of `older`, `newer`, `forged`, `undecodable`,
+  `ill-typed` or `cycle`.
+- New: `dialog_repository::RuleError`, with `code()` and
+  `depends_on_other_rules()` (true for a cycle only, which lifts once a
+  rule of it is retracted).
+- New: `DeductiveRule::read` and `InductiveRule::read`, which return
+  `dialog_query::rule::body::BodyError` (`Undecodable` or `IllTyped`).
+  `decode` is unchanged and returns the same strings.
+- `dialog.rule/invalid` and `dialog.rule/quarantined` answer as before,
+  with one difference: an inductive body stored under an entity it does
+  not hash to is now listed under `dialog.rule/invalid` as forged.
+  Induction already left it out; the relation did not say so.
+- A body that is no rule is judged once per process and remembered, as
+  a body that is one always was. Before, every query that met it
+  decoded it again.
+
+Why: a rule that did not compile is one kind of thing whatever the
+reason, and an embedder should find it, and why, in one place.
 
 ### A cardinality-one write succeeds only the claims of its own type
 
@@ -1608,17 +1716,31 @@ and names the rule.
 
 - A body variable used once is a blank: what a rule hashes changes, so
   a rule with such a variable has another entity, and nothing stored is
-  rewritten until the embedder runs the upgrade. A body in format 4 or 5 holding such a rule, which
-  only builds of `main` after 0.5.0 wrote, no longer hashes to the
-  entity it is stored under: it is judged `forged`, is answered under
-  `dialog.rule/error` and `dialog.rule/invalid`, and derives nothing and
-  fires at no commit until `Branch::upgrade_rules` reinstalls it under
-  its new entity. A body 0.5.0 or earlier stored, holding such a rule,
-  is judged `older` and is reinstalled by the same upgrade, as other
-  older bodies are. A rule with no such variable is not touched. A build
+  rewritten until the embedder runs the upgrade. A body in format 4 or
+  5 holding such a rule, which only builds of `main` after 0.5.0 wrote,
+  no longer hashes to the entity it is stored under: it is judged
+  `forged`, is answered under `dialog.rule/error` and
+  `dialog.rule/invalid` and listed in the report of a query that reaches
+  it, and derives nothing and fires at no commit until
+  `Branch::upgrade_rules` reinstalls it under its new entity. A body
+  0.5.0 or earlier stored, holding such a rule, is judged `older` and is
+  reinstalled by the same upgrade, as other older bodies are. A rule with no such variable is not touched. A build
   of `main` from before this change reads what this one writes: the
   body spells the variable as a blank, which both releases hash alike.
   0.5.0 reads neither format. Run `Branch::upgrade_rules`.
+- A query's report: nothing stored or synced changes. An embedder runs
+  nothing.
+- One number held as two types groups, counts and joins as one: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A fold's groups, a distinct count and a join's binding are computed
+  as a query runs; an older release still splits them, so a mixed fleet
+  differs in what such a query answers until every replica upgrades.
+
+- `dialog.rule/error`: nothing is stored under it and nothing stored
+  changes; it is answered from the rule bodies a branch holds, as
+  `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older
+  release answers nothing under it. An embedder runs nothing.
+
 - A cardinality-one write succeeds only its own type's claims: nothing
   stored changes shape, no identity moves and nothing is rewritten on
   upgrade. Every replica already holds at most one live claim per cell,

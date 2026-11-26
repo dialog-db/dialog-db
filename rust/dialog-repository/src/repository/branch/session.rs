@@ -43,19 +43,20 @@ use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, merge_grouped_in};
 use crate::placement::{memory_layer, session_layer};
+use crate::report::{Answered, Entry, Report};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
+use crate::rules::error::{Hydrated, RuleError, judge};
 #[cfg(test)]
 use crate::rules::is_rule_attribute;
 use crate::rules::{
     RuleKey, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
-    conclusion_attr, derives_attr, derives_keys, derives_selector, head_onto, hydrate,
-    hydrate_inductive, invalid_attr, quarantined_attr, rule_entities, source_attr, source_bytes,
-    source_selector,
+    conclusion_attr, derives_attr, derives_keys, derives_selector, error_attr, head_onto,
+    invalid_attr, quarantined_attr, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -495,7 +496,11 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     /// via [`QueryLayer::overlay`], lifts any retracts in it into
     /// tombstones, and unions every line's stream (tombstone-filtered)
     /// with the overlay.
-    pub fn perform<Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
+    ///
+    /// The rows come with the [`Report`] of what the query left out,
+    /// readable at any point ([`Answered::report`]).
+    #[inline(always)]
+    pub fn perform<Env>(self, env: &'a Env) -> Answered<impl Output<Q::Conclusion> + 'a>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -517,32 +522,37 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             + 'static,
     {
         let SelectQuery { layer, query } = self;
-        async_stream::try_stream! {
-            let operator = Identify
-                .perform(env)
-                .await
-                .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
+        let report = Report::default();
+        let reporting = report.clone();
+        Answered::new(
+            async_stream::try_stream! {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
 
-            // The query's lines, pinned once here: every select the
-            // query performs and the metadata it folds in name the
-            // revisions the lines stood at now.
-            let views = layer.pin();
-            let overlay = layer.overlay_at(&views, &operator);
-            let composite = layer.composite(views);
-            let sources = composite.sources.clone();
-            let query_env = QueryEnv::over(composite, overlay, env);
-            let results = Box::pin(query.perform(&query_env));
-            // The query's own stream drives the env's preload queue:
-            // evaluator hints (its own and any concurrent evaluation's)
-            // execute while this stream is polled, borrowing this same
-            // env and ending with the stream. See
-            // `crate::repository::fetch`.
-            let queue = Provider::<Speculation>::execute(env, ()).await;
-            let driven = Driven::new(results, sources, env, queue);
-            for await result in driven {
-                yield result?;
-            }
-        }
+                // The query's lines, pinned once here: every select the
+                // query performs and the metadata it folds in name the
+                // revisions the lines stood at now.
+                let views = layer.pin();
+                let overlay = layer.overlay_at(&views, &operator);
+                let composite = layer.composite(views);
+                let sources = composite.sources.clone();
+                let query_env = QueryEnv::over(composite, overlay, env).with_report(reporting);
+                let results = Box::pin(query.perform(&query_env));
+                // The query's own stream drives the env's preload queue:
+                // evaluator hints (its own and any concurrent evaluation's)
+                // execute while this stream is polled, borrowing this same
+                // env and ending with the stream. See
+                // `crate::repository::fetch`.
+                let queue = Provider::<Speculation>::execute(env, ()).await;
+                let driven = Driven::new(results, sources, env, queue);
+                for await result in driven {
+                    yield result?;
+                }
+            },
+            report,
+        )
     }
 }
 
@@ -636,6 +646,10 @@ pub(crate) struct QueryEnv<'a> {
     /// demanded range here. Subscriptions use the recorded cover to
     /// gate re-evaluation.
     demand: Option<crate::Demand>,
+    /// When present, what the query this environment runs leaves out is
+    /// reported here as it is found: a rule its derivation reaches that
+    /// did not compile (see [`crate::report`]).
+    report: Option<Report>,
     /// Every rule-discovery read this environment made, in order: what
     /// a rule set assembled here is recorded with, so a subscription
     /// reusing the set still records the reads as demand.
@@ -765,6 +779,7 @@ impl<'a> QueryEnv<'a> {
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
+            report: None,
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches: Arc::default(),
@@ -978,6 +993,33 @@ impl<'a> QueryEnv<'a> {
         self
     }
 
+    /// Report what the query this environment runs leaves out into
+    /// `report`, as it is found.
+    pub(crate) fn with_report(mut self, report: Report) -> Self {
+        self.report = Some(report);
+        self
+    }
+
+    /// Report `entry`, something the query left out, if this environment
+    /// reports: a read that skips something says so here, as it skips.
+    pub(crate) fn record(&self, entry: Entry) {
+        if let Some(report) = &self.report {
+            report.record(entry);
+        }
+    }
+
+    /// Report `skipped`, the rules a concept's rule set left out.
+    fn report_skipped(&self, skipped: &[Entry]) {
+        if skipped.is_empty() {
+            return;
+        }
+        if self.report.is_some() {
+            for entry in skipped {
+                self.record(entry.clone());
+            }
+        }
+    }
+
     /// Attach a subscription's retained fixpoint for `concept`:
     /// when that concept's rules resolve recursive, evaluation
     /// continues the retained answer table instead of recomputing.
@@ -1099,6 +1141,7 @@ impl Clone for QueryEnv<'_> {
             layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
+            report: self.report.clone(),
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches.clone(),
@@ -1295,6 +1338,10 @@ impl<'a> QueryEnv<'a> {
             }
             if input.attribute() == Some(&*INVALID) {
                 let rows = Box::pin(self.select_invalid(input)).await?;
+                return Ok(A::rows(rows));
+            }
+            if input.attribute() == Some(&*ERROR) {
+                let rows = Box::pin(self.select_error(input)).await?;
                 return Ok(A::rows(rows));
             }
             let format = self.format().await?;
@@ -1811,7 +1858,7 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
         manifest: &Manifest,
-    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
+    ) -> Result<Vec<Resolved>, EvaluationError> {
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
         let entities = rule_entities(overlay.scan(&conclusions));
@@ -1822,8 +1869,8 @@ impl<'a> QueryEnv<'a> {
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
             };
-            if let Some(rule) = self.pending_body(rule_entity, &bytes)? {
-                rules.push((rule, Installed::Pending));
+            if let Some(found) = self.pending_body(rule_entity, &bytes) {
+                rules.push(found.map(|rule| (rule, Installed::Pending)));
             }
         }
         Ok(rules)
@@ -1838,7 +1885,7 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
         manifest: &Manifest,
-    ) -> Vec<(DeductiveRule, Installed)> {
+    ) -> Vec<Resolved> {
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
         let entities = rule_entities(layer.scan(&conclusions));
@@ -1847,9 +1894,9 @@ impl<'a> QueryEnv<'a> {
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             if let Some(bytes) = source_bytes(layer.scan(&sources))
-                && let Ok(Some(rule)) = self.pending_body(rule_entity, &bytes)
+                && let Some(found) = self.pending_body(rule_entity, &bytes)
             {
-                rules.push((rule, Installed::Pending));
+                rules.push(found.map(|rule| (rule, Installed::Pending)));
             }
         }
         rules
@@ -1863,31 +1910,26 @@ impl<'a> QueryEnv<'a> {
     /// So is a body this release does not decode: one spelling the picks
     /// 0.3 and 0.4 wrote, which the upgrade rewrites where it can, or one
     /// in a later format. No read fails over it.
-    fn pending_body(
-        &self,
-        rule_entity: Entity,
-        bytes: &[u8],
-    ) -> Result<Option<DeductiveRule>, EvaluationError> {
-        let cache = self
-            .sources
-            .first()
-            .map(|source| source.as_view().rule_cache());
-        if let Some(body) = cache
-            .as_ref()
-            .and_then(|cache| cache.body(&rule_entity, bytes))
-        {
-            return Ok(Some(body));
+    /// `None` for a body that is an inductive rule, which a deductive
+    /// index does not name; the error, with the rule's entity, for one
+    /// that is no rule here.
+    fn pending_body(&self, rule_entity: Entity, bytes: &[u8]) -> Option<Found> {
+        match self.judged(&rule_entity, bytes) {
+            Ok(Hydrated::Deductive(rule)) => Some(Ok(rule)),
+            Ok(Hydrated::Inductive(_)) => None,
+            Err(error) => Some(Err((rule_entity, error))),
         }
-        let Ok(rule) = hydrate(bytes) else {
-            return Ok(None);
-        };
-        if !rule.stored_as(&rule_entity) {
-            return Ok(None);
+    }
+
+    /// What the body `bytes` stored under `entity` is on this release,
+    /// through the first line's rule cache, which remembers either
+    /// outcome: a body that did not compile is judged once, as one that
+    /// did.
+    fn judged(&self, entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError> {
+        match self.sources.first() {
+            Some(source) => source.as_view().rule_cache().judged(entity, bytes),
+            None => judge(entity, bytes),
         }
-        if let Some(cache) = cache {
-            cache.record_body(rule_entity, bytes, rule.clone());
-        }
-        Ok(Some(rule))
     }
 
     /// The committed rule entities under `index` at `key` on `source`,
@@ -1955,7 +1997,7 @@ impl<'a> QueryEnv<'a> {
         source: &Source,
         index: Index,
         key: &Entity,
-    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
+    ) -> Result<Vec<Resolved>, EvaluationError> {
         let rule_entities = self.durable_rule_entities(source, index, key).await?;
 
         // Each rule's `dialog.rule/source` is read from this line, which
@@ -1974,14 +2016,22 @@ impl<'a> QueryEnv<'a> {
                     return Ok::<_, EvaluationError>(None);
                 };
                 Ok(self
-                    .pending_body(rule_entity, &bytes)?
-                    .map(|body| (body, installed)))
+                    .pending_body(rule_entity, &bytes)
+                    .map(|found| found.map(|body| (body, installed))))
             },
         ))
         .await?;
         Ok(rules.into_iter().flatten().collect())
     }
 }
+
+/// A stored body a rule index names, read: the rule, or the rule's
+/// entity and why it is no rule here.
+type Found = Result<DeductiveRule, (Entity, RuleError)>;
+
+/// A rule a rule index names, read with how it was installed, or the
+/// rule's entity and why it is no rule here.
+type Resolved = Result<(DeductiveRule, Installed), (Entity, RuleError)>;
 
 #[dialog_capability::provider]
 impl Provider<SelectRules> for QueryEnv<'_> {
@@ -2014,17 +2064,29 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .sources
             .first()
             .map(|source| source.as_view().rule_cache());
-        if let Some((bundle, demanded)) =
+        if let Some((bundle, demanded, skipped)) =
             cache.as_ref().and_then(|cache| cache.bundle(&input, &key))
         {
             #[cfg(test)]
-            assert_eq!(
-                rule_spellings(&bundle),
-                rule_spellings(&self.isolated().assemble_bundle(&input).await?),
-                "a cached rule set must be the one its layers assemble"
-            );
+            {
+                let (assembled, assembled_skipped) =
+                    self.isolated().assemble_bundle(&input).await?;
+                assert_eq!(
+                    rule_spellings(&bundle),
+                    rule_spellings(&assembled),
+                    "a cached rule set must be the one its layers assemble"
+                );
+                assert_eq!(
+                    skipped.as_deref().unwrap_or_default(),
+                    assembled_skipped.as_slice(),
+                    "a cached rule set must leave out what its layers leave out"
+                );
+            }
             if let Some(demand) = &self.demand {
                 demanded.record(demand);
+            }
+            if let Some(skipped) = &skipped {
+                self.report_skipped(skipped);
             }
             return Ok(self.continuing(&concept, bundle));
         }
@@ -2033,13 +2095,15 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .len();
-        let bundle = self.assemble_bundle(&input).await?;
+        let (bundle, skipped) = self.assemble_bundle(&input).await?;
+        self.report_skipped(&skipped);
         if let Some(cache) = cache {
             cache.record_bundle(
                 input.clone(),
                 key,
                 bundle.clone(),
                 self.reads_since(first_read),
+                skipped,
             );
         }
         Ok(self.continuing(&concept, bundle))
@@ -2053,7 +2117,7 @@ impl QueryEnv<'_> {
     async fn assemble_bundle(
         &self,
         input: &ConceptDescriptor,
-    ) -> Result<ConceptRules, EvaluationError> {
+    ) -> Result<(ConceptRules, Vec<Entry>), EvaluationError> {
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
         // line, so it falls back to a private cache.
@@ -2062,15 +2126,24 @@ impl QueryEnv<'_> {
             .first()
             .map(|source| source.as_view().plan_cache())
             .unwrap_or_default();
-        let bundle = self.resolve_bundle(input, plan_cache).await?;
+        let mut skipped = Vec::new();
+        let bundle = self.resolve_bundle(input, plan_cache, &mut skipped).await?;
         let analysis = self.program_analysis(input, &bundle).await?;
         analysis.check(input)?;
+        for quarantine in analysis.quarantined() {
+            skipped.push(Entry::RuleSkipped {
+                rule: quarantine.rule.clone(),
+                concludes: quarantine.concept.clone(),
+                reason: RuleError::from(quarantine),
+            });
+        }
         let bundle = bundle.without(analysis.quarantined());
-        Ok(if analysis.is_recursive(&ProgramAnalysis::node(input)) {
+        let bundle = if analysis.is_recursive(&ProgramAnalysis::node(input)) {
             bundle.with_recursion(analysis)
         } else {
             bundle
-        })
+        };
+        Ok((bundle, skipped))
     }
 
     /// Every rule-discovery read noted since `first`: what an entry
@@ -2091,6 +2164,7 @@ impl QueryEnv<'_> {
     fn isolated(&self) -> Self {
         let mut isolated = self.clone();
         isolated.demand = None;
+        isolated.report = None;
         isolated.reads = Arc::default();
         isolated
     }
@@ -2130,40 +2204,8 @@ static QUARANTINED: LazyLock<CorpusRelation> = LazyLock::new(quarantined_attr);
 /// The `dialog.rule/invalid` attribute, compared on every select.
 static INVALID: LazyLock<CorpusRelation> = LazyLock::new(invalid_attr);
 
-/// Why a stored rule body is not read, or `None` when it is: a rule
-/// this release decodes, stored under the identity it hashes to. The
-/// body's format is probed before it is decoded, so a body an older or
-/// a newer release wrote is told apart from one that is no rule at all.
-fn invalid_reason(entity: &Entity, bytes: &[u8]) -> Option<String> {
-    use dialog_query::rule::body::{FORMAT, TERMS_FORMAT, format_of};
-    match format_of(bytes) {
-        Some(format) if format > FORMAT => {
-            return Some(format!(
-                "newer: the body is in format {format}, and this release reads up to {FORMAT}"
-            ));
-        }
-        Some(format) if format < TERMS_FORMAT => {
-            // A body an earlier format spelled the same way still reads.
-            if hydrate(bytes).is_ok_and(|rule| rule.stored_as(entity))
-                || hydrate_inductive(bytes).is_ok()
-            {
-                return None;
-            }
-            return Some(format!(
-                "older: the body is in format {format}, which `upgrade_rules` rewrites to {TERMS_FORMAT}"
-            ));
-        }
-        _ => {}
-    }
-    match hydrate(bytes) {
-        Ok(rule) if rule.stored_as(entity) => None,
-        Ok(_) => Some("forged: the body does not hash to the identity it is stored under".into()),
-        Err(error) => match hydrate_inductive(bytes) {
-            Ok(_) => None,
-            Err(_) => Some(format!("undecodable: {error}")),
-        },
-    }
-}
+/// The `dialog.rule/error` attribute, compared on every select.
+static ERROR: LazyLock<CorpusRelation> = LazyLock::new(error_attr);
 
 impl<'a> QueryEnv<'a> {
     /// The rule facts of the layers this query reads rules from.
@@ -2246,7 +2288,7 @@ impl<'a> QueryEnv<'a> {
             .filter_map(|(entity, bytes)| {
                 Some(Fact {
                     the: INVALID.clone(),
-                    is: Value::String(invalid_reason(&entity, &bytes)?),
+                    is: Value::String(self.judged(&entity, &bytes).err()?.invalid_reason()?),
                     of: entity,
                     cause: None,
                 })
@@ -2260,6 +2302,61 @@ impl<'a> QueryEnv<'a> {
         Ok(Box::pin(stream::iter(
             rows.into_iter().map(|row| Ok(row.into())),
         )))
+    }
+
+    /// `dialog.rule/error` rows: one per rule the layers hold and this
+    /// release does not evaluate, of the rule's entity and valued with
+    /// the diagnostic: every stored body that is no rule here, for its
+    /// own reason, and every rule the program analysis sets aside, as a
+    /// cycle. Narrowed by the selector's entity and value. Nothing stored
+    /// under the attribute is read.
+    async fn select_error(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
+        let errors = self
+            .rule_errors()
+            .await
+            .map_err(|error| DialogCorpusError::Storage(format!("rule errors: {error}")))?;
+        let rows: Vec<Fact> = errors
+            .into_iter()
+            .map(|(rule, error)| Fact {
+                the: ERROR.clone(),
+                of: rule,
+                is: Value::String(error.to_string()),
+                cause: None,
+            })
+            .filter(|row| {
+                input.entity().is_none_or(|of| *of == row.of)
+                    && input.value().is_none_or(|is| *is == row.is)
+            })
+            .collect();
+        Ok(Box::pin(stream::iter(
+            rows.into_iter().map(|row| Ok(row.into())),
+        )))
+    }
+
+    /// Every rule the layers hold that this release does not evaluate,
+    /// with why, sorted by rule: each stored body that is no rule here
+    /// (judged once and remembered, see [`judged`](Self::judged)), and
+    /// each rule the program analysis sets aside for closing a cycle.
+    pub(crate) async fn rule_errors(&self) -> Result<Vec<(Entity, RuleError)>, EvaluationError> {
+        let bodies = self.rule_bodies().await?;
+        let mut seen: HashSet<Entity> = HashSet::new();
+        let mut errors: Vec<(Entity, RuleError)> = Vec::new();
+        for (entity, bytes) in bodies {
+            if !seen.insert(entity.clone()) {
+                continue;
+            }
+            if let Err(error) = self.judged(&entity, &bytes) {
+                errors.push((entity, error));
+            }
+        }
+        for quarantine in self.quarantined().await? {
+            errors.push((quarantine.rule.clone(), RuleError::from(&quarantine)));
+        }
+        errors.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(errors)
     }
 
     /// Every rule the program analysis sets aside, over every deductive
@@ -2318,7 +2415,9 @@ impl<'a> QueryEnv<'a> {
         let plan_cache = PlanCache::default();
         let mut quarantined: Vec<Quarantine> = Vec::new();
         for descriptor in &concluded {
-            let bundle = self.resolve_bundle(descriptor, plan_cache.clone()).await?;
+            let bundle = self
+                .resolve_bundle(descriptor, plan_cache.clone(), &mut Vec::new())
+                .await?;
             let analysis = self.program_analysis(descriptor, &bundle).await?;
             for quarantine in analysis.quarantined() {
                 if !quarantined.contains(quarantine) {
@@ -2336,26 +2435,17 @@ impl<'a> QueryEnv<'a> {
     /// inert, as at resolution.
     async fn every_rule(&self) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let bodies = self.rule_bodies().await?;
-        let cache = self
-            .sources
-            .first()
-            .map(|source| source.as_view().rule_cache());
         let mut rules: Vec<DeductiveRule> = Vec::new();
         let mut seen: HashSet<Entity> = HashSet::new();
         for (entity, bytes) in bodies {
             if !seen.insert(entity.clone()) {
                 continue;
             }
-            let cached = cache.as_ref().and_then(|cache| cache.body(&entity, &bytes));
-            let rule = match cached {
-                Some(rule) => rule,
-                // Inductive rules share the attribute and do not decode.
-                None => match hydrate(&bytes) {
-                    Ok(rule) if rule.stored_as(&entity) => rule,
-                    _ => continue,
-                },
-            };
-            rules.push(rule);
+            // Inductive rules share the attribute and are no deductive
+            // rule; a body that is no rule is inert.
+            if let Ok(Hydrated::Deductive(rule)) = self.judged(&entity, &bytes) {
+                rules.push(rule);
+            }
         }
         Ok(rules)
     }
@@ -2425,8 +2515,9 @@ impl<'a> QueryEnv<'a> {
         &self,
         index: Index,
         key: &Entity,
+        skipped: &mut Vec<Entry>,
     ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
-        let mut rules: Vec<(DeductiveRule, Installed)> = Vec::new();
+        let mut rules: Vec<Resolved> = Vec::new();
         let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
@@ -2439,7 +2530,18 @@ impl<'a> QueryEnv<'a> {
         for layer in &self.layers {
             rules.extend(self.staged_rules(layer, index, key, manifest));
         }
-        Ok(rules)
+        let mut resolved = Vec::with_capacity(rules.len());
+        for rule in rules {
+            match rule {
+                Ok(rule) => resolved.push(rule),
+                Err((rule, reason)) => skipped.push(Entry::RuleSkipped {
+                    rule,
+                    concludes: key.clone(),
+                    reason,
+                }),
+            }
+        }
+        Ok(resolved)
     }
 
     /// The head of `rule` re-spelled onto the attribute concept
@@ -2522,6 +2624,7 @@ impl<'a> QueryEnv<'a> {
         &self,
         descriptor: &ConceptDescriptor,
         plan_cache: PlanCache,
+        skipped: &mut Vec<Entry>,
     ) -> Result<ConceptRules, EvaluationError> {
         let concept = descriptor.this();
 
@@ -2554,7 +2657,7 @@ impl<'a> QueryEnv<'a> {
                 field.descriptor().clone().plain(),
             ));
             if let Some(on) = derives_keys(&single).into_iter().next() {
-                for (rule, installed) in self.resolve_rules(Index::Deriving, &on).await? {
+                for (rule, installed) in self.resolve_rules(Index::Deriving, &on, skipped).await? {
                     if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
                         bundle.install_at(head, installed);
@@ -2602,7 +2705,7 @@ impl<'a> QueryEnv<'a> {
             let mut rules = builtins.clone();
             for on in derives_keys(&attribute) {
                 rules.extend(
-                    self.resolve_rules(Index::Deriving, &on)
+                    self.resolve_rules(Index::Deriving, &on, skipped)
                         .await?
                         .into_iter()
                         .map(|(rule, _)| rule),
@@ -2761,7 +2864,11 @@ impl<'a> QueryEnv<'a> {
                     // these bundles share the root's cache rather than
                     // allocating one each.
                     let bundle = self
-                        .resolve_bundle(&descriptor, root_bundle.plan_cache().clone())
+                        .resolve_bundle(
+                            &descriptor,
+                            root_bundle.plan_cache().clone(),
+                            &mut Vec::new(),
+                        )
                         .await?;
                     Ok::<_, EvaluationError>((entity, descriptor, bundle))
                 }))

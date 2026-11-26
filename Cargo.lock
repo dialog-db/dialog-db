@@ -1997,6 +1997,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "ipld-core",
  "parking_lot",
+ "pin-project-lite",
  "reqwest 0.12.22",
  "ruzstd",
  "serde",
