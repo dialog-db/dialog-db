@@ -274,6 +274,42 @@ fn uncanonical(uri: &str) -> Value {
     Value::Entity(Entity::try_from(Uri::stored_unchecked(uri)).expect("any string has key bytes"))
 }
 
+/// Stores each `(the, value)` on an entity of its own as raw index
+/// entries, as a writer this release does not control would: a commit
+/// of this release refuses an entity value it would not read back, so
+/// the bytes go in as they are.
+async fn store_foreign(
+    branch: &Branch,
+    operator: &Operator,
+    facts: Vec<(&str, Value)>,
+) -> anyhow::Result<()> {
+    let manifest = dialog_search_tree::Manifest::default();
+    let mut entries = Vec::new();
+    for (the, is) in facts {
+        let fact = dialog_corpus::Fact {
+            the: the.parse()?,
+            of: Entity::new()?,
+            is,
+            cause: None,
+        };
+        let datum = dialog_corpus::State::Added(dialog_corpus::Datum::for_fact(&fact));
+        entries.push((
+            dialog_corpus::EntityKey::from_fact(&fact, &manifest).into_key(),
+            datum.clone(),
+        ));
+        entries.push((
+            dialog_corpus::AttributeKey::from_fact(&fact, &manifest).into_key(),
+            datum.clone(),
+        ));
+        entries.push((
+            dialog_corpus::ValueKey::from_fact(&fact, &manifest).into_key(),
+            datum,
+        ));
+    }
+    branch.commit_entries(entries).perform(operator).await?;
+    Ok(())
+}
+
 /// The values of `v` a scan of `the` yields from `seed`, or the error
 /// the scan fails with.
 async fn values(
@@ -305,7 +341,7 @@ async fn an_uncanonical_entity_value_is_passed_over_in_place_and_eagerly() -> an
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    store(
+    store_foreign(
         &branch,
         &operator,
         vec![("link/to", uncanonical("User:bob"))],
@@ -336,7 +372,7 @@ async fn an_entity_value_that_is_no_uri_is_passed_over_in_place_and_eagerly() ->
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    store(
+    store_foreign(
         &branch,
         &operator,
         vec![("link/to", uncanonical("not a uri"))],

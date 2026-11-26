@@ -14,6 +14,30 @@ says how to cut a release.
 
 ## Unreleased
 
+### A write refuses an entity this dialog would not read back
+
+[#890](https://github.com/dialog-db/dialog-db/pull/890)
+
+Every way of building an `Entity` checks that it is a URI in its
+canonical rendering, save `Uri::stored_unchecked`, which adopts a string
+as it is. An entity built through it as `Ref:qq` (whose canonical
+rendering is `ref:qq`) or holding whitespace was written, as the entity
+of a claim or as its value, and stored a claim no read takes back as
+stored. A commit now refuses it.
+
+What this changes for you:
+
+- An assertion or a retraction whose entity, or whose entity value, is
+  not a URI in its canonical rendering, or holds whitespace or a
+  control character, fails the commit with
+  `CommitError::Fact(DialogCorpusError::InvalidEntity(_))`, and nothing
+  is written.
+- `Uri::stored_unchecked` is hidden from the documentation: it is for a
+  string already checked.
+
+Why: anything this dialog would not read back is refused when it is
+written, not left for every reader to meet.
+
 ### A claim this replica cannot read yet is treated as if it did not exist
 
 [#884](https://github.com/dialog-db/dialog-db/pull/884)
@@ -1766,6 +1790,10 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A write of an entity this dialog would not read back: nothing stored
+  changes and nothing is rewritten. Such an entity could only come from
+  `Uri::stored_unchecked`; a write of one that an older release stored
+  now fails, and what is already stored is read as it was.
 - A claim this replica cannot read yet: nothing stored is rewritten on
   upgrade, and no identity moves. A replica that holds one reads its cell
   as if it were absent; the first cardinality-one write to the cell

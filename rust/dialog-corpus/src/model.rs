@@ -43,6 +43,7 @@ mod composite;
 pub use composite::*;
 
 mod view;
+pub(crate) use view::check_stored_entity;
 pub use view::*;
 
 mod ordkey;

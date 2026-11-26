@@ -26,6 +26,8 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Current, Publish, Resolve};
 use dialog_search_tree::nodes;
+#[cfg(feature = "helpers")]
+use futures_util::stream::{Empty, empty};
 use futures_util::{Stream, StreamExt as _, stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,6 +208,23 @@ impl Branch {
     /// next inducing instant catches up over the lag.
     pub(crate) fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
         Commit::new(self, changes)
+    }
+}
+
+#[cfg(feature = "helpers")]
+impl Branch {
+    /// A commit of raw index `entries`, written as they are, past every
+    /// check a write makes (an entity this dialog would not read back
+    /// included). It exists to imitate a foreign writer in tests, such as
+    /// another implementation storing bytes this release would refuse to
+    /// write itself, and grants nothing a pull from such a peer does not.
+    /// An embedder must not call it.
+    #[doc(hidden)]
+    pub fn commit_entries(
+        &self,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Commit<'_, Empty<Instruction>> {
+        self.commit(empty()).with_entries(entries)
     }
 }
 

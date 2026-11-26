@@ -30,6 +30,7 @@
 //! an extension trait instead.
 
 use crate::Blake3Hash;
+use crate::model::check_stored_entity;
 use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -1285,6 +1286,17 @@ fn reconstruct(
     Ok(Some(fact))
 }
 
+/// Checks `entity` is one this dialog reads back as stored, by the one
+/// rule a read checks a stored entity by
+/// ([`check_stored_entity`](crate::model::check_stored_entity)).
+/// Anything else is refused as an invalid entity.
+fn check_written_entity(entity: &crate::Entity) -> Result<(), DialogCorpusError> {
+    check_stored_entity(entity.as_str()).map_err(|error| match error {
+        DialogCorpusError::CorruptEntry(reason) => DialogCorpusError::InvalidEntity(reason),
+        other => other,
+    })
+}
+
 /// Whether the stored `key` is a claim of `fact`'s cell and of the
 /// written value's stratum: its entity and attribute bytes are `fact`'s,
 /// and its value type, through the number band, is the stratum of
@@ -1562,6 +1574,18 @@ where
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {
+        // An entity this dialog would not read back as stored is refused
+        // where it would enter the store, as the entity of a claim or as
+        // its value, asserted or retracted. Every way of building an
+        // entity checks its rendering save `Uri::stored_unchecked`, so
+        // this is the one check a write needs.
+        {
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
+            check_written_entity(&fact.of)?;
+            if let Value::Entity(entity) = &fact.is {
+                check_written_entity(entity)?;
+            }
+        }
         // The `dialog.` namespace is reserved for machinery (revision
         // records — see `history::RevisionRecord` — and delegation
         // records), written through [`CorpusExt::record`] or a

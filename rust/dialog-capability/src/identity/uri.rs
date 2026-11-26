@@ -130,8 +130,28 @@ impl Uri {
         Ok(())
     }
 
+    /// Checks that `s` is an entity this dialog writes and reads back as
+    /// stored: a URI in its canonical rendering, holding no whitespace or
+    /// control character. The common entity shapes are decided by the one
+    /// byte scan of [`Self::check_stored`]'s proof, whose bytes exclude
+    /// whitespace and controls; only a string that proof does not settle
+    /// is scanned for them and parsed.
+    pub fn check_written(s: &str) -> Result<(), IdentityError> {
+        if is_provably_canonical(s) {
+            return Ok(());
+        }
+        if s.chars().any(|c| c.is_ascii_whitespace() || c.is_control()) {
+            return Err(IdentityError::InvalidUri(format!(
+                "URI must not contain whitespace or control characters: {s:?}"
+            )));
+        }
+        Self::check_stored(s)
+    }
+
     /// Adopts a stored string [`Self::check_stored`] already accepted,
-    /// without checking it again.
+    /// without checking it again. For a value already checked only: a
+    /// write refuses an entity holding a string that check would refuse.
+    #[doc(hidden)]
     pub fn stored_unchecked(s: &str) -> Self {
         Self(s.into())
     }
