@@ -620,8 +620,9 @@ struct Bundle {
     /// as rule demand for a subscription that reuses it.
     demand: RuleDemand,
     /// The rules assembling it left out, reported again by every query
-    /// that reuses it.
-    skipped: Vec<Entry>,
+    /// that reuses it: `None` when it left out none, so reusing a set
+    /// that left out nothing copies nothing.
+    skipped: Option<Arc<[Entry]>>,
 }
 
 /// One rule-discovery read: the selector and the manifest it was keyed
@@ -785,7 +786,7 @@ impl RuleCache {
         &self,
         descriptor: &ConceptDescriptor,
         key: &RuleKey,
-    ) -> Option<(ConceptRules, RuleDemand, Vec<Entry>)> {
+    ) -> Option<(ConceptRules, RuleDemand, Option<Arc<[Entry]>>)> {
         let inner = self.inner.read();
         let bundle = inner
             .bundles
@@ -837,7 +838,7 @@ impl RuleCache {
             descriptor,
             rules,
             demand: RuleDemand::new(reads),
-            skipped,
+            skipped: (!skipped.is_empty()).then(|| skipped.into()),
         });
     }
 

@@ -499,6 +499,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
     ///
     /// The rows come with the [`Report`] of what the query left out,
     /// readable at any point ([`Answered::report`]).
+    #[inline(always)]
     pub fn perform<Env>(self, env: &'a Env) -> Answered<impl Output<Q::Conclusion> + 'a>
     where
         Env: Provider<BlobRead>
@@ -523,33 +524,35 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
         let SelectQuery { layer, query } = self;
         let report = Report::default();
         let reporting = report.clone();
-        let rows = async_stream::try_stream! {
-            let operator = Identify
-                .perform(env)
-                .await
-                .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
+        Answered::new(
+            async_stream::try_stream! {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|e| DialogCorpusError::Storage(format!("identify: {e}")))?;
 
-            // The query's lines, pinned once here: every select the
-            // query performs and the metadata it folds in name the
-            // revisions the lines stood at now.
-            let views = layer.pin();
-            let overlay = layer.overlay_at(&views, &operator);
-            let composite = layer.composite(views);
-            let sources = composite.sources.clone();
-            let query_env = QueryEnv::over(composite, overlay, env).with_report(reporting);
-            let results = Box::pin(query.perform(&query_env));
-            // The query's own stream drives the env's preload queue:
-            // evaluator hints (its own and any concurrent evaluation's)
-            // execute while this stream is polled, borrowing this same
-            // env and ending with the stream. See
-            // `crate::repository::fetch`.
-            let queue = Provider::<Speculation>::execute(env, ()).await;
-            let driven = Driven::new(results, sources, env, queue);
-            for await result in driven {
-                yield result?;
-            }
-        };
-        Answered::new(rows, report)
+                // The query's lines, pinned once here: every select the
+                // query performs and the metadata it folds in name the
+                // revisions the lines stood at now.
+                let views = layer.pin();
+                let overlay = layer.overlay_at(&views, &operator);
+                let composite = layer.composite(views);
+                let sources = composite.sources.clone();
+                let query_env = QueryEnv::over(composite, overlay, env).with_report(reporting);
+                let results = Box::pin(query.perform(&query_env));
+                // The query's own stream drives the env's preload queue:
+                // evaluator hints (its own and any concurrent evaluation's)
+                // execute while this stream is polled, borrowing this same
+                // env and ending with the stream. See
+                // `crate::repository::fetch`.
+                let queue = Provider::<Speculation>::execute(env, ()).await;
+                let driven = Driven::new(results, sources, env, queue);
+                for await result in driven {
+                    yield result?;
+                }
+            },
+            report,
+        )
     }
 }
 
@@ -1007,6 +1010,9 @@ impl<'a> QueryEnv<'a> {
 
     /// Report `skipped`, the rules a concept's rule set left out.
     fn report_skipped(&self, skipped: &[Entry]) {
+        if skipped.is_empty() {
+            return;
+        }
         if self.report.is_some() {
             for entry in skipped {
                 self.record(entry.clone());
@@ -2071,14 +2077,17 @@ impl Provider<SelectRules> for QueryEnv<'_> {
                     "a cached rule set must be the one its layers assemble"
                 );
                 assert_eq!(
-                    skipped, assembled_skipped,
+                    skipped.as_deref().unwrap_or_default(),
+                    assembled_skipped.as_slice(),
                     "a cached rule set must leave out what its layers leave out"
                 );
             }
             if let Some(demand) = &self.demand {
                 demanded.record(demand);
             }
-            self.report_skipped(&skipped);
+            if let Some(skipped) = &skipped {
+                self.report_skipped(skipped);
+            }
             return Ok(self.continuing(&concept, bundle));
         }
         let first_read = self

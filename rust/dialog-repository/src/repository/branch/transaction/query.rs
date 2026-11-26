@@ -168,6 +168,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
     /// `Session` / `SessionBranch` / `BranchMetadata` visible
     /// mid-transaction. The rows come with the [`Report`] of what the
     /// query left out, readable at any point.
+    #[inline(always)]
     pub fn perform<Env>(self, env: &'a Env) -> Answered<impl Output<Q::Conclusion> + 'a>
     where
         Env: Provider<BlobRead>
@@ -198,48 +199,50 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         } = self;
         let report = Report::default();
         let reporting = report.clone();
-        let rows = async_stream::try_stream! {
-            let operator = Identify
-                .perform(env)
-                .await
-                .map_err(|e| DialogCorpusError::InvalidSignature(format!("identify: {e}")))?;
+        Answered::new(
+            async_stream::try_stream! {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|e| DialogCorpusError::InvalidSignature(format!("identify: {e}")))?;
 
-            // The same schema-injected metadata Branch::query() folds
-            // in (Session, SessionBranch, per-branch BranchMetadata),
-            // shared rather than rebuilt, beside the transaction's
-            // staged layers.
-            let metadata = shared_metadata(from_ref(&view), &operator);
-            // The rules laid over this query join the metadata in the
-            // query's own overlay, as a branch query's do: read beside
-            // the transaction's layers, never staged in them.
-            let overlay = if rules.is_empty() {
-                metadata
-            } else {
-                let mut overlay = rules;
-                metadata.export().assert(&mut overlay);
-                Ephemeral::holding(overlay)
-            };
+                // The same schema-injected metadata Branch::query() folds
+                // in (Session, SessionBranch, per-branch BranchMetadata),
+                // shared rather than rebuilt, beside the transaction's
+                // staged layers.
+                let metadata = shared_metadata(from_ref(&view), &operator);
+                // The rules laid over this query join the metadata in the
+                // query's own overlay, as a branch query's do: read beside
+                // the transaction's layers, never staged in them.
+                let overlay = if rules.is_empty() {
+                    metadata
+                } else {
+                    let mut overlay = rules;
+                    metadata.export().assert(&mut overlay);
+                    Ephemeral::holding(overlay)
+                };
 
-            // A transaction query is just a single-line `QueryEnv`.
-            // Constructing the *same* env type the branch-session path
-            // uses is what guarantees identical behavior — fact reads,
-            // tombstones, schema metadata, and deductive-rule
-            // resolution all share one implementation.
-            let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
-            let sources = composite.sources.clone();
-            let query_env = QueryEnv::over(composite, overlay, env)
-                .with_layers(layers)
-                .with_report(reporting);
-            let results = Box::pin(query.perform(&query_env));
-            // Mid-transaction queries drive the ambient preload queue
-            // like any other evaluation (see `crate::repository::fetch`).
-            let queue = Provider::<dialog_corpus::Speculation>::execute(env, ()).await;
-            let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
-            for await result in driven {
-                yield result?;
-            }
-        };
-        Answered::new(rows, report)
+                // A transaction query is just a single-line `QueryEnv`.
+                // Constructing the *same* env type the branch-session path
+                // uses is what guarantees identical behavior — fact reads,
+                // tombstones, schema metadata, and deductive-rule
+                // resolution all share one implementation.
+                let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
+                let sources = composite.sources.clone();
+                let query_env = QueryEnv::over(composite, overlay, env)
+                    .with_layers(layers)
+                    .with_report(reporting);
+                let results = Box::pin(query.perform(&query_env));
+                // Mid-transaction queries drive the ambient preload queue
+                // like any other evaluation (see `crate::repository::fetch`).
+                let queue = Provider::<dialog_corpus::Speculation>::execute(env, ()).await;
+                let driven = crate::repository::fetch::Driven::new(results, sources, env, queue);
+                for await result in driven {
+                    yield result?;
+                }
+            },
+            report,
+        )
     }
 }
 

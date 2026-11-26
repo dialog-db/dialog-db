@@ -147,7 +147,12 @@ impl Stream for ReportStream {
             return Poll::Ready(None);
         }
         self.report.shared.waited.store(true, Ordering::Release);
-        inner.waiting.push(context.waker().clone());
+        // A reader polled again before anything is reported waits once:
+        // the list holds a waker per reader task, not one per poll.
+        let waker = context.waker();
+        if !inner.waiting.iter().any(|known| known.will_wake(waker)) {
+            inner.waiting.push(waker.clone());
+        }
         drop(inner);
         // The query may have ended between the check and the wait, after
         // reporting an entry: poll again, and read what is there.
@@ -180,7 +185,10 @@ pin_project! {
 }
 
 impl<S> Answered<S> {
-    /// `rows`, reporting into `report`.
+    /// `rows`, reporting into `report`. Inlined, so the rows are built
+    /// in place: a query's stream is large, and a copy of it per query
+    /// shows in a point read.
+    #[inline(always)]
     pub(crate) fn new(rows: S, report: Report) -> Self {
         Self {
             rows,
@@ -216,6 +224,7 @@ where
 impl<S: Stream> Stream for Answered<S> {
     type Item = S::Item;
 
+    #[inline(always)]
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let this = self.project();
         let polled = this.rows.poll_next(context);
@@ -223,5 +232,33 @@ impl<S: Stream> Stream for Answered<S> {
             this.finish.0.finish();
         }
         polled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures_util::Stream as _;
+    use futures_util::task::noop_waker;
+
+    use super::Report;
+
+    /// A reader polled over and over while nothing is reported keeps one
+    /// waker, so its wait does not grow with the number of polls.
+    #[dialog_common::test]
+    fn it_keeps_one_waker_per_reader_however_often_it_polls() {
+        let report = Report::default();
+        let mut stream = report.stream();
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        for _ in 0..100 {
+            assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+        }
+        assert_eq!(report.inner().waiting.len(), 1);
     }
 }
