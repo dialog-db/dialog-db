@@ -140,6 +140,8 @@ mod report_tests;
 mod stratum_succession_tests;
 #[cfg(test)]
 mod typed_read_tests;
+#[cfg(test)]
+mod undecodable_tests;
 
 /// Type alias for the search tree index.
 pub type Index = dialog_corpus::Index;

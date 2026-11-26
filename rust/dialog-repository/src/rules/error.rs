@@ -16,7 +16,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use dialog_corpus::Entity;
-use dialog_query::rule::body::{BodyError, FORMAT, TERMS_FORMAT, format_of};
+use dialog_query::rule::body::{BodyError, FORMAT, Stamp, TERMS_FORMAT};
 use dialog_query::session::Quarantine;
 use dialog_query::{DeductiveRule, InductiveRule};
 
@@ -147,15 +147,18 @@ pub(crate) enum Hydrated {
 /// in a format older than the current reads when it decodes as it
 /// stands under its identity, and is otherwise left for the upgrade.
 pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError> {
-    let format = format_of(bytes);
+    // The stamp is read once and handed to both readers: reading it
+    // skips the whole rule.
+    let stamp = Stamp::of(bytes);
+    let format = stamp.format();
     if let Some(format) = format.filter(|format| *format > FORMAT) {
         return Err(RuleError::Newer { format });
     }
-    let deductive = match hydrate_deductive(bytes) {
+    let deductive = match hydrate_deductive(stamp) {
         Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Deductive(rule)),
         other => other,
     };
-    let inductive = match InductiveRule::read(bytes) {
+    let inductive = match InductiveRule::read_stamped(stamp) {
         Ok(rule) if rule.stored_as(entity) => return Ok(Hydrated::Inductive(rule)),
         other => other,
     };
@@ -174,8 +177,8 @@ pub(crate) fn judge(entity: &Entity, bytes: &[u8]) -> Result<Hydrated, RuleError
 /// The deductive rule `bytes` hold, in the `hydrate_rule` span: one per
 /// body decoded as a deductive rule, which the cost matrix counts.
 #[tracing::instrument(skip_all, name = "hydrate_rule")]
-fn hydrate_deductive(bytes: &[u8]) -> Result<DeductiveRule, BodyError> {
-    DeductiveRule::read(bytes)
+fn hydrate_deductive(stamp: Stamp<'_>) -> Result<DeductiveRule, BodyError> {
+    DeductiveRule::read_stamped(stamp)
 }
 
 #[cfg(test)]

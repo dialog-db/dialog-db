@@ -91,6 +91,35 @@ impl ValueView<'_> {
     }
 }
 
+/// Checks a stored entity value is one this dialog writes: a URI in its
+/// canonical rendering, holding no whitespace or control character
+/// (which a canonical rendering can still hold in an opaque path, as
+/// `user:a b`, and which an entity's parse refuses). Anything else is a
+/// claim this replica cannot read yet (`CorruptEntry`).
+pub(crate) fn check_stored_entity(uri: &str) -> Result<(), DialogCorpusError> {
+    refuse_blanks(uri)?;
+    Uri::check_stored(uri).map_err(|error| corrupt(format!("{error}")))
+}
+
+/// The entity a stored entity value names, checked as
+/// [`check_stored_entity`] checks it.
+pub(crate) fn stored_entity(uri: &str) -> Result<crate::Entity, DialogCorpusError> {
+    refuse_blanks(uri)?;
+    crate::Entity::from_stored(uri).map_err(|error| corrupt(format!("{error}")))
+}
+
+fn refuse_blanks(uri: &str) -> Result<(), DialogCorpusError> {
+    if uri
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || c.is_control())
+    {
+        return Err(corrupt(format!(
+            "stored entity holds whitespace or a control character: {uri:?}"
+        )));
+    }
+    Ok(())
+}
+
 fn corrupt(reason: String) -> DialogCorpusError {
     DialogCorpusError::CorruptEntry(reason)
 }
@@ -135,7 +164,7 @@ pub fn decode_value_view(
         ValueDataType::Record => ValueView::Record(inline_raw(bytes)?),
         ValueDataType::Entity => {
             let uri = inline_text(bytes)?;
-            Uri::check_stored(&uri).map_err(|error| corrupt(format!("{error}")))?;
+            check_stored_entity(&uri)?;
             ValueView::Entity(uri)
         }
         ValueDataType::Symbol => {
@@ -175,14 +204,22 @@ pub fn spilled_value_view(
     Ok(match value_type.storage() {
         ValueDataType::String => {
             ValueView::String(Cow::Borrowed(from_utf8(bytes).map_err(|error| {
-                DialogCorpusError::InvalidValue(format!("Not a valid UTF-8 string: {error}"))
+                corrupt(format!("spilled text is not UTF-8: {error}"))
             })?))
         }
         ValueDataType::Bytes => ValueView::Bytes(Cow::Borrowed(bytes)),
         ValueDataType::Record => ValueView::Record(Cow::Borrowed(bytes)),
-        // The rare spilled scalar or reference: read it as main does.
+        ValueDataType::Entity => {
+            let uri = from_utf8(bytes)
+                .map_err(|error| corrupt(format!("spilled entity is not UTF-8: {error}")))?;
+            check_stored_entity(uri)?;
+            ValueView::Entity(Cow::Borrowed(uri))
+        }
+        // The rare spilled scalar or symbol: read it as main does, a
+        // value that does not read being a claim this replica cannot read yet.
         other => {
-            let value = Value::try_from((other, bytes.to_vec()))?;
+            let value = Value::try_from((other, bytes.to_vec()))
+                .map_err(|error| corrupt(format!("{error}")))?;
             match value {
                 Value::Entity(entity) => ValueView::Entity(Cow::Owned(entity.as_str().to_owned())),
                 Value::Symbol(relation) => {

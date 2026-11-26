@@ -44,6 +44,54 @@ What this changes for you:
 
 Why: a rule's entity should be one per rule, not one per writer's
 habit of naming what it does not read.
+### A claim this replica cannot read yet is treated as if it did not exist
+
+[#884](https://github.com/dialog-db/dialog-db/pull/884)
+
+A replica takes claims from writers it does not control, such as another
+implementation it syncs with, and a pull checks no claim's value. Such a
+writer can store a claim this replica cannot read yet: text that is not
+UTF-8, an entity value that is not a URI, or one that is a URI but not
+in its canonical rendering. Reading a cell that held one failed, a
+cardinality-one write to the cell was refused, and an entity stored as
+`Ref:qq` read as `ref:qq`, a value no claim stored. Every read and write
+now treats such a claim as if it were absent, the way a row whose entity
+or attribute column does not read already was.
+
+What this changes for you:
+
+- A cell holding an unread claim answers its readable claims: a
+  cardinality-one read elects among them, so an older readable claim
+  answers where an unread newer one stands, and a cell holding only
+  unread claims answers nothing. A read of every claim, a rule's
+  read, a subscription, an export and induction pass it over. None of
+  them fails on it.
+- An entity value stored in a rendering other than its canonical one is
+  unread: it no longer reads as the entity it would parse to.
+- A cardinality-one write to a cell holding an unread claim of the
+  written value's stratum, read off the claim's key without decoding
+  it, lands and evicts it: its keys are erased and the written claim's
+  record supersedes its version, so every replica that pulls the write
+  evicts it too. An unread claim of another stratum is left in place, as
+  a readable one is. A cardinality-many write or a retraction beside it
+  lands and leaves it in place. A write that changes nothing evicts
+  nothing.
+- A claim whose value type this release does not know has a key that
+  does not parse, so neither its stratum nor its other orderings can be
+  read off it: a cardinality-one write to its cell lands and leaves it
+  in place, and a read of the cell still fails on it.
+- Every claim passed over goes through `dialog_corpus::pass_over`, which
+  logs it (`tracing::warn`) and returns an `Unread` naming its key
+  and why. No query or commit result reports them yet.
+- `FactView::checked_or_passed_over` validates a row as `checked` does,
+  passing over an unread one.
+- A history read (a revision's claims, a claim's lineage) still fails
+  on a record whose value does not read.
+
+Why: a replica cannot refuse what a writer it does not control has
+stored, and must not fail, or answer a value no claim holds, because of
+it.
+
 ### A whole number and a float compute as floats
 
 [#892](https://github.com/dialog-db/dialog-db/pull/892)
@@ -1763,6 +1811,12 @@ and names the rule.
   this change reads what this one writes: the body spells the variable
   as a blank, which both releases hash alike. 0.5.0 reads neither
   format. Run `Branch::upgrade_rules`.
+- A claim this replica cannot read yet: nothing stored is rewritten on
+  upgrade, and no identity moves. A replica that holds one reads its cell
+  as if it were absent; the first cardinality-one write to the cell
+  evicts it, and the write's record, which an older release reads as it
+  reads any record, evicts it on every replica that pulls it. An older
+  release still fails to read the cell until it has the write.
 - A whole number and a float compute as floats: nothing stored or
   synced changes, no identity moves and nothing is rewritten. A stored
   rule keeps its identity and now derives the rows its formula dropped;
