@@ -16,11 +16,12 @@ says how to cut a release.
 
 ### The engine declares `notation/read` and `notation/analyze`, and a dialog crate supplies their code
 
-[#TBD](https://github.com/dialog-db/dialog-db/pulls), in place of
+[#900](https://github.com/dialog-db/dialog-db/pull/900), in place of
 [#894](https://github.com/dialog-db/dialog-db/pull/894). The engine now
 declares two more by name and by their cells: a formula `notation/read`
-(a text in, a row a form out) and a resolver `notation/analyze` (a form
-in, a row a thing said of it out). Their implementation is not the
+(a text in, a row a form out) and a resolver `notation/analyze` (a
+document's forms in, at once, a row a thing said of one of them out,
+its `at` naming which). Their implementation is not the
 engine's. The notation supplies it to the environment a query runs in,
 through `Holds`, and a premise asking one finds it there. Both are asked
 in a query of premises that no rule holds.
@@ -28,7 +29,9 @@ in a query of premises that no rule holds.
 What this changes for you:
 
 - New: `dialog_query::supplied`, with the traits `NotationRead` and
-  `NotationAnalyze`, `supply_read` and `supply_analyze`, the premises
+  `NotationAnalyze`, `supply_read` and `supply_analyze` (hidden from the
+  docs, for dialog's own crates alone: what they hold is what every
+  query through that environment means by the name), the premises
   `NotationReadQuery` (`FormulaQuery::NotationRead`) and
   `NotationAnalyzeQuery` (`ResolverQuery::NotationAnalyze`), and `Facts`,
   the reads an analyzer makes through the query's environment.
@@ -36,6 +39,11 @@ What this changes for you:
   premises planned as a rule's body is and asked with no rule.
   `TypeError::UnselectedVariable` refuses one that selects what no
   premise binds.
+- `notation/analyze`'s `forms` is a list, the document's forms in the
+  order written, refused as `TypeError::KindMismatch` when a premise
+  gives it a constant that is not one. No fold builds an ordered list
+  from rows, so a query cannot gather it from `notation/read`'s rows:
+  the caller gives it, a constant or a list a fact holds.
 - A premise asking either where the environment holds no implementation
   fails the query with `EvaluationError::Unsupplied`, naming it, before
   a row is read. It never answers nothing.
@@ -72,6 +80,7 @@ replica lacking an implementation judges such a rule at rule assembly.
   name `notation/read` or `notation/analyze`, which now read back, but
   every rule holding one is refused when it is compiled, so none is
   stored. An older release does not know either name.
+
 ### A claim this replica cannot read yet is treated as if it did not exist
 
 [#884](https://github.com/dialog-db/dialog-db/pull/884)

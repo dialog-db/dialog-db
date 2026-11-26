@@ -352,7 +352,7 @@ impl ResolverQuery {
             Self::TreeEntry(query) => &query.of,
             Self::TreeBlock(query) => &query.of,
             Self::TreeValue(query) => &query.of,
-            Self::NotationAnalyze(query) => query.form(),
+            Self::NotationAnalyze(query) => query.forms(),
         }
     }
 

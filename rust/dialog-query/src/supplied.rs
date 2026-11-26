@@ -8,12 +8,12 @@
 //! | declared | of | gives a row for |
 //! |---|---|---|
 //! | the formula `notation/read` | `text` | each form read: `at`, `tree`, and its range |
-//! | the resolver `notation/analyze` | `form` | each thing said of the form: `severity`, `code`, `message`, `path` |
+//! | the resolver `notation/analyze` | `forms` | each thing said of a form of the document: `at`, `severity`, `code`, `message`, `path` |
 //!
 //! Their implementation is supplied by the crate that has it, the
-//! notation, to the environment a query runs in ([`supply_read`](crate::supplied::supply_read),
-//! [`supply_analyze`](crate::supplied::supply_analyze)), which holds it
-//! ([`Holds`](dialog_common::Holds)), and a premise asking
+//! notation, to the environment a query runs in (`supply_read`,
+//! `supply_analyze`, hidden from these docs: for dialog's own crates
+//! alone), which holds it ([`Holds`](dialog_common::Holds)), and a premise asking
 //! one finds it there when it is evaluated. A row it computes is held to
 //! the cells declared here before it is written: a value for a cell not
 //! declared as an output ([`EvaluationError::UndeclaredOutput`](crate::error::EvaluationError::UndeclaredOutput)), an
@@ -120,12 +120,17 @@ pub trait NotationRead: fmt::Debug + ConditionalSend + ConditionalSync {
     fn read(&self, text: &str) -> Result<Vec<Output>, EvaluationError>;
 }
 
-/// The implementation of `notation/analyze`: the rows for a form, one a
-/// thing said of it, each of the cells declared for it. It may read the
-/// facts it needs, the definitions a form uses, through `facts`.
+/// The implementation of `notation/analyze`: the rows for a document,
+/// one a thing said of one of its forms, each of the cells declared for
+/// it. It is given the document's forms at once, in the order written,
+/// so what it says of one form may depend on the others: a rule on the
+/// concept a form above it defines. Each row's `at` is the place of the
+/// form it is about among `forms`, from zero, as `notation/read`'s `at`
+/// is among the forms it reads. It may read the facts it needs, the
+/// definitions a form uses that the document does not, through `facts`.
 pub trait NotationAnalyze: fmt::Debug + ConditionalSend + ConditionalSync {
-    /// What is said of `form`, read against `facts`.
-    fn analyze<'s>(&'s self, form: &'s Value, facts: &'s dyn Facts) -> Selected<'s>;
+    /// What is said of the forms of a document, read against `facts`.
+    fn analyze<'s>(&'s self, forms: &'s [Value], facts: &'s dyn Facts) -> Selected<'s>;
 }
 
 /// The key the environment holds a reader under.
@@ -140,12 +145,26 @@ struct Analyzer(Arc<dyn NotationAnalyze>);
 
 /// Hold `implementation` in `env` as what `notation/read` asks, in place
 /// of any held before.
+///
+/// For dialog's own crates, the notation's, and nobody else: whatever
+/// `env` holds here is what every query run through it means by
+/// `notation/read`, so another implementation makes a query's answer
+/// depend on which code is linked where it runs, which no replica can
+/// see. It is hidden from the docs for that reason; see the module's.
+#[doc(hidden)]
 pub fn supply_read(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationRead>) {
     env.hold(READER.into(), Arc::new(Reader(implementation)));
 }
 
 /// Hold `implementation` in `env` as what `notation/analyze` asks, in
 /// place of any held before.
+///
+/// For dialog's own crates, the notation's, and nobody else: whatever
+/// `env` holds here is what every query run through it means by
+/// `notation/analyze`, so another implementation makes a query's answer
+/// depend on which code is linked where it runs, which no replica can
+/// see. It is hidden from the docs for that reason; see the module's.
+#[doc(hidden)]
 pub fn supply_analyze(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationAnalyze>) {
     env.hold(ANALYZER.into(), Arc::new(Analyzer(implementation)));
 }
@@ -211,9 +230,16 @@ const READ_OUTPUTS: [&str; 6] = [
 pub(crate) static ANALYZE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("form", None)
-            .the("the form as data")
+            .cell("forms", Some(Kind::from(ValueType::List)))
+            .the(
+                "the document's forms, in the order written, each as data, as \
+                 `notation/read` gives a form's `tree`",
+            )
             .required();
+        builder
+            .cell("at", natural())
+            .the("the place among the forms of the form it is said of, from zero")
+            .output(0);
         builder
             .cell("severity", text())
             .the("\"error\" for a refusal, \"warning\" for what is said without refusing")
@@ -233,7 +259,7 @@ pub(crate) static ANALYZE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     })
 });
 
-const ANALYZE_OUTPUTS: [&str; 4] = ["severity", "code", "message", "path"];
+const ANALYZE_OUTPUTS: [&str; 5] = ["at", "severity", "code", "message", "path"];
 
 /// `rows`, each held to the outputs and the cells declared for
 /// `formula`: a value for a cell not declared as an output, an output
@@ -363,7 +389,10 @@ impl From<NotationReadQuery> for Parameters {
 
 static BLANK: LazyLock<Term<Any>> = LazyLock::new(Term::blank);
 
-/// A premise asking `notation/analyze`: the terms of its cells.
+/// A premise asking `notation/analyze`: the terms of its cells. Its
+/// `forms` is a list the asker gives, a constant or one a fact holds:
+/// no fold builds an ordered list from rows, so a query cannot gather
+/// it from `notation/read`'s.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "Parameters", into = "Parameters")]
 pub struct NotationAnalyzeQuery {
@@ -383,10 +412,10 @@ impl NotationAnalyzeQuery {
         &self.terms
     }
 
-    /// The term of the form it analyzes: what a join binds before it can
-    /// be asked.
-    pub(crate) fn form(&self) -> &Term<Any> {
-        self.terms.get("form").unwrap_or(&BLANK)
+    /// The term of the forms it analyzes: what a join binds before it
+    /// can be asked.
+    pub(crate) fn forms(&self) -> &Term<Any> {
+        self.terms.get("forms").unwrap_or(&BLANK)
     }
 
     /// Replace each term `terms` names; the others keep theirs.
@@ -398,7 +427,9 @@ impl NotationAnalyzeQuery {
 
     /// The rows `analyzer` gives for each row of `selection`, read
     /// through `env`, held to the cells declared for `notation/analyze`.
-    /// A row in that binds no form gives none.
+    /// A row in that binds no forms, or binds them to a value that is not
+    /// a list, gives none, as a formula's row in whose input does not
+    /// read as its cell's type does not match.
     pub(crate) fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -415,18 +446,22 @@ impl NotationAnalyzeQuery {
             let facts = Through(env);
             for await candidate in selection {
                 let base = candidate?;
-                let form = match self.form() {
+                let document = match self.forms() {
                     Term::Constant(value) => value.clone(),
                     term => match base.lookup(term) {
                         Ok(Binding::Present(value)) => value,
                         _ => continue,
                     },
                 };
+                let forms: Vec<Value> = match &document {
+                    Value::Composite(list) if list.is_list() => list.items().collect(),
+                    _ => continue,
+                };
                 let produced = checked(
                     ANALYZE,
                     &ANALYZE_OUTPUTS,
                     &ANALYZE_CELLS,
-                    analyzer.analyze(&form, &facts).await?,
+                    analyzer.analyze(&forms, &facts).await?,
                 )?;
                 let projected = produced
                     .into_iter()
