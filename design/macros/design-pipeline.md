@@ -160,6 +160,16 @@ Proposed, to be checked against what tonk's plugin consumes (forwarded by the co
 
 A cell's text is a fact (`xyz.cell/source`) or a constant in the query. A keystroke changes it, so the query is asked again: under a subscription only the row of that cell's text changes, and the formula runs again on that text alone, parse and analysis whole, as `check` does today; there is no incremental parser. Every other cell's text is unchanged, so its formula is a cache hit when the formula is marked cached. What a keystroke costs is one `check` of one cell; how long that is for a cell of tonk's size is not measured (hypothesis: under a frame for a cell of 50 lines, release build, the prelude analyzed once and kept, not per call; `Analyzer::new` analyzes the prelude every time today).
 
+### What a query left out
+
+Since #889 a query's `perform` returns `Answered`, its rows and a `Report` of the rules its derivation reached and did not evaluate here (`Entry::RuleSkipped { rule, concludes, reason }`), filled as the query runs. The notation drains every `perform` with `.try_vec()` (`live.rs`, `apply.rs`), which reads the rows and drops the report. Surfacing it, in this order, none of it built (agreed with the coordinator, 2026-11-26):
+
+1. **A write.** The read inside a write (`stage` in `apply.rs`) is a transaction's `perform`, also `Answered`. A write whose read left a rule out writes fewer statements than the document says, and nothing says so. It takes `.try_report()` in place of `.try_vec()`, the entries carried on the step's `Did`, and `DocumentReport` gathering them. **Open, the maintainer's:** whether such a write is refused, nothing of the document applied, or applied and reported. "A write does what it says" argues for refusing; the notation does not decide it.
+2. **A one-shot answer** (`answer`, `Live::select`, a view's layers). One form runs several `perform`s, its query, one per fold, one per layer of a view, so the entries are gathered per form and deduplicated by rule. They are said in the author's terms: `concludes` is the `on:` entity a rule is indexed under, mapped back to the concept or attribute name the form read, a mapping the compiler has when it lowers the form and keeps nowhere today; `rule` is an entity, shown by its `dialog.rule/source`. Where they go is a change to `Answer` (or `Applied`); cheaper once diagnostics are rows, where a rule left out is a warning at the form's span.
+3. **Live.** `Branch::subscribe` returns a `Subscription` with no report. `Live` could report only what a separate first `perform` left out, and a rule that compiles later (after `upgrade_rules`, under a newer release) would stay reported, as a `Report` only grows. A subscription's report per evaluation, one that can say a rule is no longer left out, is a change to the engine, and `Live` does not stand one in.
+
+What reaches a left-out rule from a document: not the rules the notation lays itself (`layer.with`), but a rule the branch holds that this replica does not compile, a newer release's formula or another embedder's. No notation test produces one yet; the first would be a branch holding a rule of a formula this release does not know, read by a document.
+
 ### Not in this step
 
 An HTTP endpoint, the LSP wire protocol, `(dialog/evaluate …)`, the definitions on the branch, and completions (after parse and diagnostics).
