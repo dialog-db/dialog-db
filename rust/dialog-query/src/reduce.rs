@@ -1172,6 +1172,49 @@ mod tests {
         assert_eq!(present(&rows[0], "total"), Value::Float(-0.5));
     }
 
+    /// The whole numbers of a mixed group sum exactly before their total
+    /// meets the floats: `2^53 + 1` and `-(2^53)` are `1`, and `1` plus
+    /// `0.5` is `1.5`. Read as floats one by one, `2^53 + 1` is `2^53`
+    /// and the sum is `0.5`.
+    #[dialog_common::test]
+    async fn it_sums_the_whole_numbers_of_a_mixed_group_exactly() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt((1 << 53) + 1)))]),
+                row(&[("x", Some(Value::SignedInt(-(1 << 53))))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(1.5));
+    }
+
+    /// A mixed group whose whole numbers overflow the exact total fails
+    /// as a group of whole numbers alone does, rather than summing them
+    /// as floats.
+    #[dialog_common::test]
+    async fn it_errors_on_a_mixed_group_whose_whole_numbers_overflow() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let result = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt(i128::MAX as u128)))]),
+                row(&[("x", Some(Value::UnsignedInt(1)))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
+            ]))
+            .await;
+        assert!(
+            matches!(result, Err(EvaluationError::Reduce { .. })),
+            "the whole numbers overflow the exact total, got {result:?}"
+        );
+    }
+
     /// count-distinct dedups by dag-cbor bytes: equal values collapse,
     /// same-lexeme values of different types stay distinct.
     #[dialog_common::test]
