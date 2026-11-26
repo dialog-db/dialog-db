@@ -268,9 +268,7 @@ impl Accumulator {
                 true
             }
             Accumulator::Distinct(values) => {
-                let Ok(bytes) = encode(&input.0) else {
-                    return false;
-                };
+                let bytes = input.0.identity_key();
                 match step {
                     Step::Add => *values.entry(bytes).or_insert(0) += 1,
                     Step::Remove => match values.get_mut(&bytes) {
@@ -505,6 +503,25 @@ mod tests {
     /// `count-distinct`: the last row holding a value leaves and the
     /// count drops by one; one of two rows holding a value leaves and
     /// the count stays.
+    /// A running count of distinct values counts one number held as
+    /// two types once, as a fold of the rows does.
+    #[dialog_common::test]
+    fn it_counts_one_number_of_two_types_once() -> anyhow::Result<()> {
+        let reduce = reduce(Aggregator::CountDistinct);
+        let mut value = Running::new(&reduce).expect("count-distinct runs");
+        for row in [
+            row("a", Some(Value::UnsignedInt(3))),
+            row("a", Some(Value::Float(3.0))),
+        ] {
+            assert!(value.add(&reduce, &row));
+        }
+        assert_eq!(
+            running(&reduce, &value)?,
+            Some(Binding::Present(Value::UnsignedInt(1)))
+        );
+        Ok(())
+    }
+
     #[dialog_common::test]
     fn it_counts_a_value_until_its_last_row_leaves() -> anyhow::Result<()> {
         let reduce = reduce(Aggregator::CountDistinct);

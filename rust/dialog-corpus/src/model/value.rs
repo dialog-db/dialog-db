@@ -206,6 +206,25 @@ impl Value {
         self == asserted
     }
 
+    /// Whether this is a narrower representation than `other` of a
+    /// number both may be: the natural over the integer over the float,
+    /// and of two floats (the zeros) the positive one. The narrowest is
+    /// what a read of the band yields, so of one number held as two types
+    /// it is the one an election, a key or a binding keeps.
+    pub fn narrower(&self, other: &Value) -> bool {
+        fn width(value: &Value) -> u8 {
+            match value {
+                Value::UnsignedInt(_) => 0,
+                Value::SignedInt(_) => 1,
+                _ => 2,
+            }
+        }
+        match (self, other) {
+            (Value::Float(a), Value::Float(b)) => a.is_sign_positive() && b.is_sign_negative(),
+            _ => width(self) < width(other),
+        }
+    }
+
     /// Whether this and `other` are one number, by the identity the band
     /// gives numbers: the natural 3, the integer 3 and the float 3.0 are
     /// one, `-0.0` is 0, and a float is the decimal it prints as, so
