@@ -304,3 +304,64 @@ async fn it_refuses_other_bytes_under_an_entity_a_rule_was_installed_under() -> 
     );
     Ok(())
 }
+
+/// What the rules a commit fires write is judged as what it stages is:
+/// an inductive rule copying a payload into `dialog.rule/source`, fired by
+/// a transaction that stages only the payload, would otherwise plant a
+/// body that is no rule. The commit is refused, and writes nothing.
+#[dialog_common::test]
+async fn it_refuses_a_rule_body_an_inductive_rule_derives() -> Result<()> {
+    let (operator, branch) = branch().await?;
+    let planter: dialog_query::InductiveRule = serde_json::from_value(json!({
+        "assert!": {
+            "with": { "body": { "the": "dialog.rule/source", "as": "bytes:", "cardinality": "many" } }
+        },
+        "when": [{
+            "assert": { "with": { "payload": { "the": "doc/payload", "as": "bytes:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "payload": { "?": { "name": "body" } } }
+        }]
+    }))?;
+    branch
+        .transaction()
+        .assert(planter)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(written(&branch, &operator).await?, (1, false));
+
+    let planted: Entity = "rule:planted".parse()?;
+    let mut changes = Changes::new();
+    changes.associate(
+        "doc/payload".parse()?,
+        planted.clone(),
+        Value::Bytes(vec![0xff, 0x00]),
+        Cardinality::Many,
+    );
+    let refused = branch
+        .transaction()
+        .assert(changes)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(CommitError::InvalidRule { rule, reason: RuleError::Undecodable { .. } })
+                if *rule == planted
+        ),
+        "{refused:?}"
+    );
+    branch.refresh(&operator).await?;
+    let payloads: Vec<_> = branch
+        .claims()
+        .select(Selector::new().of(planted.clone()))
+        .perform(&operator)
+        .await?
+        .collect()
+        .await;
+    assert!(payloads.is_empty(), "nothing of the commit is written");
+    assert_eq!(written(&branch, &operator).await?, (1, false));
+    Ok(())
+}
