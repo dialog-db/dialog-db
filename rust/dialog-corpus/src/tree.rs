@@ -1083,7 +1083,7 @@ impl CorpusExt for Corpus {
                 // before yielding. Only the value is decoded for the check,
                 // not the entity or attribute.
                 if verdict == SelectorMatch::NeedsValue
-                    && !value_predicates_admit(&selector, &decode_value_parts(&parts, None)?)
+                    && !value_admitted(&selector, raw.key.as_ref(), &parts, None)?
                 {
                     return Ok(Staged::Skip);
                 }
@@ -1111,10 +1111,12 @@ impl CorpusExt for Corpus {
                         // answered past the in-key prefix.
                         if verdict == SelectorMatch::NeedsValue {
                             let parts = layout.view(raw.key.as_ref());
-                            if !value_predicates_admit(
+                            if !value_admitted(
                                 selector,
-                                &decode_value_parts(&parts, Some(spilled.clone()))?,
-                            ) {
+                                raw.key.as_ref(),
+                                &parts,
+                                Some(spilled.clone()),
+                            )? {
                                 return Ok(None);
                             }
                         }
@@ -1189,7 +1191,7 @@ impl CorpusExt for Corpus {
                     let hash = hash.to_vec();
                     return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
-                Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
+                Ok(match reconstruct(&selector, raw.key.as_ref(), &parts, datum, None, verdict)? {
                     Some(fact) => Staged::Ready(fact),
                     None => Staged::Skip,
                 })
@@ -1210,7 +1212,7 @@ impl CorpusExt for Corpus {
                         let State::Added(datum) = &raw.value else {
                             unreachable!("Added state checked above")
                         };
-                        reconstruct(selector, &parts, datum, Some(spilled), verdict)
+                        reconstruct(selector, raw.key.as_ref(), &parts, datum, Some(spilled), verdict)
                     }
                 })
                 .buffered(SPILL_LOOKAHEAD);
@@ -1263,6 +1265,7 @@ fn staged_ready<Raw, Ready>(staged: Staged<Raw, Ready>) -> Option<Ready> {
 /// loud.
 fn reconstruct(
     selector: &Selector<Constrained>,
+    key: &[u8],
     parts: &KeyRef<'_>,
     datum: &Datum,
     spilled: Option<Vec<u8>>,
@@ -1271,7 +1274,7 @@ fn reconstruct(
     let fact = match Fact::from_key_ref_datum_value(parts, datum, spilled) {
         Ok(fact) => fact,
         Err(DialogCorpusError::CorruptEntry(reason)) => {
-            tracing::warn!(%reason, "ignoring corrupt stored row in scan");
+            crate::pass_over(Some(key), reason);
             return Ok(None);
         }
         Err(error) => return Err(error),
@@ -1280,6 +1283,38 @@ fn reconstruct(
         return Ok(None);
     }
     Ok(Some(fact))
+}
+
+/// Whether the stored `key` is a claim of `fact`'s cell and of the
+/// written value's stratum: its entity and attribute bytes are `fact`'s,
+/// and its value type, through the number band, is the stratum of
+/// `fact`'s value. Read off the key, without decoding its value.
+fn of_stratum(key: &Key, fact: &Fact) -> bool {
+    varkey::parse_key_ref(key.as_ref()).is_some_and(|parts| {
+        parts.entity.as_ref() == fact.of.as_str().as_bytes()
+            && parts.attribute.as_ref() == fact.the.as_str().as_bytes()
+            && parts.value_type.band(NUMBER_BAND) == fact.is.stratum()
+    })
+}
+
+/// Whether the value of the row at `key` (parsed as `parts`, its spilled
+/// block `spilled`) passes `selector`'s value predicates. A value no
+/// reader can read passes none: the row is passed over
+/// ([`pass_over`](crate::pass_over)) as if absent.
+fn value_admitted(
+    selector: &Selector<Constrained>,
+    key: &[u8],
+    parts: &KeyRef<'_>,
+    spilled: Option<Vec<u8>>,
+) -> Result<bool, DialogCorpusError> {
+    match decode_value_parts(parts, spilled) {
+        Ok(value) => Ok(value_predicates_admit(selector, &value)),
+        Err(DialogCorpusError::CorruptEntry(reason)) => {
+            crate::pass_over(Some(key), reason);
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The inclusive key range a selector's scan reads.
@@ -1640,6 +1675,10 @@ where
                 // The prior holding the written value, when the cell holds
                 // it: one more candidate the election may return.
                 let mut held: Option<usize> = None;
+                // The claims of the cell this replica cannot read yet, with their
+                // versions: they take no part in the election, and the
+                // write evicts them as it replaces the claim it elects.
+                let mut unread: Vec<(Key, Vec<Version>)> = Vec::new();
                 {
                     let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
                         .set_entity(entity_key.entity())
@@ -1654,17 +1693,49 @@ where
                     while let Some(candidate) = search_stream.next().await {
                         let candidate = candidate?;
                         if let State::Added(current_element) = &candidate.value {
-                            let spilled = fetch_spilled(
+                            let spilled = match fetch_spilled(
                                 storage,
                                 &ArchiveScope::new(transient.subject().clone()),
                                 &candidate.key,
                             )
-                            .await?;
-                            let current = Fact::from_key_datum_with_value(
+                            .await
+                            {
+                                Ok(spilled) => spilled,
+                                // A key whose value type this release
+                                // does not know does not parse: neither
+                                // its stratum nor its other orderings can
+                                // be read off it, so the write passes it
+                                // over and leaves it in place.
+                                Err(DialogCorpusError::InvalidKey(reason))
+                                    if varkey::parse_key_ref(candidate.key.as_ref()).is_none() =>
+                                {
+                                    crate::pass_over(Some(candidate.key.as_ref()), reason);
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            let current = match Fact::from_key_datum_with_value(
                                 &candidate.key,
                                 current_element,
                                 spilled,
-                            )?;
+                            ) {
+                                Ok(current) => current,
+                                Err(DialogCorpusError::CorruptEntry(reason)) => {
+                                    // Evicted only when the key says it is
+                                    // a claim of the written value's
+                                    // stratum, as a readable one would be
+                                    // succeeded.
+                                    if of_stratum(&candidate.key, &fact) {
+                                        crate::pass_over(Some(candidate.key.as_ref()), reason);
+                                        unread.push((
+                                            candidate.key.clone(),
+                                            current_element.versions().copied().collect(),
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
                             if current.of != fact.of || current.the != fact.the {
                                 continue;
                             }
@@ -1753,6 +1824,17 @@ where
                     transient = transient.erase(&entity_key, storage).await?;
                     transient = transient.erase(&value_key, storage).await?;
                     transient = transient.erase(&attribute_key, storage).await?;
+                }
+                // The claims this replica cannot read yet are evicted as the elected
+                // one is: erased by key, and superseded by the new claim,
+                // whose record names their versions, so every replica
+                // that takes the write evicts them too.
+                for (key, versions) in unread {
+                    let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
+                    transient = transient.erase(&entity_key, storage).await?;
+                    transient = transient.erase(&value_key, storage).await?;
+                    transient = transient.erase(&attribute_key, storage).await?;
+                    superseded_versions.extend(versions);
                 }
 
                 // A record must not claim itself as its cause: a claim this
