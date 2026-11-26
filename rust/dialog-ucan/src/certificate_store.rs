@@ -7,6 +7,7 @@ mod tests {
     use dialog_credentials::{Ed25519Signer, Signer};
     use dialog_effects::storage::{Directory, Location};
     use dialog_storage::resource::Resource;
+    use dialog_storage::unique_name;
     use dialog_ucan_core::subject::Subject;
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal;
@@ -28,18 +29,6 @@ mod tests {
             .unwrap();
 
         UcanDelegation::new(DelegationChain::new(delegation))
-    }
-
-    fn unique_name(prefix: &str) -> String {
-        use dialog_common::time;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let ts = time::now()
-            .duration_since(time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("{prefix}-{ts}-{seq}")
     }
 
     #[cfg(not(target_arch = "wasm32"))]
