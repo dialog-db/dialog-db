@@ -920,6 +920,48 @@ mod tests {
         assert_eq!(xy.this(), ba.this());
     }
 
+    /// A two-field head deriving `social/<x>` and `social/<y>` from
+    /// `source/<x>` and `source/<y>`, its fields named `x` and `y`.
+    fn two_fields(x: &str, y: &str, relations: [&str; 2]) -> DeductiveRule {
+        let field = |the: &str| json!({ "the": format!("social/{the}"), "as": "text:", "cardinality": "many" });
+        let read = |the: &str, name: &str| {
+            json!({
+                "assert": { "with": { "read": { "the": format!("source/{the}"), "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "read": { "?": { "name": name } } }
+            })
+        };
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": { "with": { x: field(relations[0]), y: field(relations[1]) } },
+            "when": [read("first", x), read("second", y)],
+        }))
+        .expect("descriptor parses");
+        descriptor.compile().expect("rule compiles")
+    }
+
+    /// The labels a writer generates for head fields (`~0`, `~1`) are
+    /// names like any other: numbering them the other way, or naming
+    /// them, is one rule.
+    #[dialog_common::test]
+    fn it_identifies_a_rule_regardless_of_how_its_head_fields_are_numbered() {
+        let relations = ["first", "second"];
+        let forward = two_fields("~0", "~1", relations);
+        let backward = two_fields("~1", "~0", relations);
+        let named = two_fields("alpha", "beta", relations);
+        assert_eq!(forward.this(), backward.this());
+        assert_eq!(forward.this(), named.this());
+    }
+
+    /// Two head fields writing one relation are told apart by what they
+    /// read, not by their labels, so numbering them the other way is
+    /// still one rule.
+    #[dialog_common::test]
+    fn it_identifies_two_head_fields_on_one_relation_regardless_of_their_labels() {
+        let relations = ["seen", "seen"];
+        let forward = two_fields("~0", "~1", relations);
+        let backward = two_fields("~1", "~0", relations);
+        assert_eq!(forward.this(), backward.this());
+    }
+
     /// Which variable reaches the head is structure, not naming:
     /// deriving the first hop is not deriving the second.
     #[dialog_common::test]
