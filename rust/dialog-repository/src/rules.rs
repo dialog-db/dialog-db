@@ -52,6 +52,8 @@
 
 pub(crate) mod error;
 
+use crate::report::Entry;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 #[cfg(test)]
@@ -617,7 +619,15 @@ struct Bundle {
     /// What the rule-discovery reads assembling it demanded, recorded
     /// as rule demand for a subscription that reuses it.
     demand: RuleDemand,
+    /// The rules assembling it left out, reported again by every query
+    /// that reuses it: `None` when it left out none, so reusing a set
+    /// that left out nothing copies nothing.
+    skipped: Skipped,
 }
+
+/// The rules an assembled rule set left out: `None` when it left out
+/// none.
+pub(crate) type Skipped = Option<Arc<[Entry]>>;
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
@@ -780,7 +790,7 @@ impl RuleCache {
         &self,
         descriptor: &ConceptDescriptor,
         key: &RuleKey,
-    ) -> Option<(ConceptRules, RuleDemand)> {
+    ) -> Option<(ConceptRules, RuleDemand, Skipped)> {
         let inner = self.inner.read();
         let bundle = inner
             .bundles
@@ -789,7 +799,11 @@ impl RuleCache {
             .find(|bundle| bundle.descriptor == *descriptor && bundle.key == *key)?;
         #[cfg(test)]
         self.reused.fetch_add(1, Ordering::Relaxed);
-        Some((bundle.rules.clone(), bundle.demand.clone()))
+        Some((
+            bundle.rules.clone(),
+            bundle.demand.clone(),
+            bundle.skipped.clone(),
+        ))
     }
 
     /// How many spellings of `concept` hold an assembled rule set.
@@ -806,15 +820,16 @@ impl RuleCache {
 
     /// Record the rule set assembled for `descriptor` over layers holding
     /// the rule facts `key` names, with the rule-discovery reads
-    /// assembling it made, replacing one recorded for that spelling
-    /// before, and the oldest spelling of its concept past
-    /// [`SPELLINGS`].
+    /// assembling it made and the rules it left out, replacing one
+    /// recorded for that spelling before, and the oldest spelling of its
+    /// concept past [`SPELLINGS`].
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
         key: RuleKey,
         rules: ConceptRules,
         reads: Vec<RuleRead>,
+        skipped: Vec<Entry>,
     ) {
         let mut inner = self.inner.write();
         let spellings = inner.bundles.entry(descriptor.this()).or_default();
@@ -827,6 +842,7 @@ impl RuleCache {
             descriptor,
             rules,
             demand: RuleDemand::new(reads),
+            skipped: (!skipped.is_empty()).then(|| skipped.into()),
         });
     }
 

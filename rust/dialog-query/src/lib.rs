@@ -132,6 +132,10 @@ mod succession_tests;
 #[cfg(test)]
 mod pick_order_tests;
 
+/// Arithmetic over numbers of different types, pinned as tests.
+#[cfg(test)]
+mod mixed_arithmetic_tests;
+
 /// Equality and joins over numbers of several types, pinned as tests.
 #[cfg(test)]
 mod equality_number_tests;
