@@ -663,6 +663,117 @@ mod tests {
         rule_headed("friend", when)
     }
 
+    /// `of knows _`, the value a blank.
+    fn knows_someone(of: &str) -> Value {
+        json!({
+            "assert": head("knows", "social/knows"),
+            "where": {
+                "this": { "?": { "name": of } },
+                "knows": { "?": {} }
+            }
+        })
+    }
+
+    /// A body variable used once matches what a blank matches, and binds
+    /// nothing anything else reads: naming it does not make another rule,
+    /// and the body stored for one decodes to the other's identity.
+    #[dialog_common::test]
+    fn it_identifies_a_once_used_variable_with_a_blank() {
+        let named = rule(vec![knows("this", "friend"), knows("this", "z")]);
+        let blank = rule(vec![knows("this", "friend"), knows_someone("this")]);
+        assert_eq!(named.this(), blank.this());
+        assert_eq!(named.canonical_descriptor(), blank.canonical_descriptor());
+        let decoded = DeductiveRule::decode(&named.encode()).expect("the body decodes");
+        assert_eq!(decoded.this(), blank.this());
+    }
+
+    /// A variable used twice is a join, not a blank: `this` knowing
+    /// someone who knows someone is not `this` knowing two people.
+    #[dialog_common::test]
+    fn it_keeps_a_variable_used_twice_apart_from_blanks() {
+        let joined = rule(vec![
+            knows("this", "friend"),
+            knows("friend", "z"),
+            knows("z", "w"),
+        ]);
+        let apart = rule(vec![
+            knows("this", "friend"),
+            knows_someone("friend"),
+            json!({
+                "assert": head("knows", "social/knows"),
+                "where": { "this": { "?": {} }, "knows": { "?": { "name": "w" } } }
+            }),
+        ]);
+        assert_ne!(joined.this(), apart.this());
+    }
+
+    /// Under `unless` only a blank is a once-used variable: a named
+    /// variable the absence test alone uses has nothing to bind it, so
+    /// the rule is refused, and the blank spelling is the one rule
+    /// there is. A once-used variable beside an absence test is a blank
+    /// as anywhere else.
+    #[dialog_common::test]
+    fn it_identifies_a_once_used_variable_with_a_blank_beside_unless() {
+        let absent = |is: Value| {
+            json!({
+                "assert": head("knows", "social/knows"),
+                "where": { "this": { "?": { "name": "friend" } }, "knows": is }
+            })
+        };
+        let compile = |when: Vec<Value>, unless: Value| {
+            serde_json::from_value::<DeductiveRuleDescriptor>(json!({
+                "deduce": head("friend", "social/friend"),
+                "when": when,
+                "unless": [unless],
+            }))
+            .expect("descriptor parses")
+            .compile()
+        };
+        let named_inside = compile(
+            vec![knows("this", "friend")],
+            absent(json!({ "?": { "name": "z" } })),
+        );
+        assert!(
+            matches!(&named_inside, Err(TypeError::RequiredBindings { .. })),
+            "{:?}",
+            named_inside.map(|rule| rule.this())
+        );
+        let blank_inside = compile(vec![knows("this", "friend")], absent(json!({ "?": {} })));
+        assert!(blank_inside.is_ok(), "{blank_inside:?}");
+
+        let named = compile(
+            vec![knows("this", "friend"), knows("this", "z")],
+            absent(json!({ "?": {} })),
+        )
+        .expect("rule compiles");
+        let blank = compile(
+            vec![knows("this", "friend"), knows_someone("this")],
+            absent(json!({ "?": {} })),
+        )
+        .expect("rule compiles");
+        assert_eq!(named.this(), blank.this());
+    }
+
+    /// A head field no premise binds is used once, in the head, and is
+    /// no blank: the rule is refused when it compiles, as it was.
+    #[dialog_common::test]
+    fn it_refuses_a_head_field_the_body_does_not_bind() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head("friend", "social/friend"),
+            "when": [knows("this", "x"), knows("x", "y"), knows("y", "x")],
+        }))
+        .expect("descriptor parses");
+        let compiled = descriptor.compile();
+        assert!(
+            matches!(
+                &compiled,
+                Err(TypeError::UnboundVariable { variable, .. }) if variable == "friend"
+            ),
+            "{:?}",
+            compiled.map(|rule| rule.this())
+        );
+    }
+
     /// A head field named `this`, the entity's own name, is refused
     /// with a typed error where it panicked looking up its canonical
     /// name, which only the entity does not get.
