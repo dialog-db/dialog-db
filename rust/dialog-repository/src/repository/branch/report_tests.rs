@@ -305,6 +305,95 @@ async fn cycle_reported<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>
     Ok(())
 }
 
+/// `doc/<head>(x) := value :- doc/<body>(x) = value`: a rule whose
+/// premise is a concept another rule may derive.
+fn relay(head: &str, body: &str) -> Result<DeductiveRule> {
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": { "with": { "value": { "the": format!("doc/{head}"), "as": "text:" } } },
+        "when": [{
+            "assert": { "with": { "read": { "the": format!("doc/{body}"), "as": "text:" } } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "read": { "?": { "name": "value" } }
+            }
+        }]
+    }))?;
+    Ok(descriptor.compile()?)
+}
+
+/// A body under the index of `doc/other`, a relation the chain never
+/// reads, that is no rule.
+fn unrelated() -> Entity {
+    "rule:unrelated".parse().expect("a rule entity")
+}
+
+/// The seeded branch, with `doc/badge` relayed from `doc/tag` and
+/// `doc/medal` from `doc/badge`, and a body that is no rule under the
+/// index of `doc/other`.
+async fn chained<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Result<Branch> {
+    let branch = seeded(session, peer).await?;
+    let mut changes = Changes::new();
+    changes.associate(
+        "dialog.rule/derives".parse()?,
+        unrelated(),
+        Value::Entity("on:doc/other".parse()?),
+        dialog_corpus::Cardinality::Many,
+    );
+    changes.associate(
+        "dialog.rule/source".parse()?,
+        unrelated(),
+        Value::Bytes(vec![0xfe, 0x01]),
+        dialog_corpus::Cardinality::Many,
+    );
+    branch
+        .transaction()
+        .assert(relay("badge", "tag")?)
+        .assert(relay("medal", "badge")?)
+        .assert(changes)
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    branch.refresh(session).await?;
+    Ok(branch)
+}
+
+/// A query of `doc/badge`, whose rule reads `doc/tag`, and of
+/// `doc/medal`, two levels up, reports the body left out of `doc/tag`,
+/// on the first run and on a second one served the cached rule sets;
+/// the body under `doc/other`, which neither reaches, is not reported.
+async fn reported_when_reached_indirectly<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    let branch = chained(session, peer).await?;
+    for (relation, levels) in [("badge", "one level"), ("medal", "two levels")] {
+        for run in ["first run", "cached run"] {
+            let (rows, report) = branch
+                .query()
+                .select(concept_query(&format!("doc/{relation}"), "value")?)
+                .perform(session)
+                .try_report()
+                .await?;
+            let entries = report.entries();
+            assert_eq!(rows.len(), 3, "{levels}, {run}: the three documents");
+            assert!(
+                reports_broken(&entries),
+                "{levels}, {run}: the body left out of doc/tag is reported: {entries:?}"
+            );
+            assert!(
+                !entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::RuleSkipped { rule, .. } if *rule == unrelated()
+                )),
+                "{levels}, {run}: a body no concept of the query reads is not reported: {entries:?}"
+            );
+            assert_eq!(entries.len(), 1, "{levels}, {run}: {entries:?}");
+        }
+    }
+    Ok(())
+}
+
 /// Every case, on one provider.
 macro_rules! cases {
     ($provider:ident, $root:ident = $make:expr, $session:expr) => {
@@ -344,6 +433,13 @@ macro_rules! cases {
                 let $root = $make;
                 let (session, peer) = $session;
                 cycle_reported(&session, &peer).await
+            }
+
+            #[dialog_common::test]
+            async fn it_reports_a_skipped_rule_the_query_reaches_indirectly() -> Result<()> {
+                let $root = $make;
+                let (session, peer) = $session;
+                reported_when_reached_indirectly(&session, &peer).await
             }
         }
     };
