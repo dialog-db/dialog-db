@@ -232,3 +232,114 @@ async fn it_refuses_bounds_that_are_only_compared() -> Result<()> {
     );
     Ok(())
 }
+
+/// The window kept in the stack's `session:` layer, which never syncs:
+/// the renderer writes its bounds there, the layer of the page that
+/// reads `list/item` in the window is subscribed over the stack, and a
+/// move of the bounds there moves the rows it answers. The primary
+/// holds no window, and the crate's driver, which subscribes through
+/// the branch, sees none.
+#[dialog_common::test]
+async fn it_moves_a_window_kept_in_the_session_layer() -> Result<()> {
+    use dialog_corpus::Statement as _;
+    use dialog_query::the;
+    use dialog_repository::session_layer;
+
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, &format!("{PAGED}\n{LISTS}")).await?;
+    let rows: String = ROWS
+        .lines()
+        .filter(|line| !line.contains("(window "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&mut notebook, &rows).await?;
+
+    let window = entity("window:1")?;
+    let plan = plan_of("(select (list/page ?w is: ?p))")?;
+    let layer = plan.layers.len() - 1;
+    let query = plan.query(layer, Some(&window))?;
+    if let Some(rule) = &query.rule {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+
+    let stack = notebook.branch.stack().perform(&notebook.operator).await?;
+    let list = entity("list:todos")?;
+    let session = session_layer;
+    let at = |from: &str, to: &str| {
+        let of = match &window {
+            dialog_corpus::Value::Entity(of) => Ok(of.clone()),
+            other => Err(anyhow::anyhow!("{other:?} is no entity")),
+        }?;
+        let list = match &list {
+            dialog_corpus::Value::Entity(list) => list.clone(),
+            other => return Err(anyhow::anyhow!("{other:?} is no entity")),
+        };
+        anyhow::Ok((
+            the!("xyz.window/list")
+                .of(of.clone())
+                .is(list)
+                .at(session()),
+            the!("xyz.window/from")
+                .of(of.clone())
+                .is(from.to_string())
+                .at(session()),
+            the!("xyz.window/to")
+                .of(of)
+                .is(to.to_string())
+                .at(session()),
+        ))
+    };
+    let (l, f, t) = at("b", "d")?;
+    stack
+        .assert(l)
+        .assert(f)
+        .assert(t)
+        .perform(&notebook.operator)
+        .await?;
+
+    let mut reader = stack.subscribe(query.select.clone());
+    stack.settle(&notebook.operator).await?;
+    reader.poll();
+    let members = |results: &[_]| {
+        ["todo:a", "todo:b", "todo:c", "todo:d"]
+            .into_iter()
+            .filter(|member| {
+                results
+                    .iter()
+                    .any(|row| format!("{row:?}").contains(&format!("this: Held({member})")))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(members(&reader.results()), ["todo:b", "todo:c"]);
+
+    let (_, from, to) = at("b", "d")?;
+    let (_, f, t) = at("c", "e")?;
+    stack
+        .assert(f)
+        .assert(t)
+        .retract(from)
+        .retract(to)
+        .perform(&notebook.operator)
+        .await?;
+    stack.settle(&notebook.operator).await?;
+    let moved = reader.poll();
+    assert!(!moved.is_empty(), "the move is delivered");
+    assert_eq!(members(&reader.results()), ["todo:c", "todo:d"]);
+
+    let (primary, _) = notebook
+        .submit("(select (window ?w list: ?l from: ?lo to: ?hi))")
+        .await?;
+    assert!(
+        primary.is_empty(),
+        "the primary holds no window: {primary:?}"
+    );
+    let live = Live::new(notebook.branch.clone());
+    let mut watched = live.watch(plan, Some(window))?;
+    watched.poll(&notebook.operator).await?;
+    assert_eq!(
+        watched.tree().hiccup(),
+        "",
+        "the driver reads through the branch and sees no session: window"
+    );
+    Ok(())
+}
