@@ -124,6 +124,8 @@ pub use upstream::*;
 mod integration_tests;
 
 #[cfg(test)]
+mod extension_tests;
+#[cfg(test)]
 mod head_type_tests;
 #[cfg(test)]
 mod isolation_tests;

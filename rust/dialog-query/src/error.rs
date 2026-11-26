@@ -291,6 +291,37 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A premise names a formula the embedder building it holds no
+    /// extension of ([`Extensions::apply`]).
+    ///
+    /// [`Extensions::apply`]: crate::formula::Extensions::apply
+    #[error("No formula \"{name}\" is known: it is none of the engine's and no extension given")]
+    UnknownFormula {
+        /// The name the premise gave.
+        name: String,
+    },
+
+    /// A rule holds a formula an embedder supplies. A rule is stored and
+    /// read back from its body, which cannot say an embedder's code; an
+    /// extension is evaluated by a [`PremiseQuery`] alone.
+    ///
+    /// [`PremiseQuery`]: crate::query::PremiseQuery
+    #[error(
+        "A rule cannot hold the formula \"{formula}\", which an embedder supplies: a rule is \
+         stored, and its body cannot say the embedder's code; ask it in a premise query"
+    )]
+    EmbedderFormula {
+        /// The extension's name.
+        formula: String,
+    },
+
+    /// A premise query selects a variable none of its premises binds.
+    #[error("The premise query selects \"{variable}\", which none of its premises binds")]
+    UnselectedVariable {
+        /// The variable.
+        variable: String,
+    },
+
     /// A concept's field is named `this`, the name its entity has in
     /// every query and rule: the field and the entity would be one.
     #[error("A concept field cannot be named \"{field}\": that is the name of the entity")]
@@ -1001,6 +1032,13 @@ pub enum AnalysisError {
     SelfNegation {
         /// The conclusion concept's URI.
         concept: String,
+    },
+    /// A premise holds a formula an embedder supplies, which no rule may
+    /// hold. See [`TypeError::EmbedderFormula`].
+    #[error("rule holds the embedder's formula {formula}")]
+    EmbedderFormula {
+        /// The extension's name.
+        formula: String,
     },
     /// A body premise binds a variable named as a *reduced* head
     /// field — two definitions for one field. See

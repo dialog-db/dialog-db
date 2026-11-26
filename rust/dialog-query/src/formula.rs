@@ -11,6 +11,8 @@ pub mod cache;
 /// Formula cell types for parameter slot definitions.
 pub mod cell;
 
+/// Formulas an embedder supplies.
+pub mod extension;
 /// Input type alias for formula input cells.
 pub mod input;
 /// Numeric scheme machinery: `Number`, `Numeric`, `SchemeBound`.
@@ -21,6 +23,7 @@ pub mod query;
 pub use bindings::*;
 pub use cache::{FORMULA_CACHE_CAPACITY, FormulaCache};
 pub use cell::*;
+pub use extension::{Extension, ExtensionQuery, Extensions};
 pub use input::*;
 pub use number::*;
 pub use query::*;

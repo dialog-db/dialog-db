@@ -6,6 +6,7 @@ use crate::formula::bindings::Bindings;
 use crate::formula::cache::FormulaCache;
 use crate::formula::cell::Cells;
 use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUnsignedInteger};
+use crate::formula::extension::ExtensionQuery;
 use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 use crate::formula::number::Numeric;
@@ -55,22 +56,31 @@ macro_rules! define_formulas {
                 #[serde(rename = $name)]
                 $variant($q),
             )*
+            /// A formula an embedder supplies ([`Extension`]): built
+            /// through the embedder's [`Extensions`], never written as
+            /// data, so it has no spelling a rule body or a query read
+            /// from data could hold.
+            ///
+            /// [`Extension`]: crate::formula::extension::Extension
+            /// [`Extensions`]: crate::formula::extension::Extensions
+            #[serde(skip)]
+            Extension(ExtensionQuery),
         }
 
         impl FormulaQuery {
             /// Returns the formal notation name (e.g. `"math/sum"`).
             pub fn name(&self) -> &'static str {
-                match self { $( Self::$variant(_) => $name, )* }
+                match self { $( Self::$variant(_) => $name, )* Self::Extension(q) => q.name() }
             }
 
             /// Returns the static cell definitions for this formula.
             pub(crate) fn cells(&self) -> &'static Cells {
-                match self { $( Self::$variant(_) => <$ty>::cells(), )* }
+                match self { $( Self::$variant(_) => <$ty>::cells(), )* Self::Extension(q) => q.cells() }
             }
 
             /// Runs the formula's resolve logic against the given bindings.
             fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* }
+                match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* Self::Extension(q) => q.resolve(bindings) }
             }
 
             /// Runs the formula's resolve logic against the given bindings,
@@ -80,23 +90,29 @@ macro_rules! define_formulas {
                 bindings: &mut Bindings,
                 cache: &FormulaCache,
             ) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::resolve_with(bindings, cache), )* }
+                match self {
+                    $( Self::$variant(_) => <$ty>::resolve_with(bindings, cache), )*
+                    Self::Extension(q) => q.resolve(bindings),
+                }
             }
 
             /// Returns the base cost of evaluating this formula.
             pub fn cost(&self) -> usize {
-                match self { $( Self::$variant(_) => <$ty>::cost(), )* }
+                match self { $( Self::$variant(_) => <$ty>::cost(), )* Self::Extension(q) => q.cost() }
             }
 
             /// Returns the parameters for this formula application.
             pub fn parameters(&self) -> Parameters {
-                match self { $( Self::$variant(q) => q.clone().into(), )* }
+                match self { $( Self::$variant(q) => q.clone().into(), )* Self::Extension(q) => q.terms().clone() }
             }
 
             /// This formula applied to `terms` instead of its own: the
             /// same formula, re-bound, validated as a fresh application.
             pub fn with_parameters(&self, terms: Parameters) -> Result<Self, crate::error::TypeError> {
-                match self { $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )* }
+                match self {
+                    $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )*
+                    Self::Extension(q) => Ok(Self::Extension(q.with_terms(terms)?)),
+                }
             }
         }
 
