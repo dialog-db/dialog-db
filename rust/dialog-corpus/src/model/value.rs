@@ -206,6 +206,25 @@ impl Value {
         self == asserted
     }
 
+    /// Whether this is a narrower representation than `other` of a
+    /// number both may be: the natural over the integer over the float,
+    /// and of two floats (the zeros) the positive one. The narrowest is
+    /// what a read of the band yields, so of one number held as two types
+    /// it is the one an election, a key or a binding keeps.
+    pub fn narrower(&self, other: &Value) -> bool {
+        fn width(value: &Value) -> u8 {
+            match value {
+                Value::UnsignedInt(_) => 0,
+                Value::SignedInt(_) => 1,
+                _ => 2,
+            }
+        }
+        match (self, other) {
+            (Value::Float(a), Value::Float(b)) => a.is_sign_positive() && b.is_sign_negative(),
+            _ => width(self) < width(other),
+        }
+    }
+
     /// Whether this and `other` are one number, by the identity the band
     /// gives numbers: the natural 3, the integer 3 and the float 3.0 are
     /// one, `-0.0` is 0, and a float is the decimal it prints as, so
@@ -635,6 +654,16 @@ impl Value {
     /// Produce a hash reference to this [`Value`]
     pub fn to_reference(&self) -> Blake3Hash {
         make_reference(self.to_bytes())
+    }
+
+    /// The stratum this value belongs to: the relation, among those one
+    /// attribute names, that a claim of it is a claim of. A cardinality-one
+    /// write succeeds only the claims of its own stratum. Numbers of every
+    /// type are one stratum, as the band keys them; every other type is a
+    /// stratum of its own, so a listed text, a prefixed text and a text are
+    /// one (they are all text).
+    pub fn stratum(&self) -> ValueDataType {
+        self.data_type().band(NUMBER_BAND)
     }
 
     /// What an election compares two values by when nothing else

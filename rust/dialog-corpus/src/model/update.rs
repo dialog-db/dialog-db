@@ -241,24 +241,7 @@ pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
     match candidate.tiebreak().cmp(&incumbent.tiebreak()) {
         Ordering::Greater => true,
         Ordering::Less => false,
-        Ordering::Equal => narrower(candidate, incumbent),
-    }
-}
-
-/// Whether `a` is a narrower representation than `b` of the number both
-/// are: the natural over the integer over the float, and of two floats
-/// (the zeros) the positive one.
-fn narrower(a: &Value, b: &Value) -> bool {
-    fn width(value: &Value) -> u8 {
-        match value {
-            Value::UnsignedInt(_) => 0,
-            Value::SignedInt(_) => 1,
-            _ => 2,
-        }
-    }
-    match (a, b) {
-        (Value::Float(a), Value::Float(b)) => a.is_sign_positive() && b.is_sign_negative(),
-        _ => width(a) < width(b),
+        Ordering::Equal => candidate.narrower(incumbent),
     }
 }
 
@@ -905,12 +888,17 @@ fn associate_cell(cell: &mut Vec<Change>, is: Value, cardinality: Cardinality) {
     // write succeeds what it succeeded, so it takes its place. With
     // another assertion of the cell in the batch the two claims
     // stand equal and either may be the one elected, so every write
-    // stays, in order, and is replayed as written.
+    // stays, in order, and is replayed as written. Only claims of the
+    // written value's stratum count: an assertion of another stratum is
+    // of another relation, which the write succeeds none of.
+    let stratum = is.stratum();
     if cardinality == Cardinality::One
-        && let Some((Change::Assert(_, Cardinality::One), before)) = cell.split_last()
-        && before
-            .iter()
-            .all(|change| matches!(change, Change::Retract(_)))
+        && let Some((Change::Assert(earlier, Cardinality::One), before)) = cell.split_last()
+        && earlier.stratum() == stratum
+        && before.iter().all(|change| match change {
+            Change::Retract(_) => true,
+            Change::Assert(value, _) => value.stratum() != stratum,
+        })
     {
         cell.pop();
     }

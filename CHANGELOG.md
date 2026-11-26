@@ -45,9 +45,80 @@ What this changes for you:
 Why: a rule that would not compile is refused when it is asserted, and
 writing its facts by hand is asserting it.
 
+### A query reports the rules it left out, as it runs
+
+[#889](https://github.com/dialog-db/dialog-db/pull/889)
+
+A rule a branch holds that did not compile here works as if it were not
+there (see the entry below on `dialog.rule/error`), and a query whose
+derivation reaches one answered without it and said nothing. A query
+now comes with a report of what it left out. The report is filled as
+the query runs and readable at any point: the rules of a concept are
+assembled before the first row that concept gives, so a report read
+when a row arrives already lists the rules left out of what produced
+it. A report read before the rows are first polled is empty, since
+the query has not run yet. Nothing has to be drained to read it, and
+dropping the query early loses nothing reported. Only rules the
+query's derivation reaches are reported.
+
+What this changes for you:
+
+- `SelectQuery::perform` (a branch's `query().select(..)`) and
+  `TransactionSelectQuery::perform` (a transaction's `query()`) return
+  `dialog_repository::Answered<S>`, a stream of the same rows as
+  before, so code that reads rows is unchanged. Code that named the
+  returned type as `impl Output<..>` still compiles; code that relied
+  on it being exactly the inner stream type does not.
+- New: `Answered::report()`, a `Report` handle; `Report::entries()`,
+  what was reported so far; `Report::stream()`, each entry as it is
+  reported, ending when the query's stream ends or is dropped; and
+  `Answered::try_report()`, which drains the rows and returns them with
+  the report.
+- New: `dialog_repository::Entry`, `#[non_exhaustive]`, with
+  `RuleSkipped { rule, concludes, reason: RuleError }`. `concludes` is
+  the `on:` entity of the relation the rule would have concluded.
+- A rule left out for closing a cycle is reported too, as
+  `RuleError::Cycle`.
+
+Why: a query that answers without a rule it would have used should say
+so, and say it while it runs, not only after every row is read.
+### One number held as two types groups, counts and joins as one
+
+[#888](https://github.com/dialog-db/dialog-db/pull/888)
+
+A fold grouped its rows by the encoding of their key values, counted
+distinct values by their encoding, and a rule's memo of rows looked a
+bound entity up by its encoding, and each encoding tells the types of a
+number apart: `3` and `3.0` made two groups, counted as two distinct
+values, and missed each other in the memo. A variable joined across two
+premises held whichever representation bound it first, so a join
+answered `3` or `3.0` depending on the order the plan ran its premises
+in. Keys, distinct counts and the memo now go by a value's identity, as
+the band keys numbers, and the narrowest type stands for the number, as
+a read of the band yields it: a group of `3` and `3.0` is one group
+keyed `3`, `count-distinct` of them is 1, and a variable bound to both
+holds `3`, whichever came first.
+
+What this changes for you:
+
+- A fold over rows whose group field holds one number as two types gives
+  one row for that number, its key the narrowest type. It gave one row
+  per type.
+- `count-distinct` counts one number held as two types once, folded or
+  run as a subscription steps it.
+- A variable a join binds to one number in two types holds the narrowest
+  of them. It held the first.
+- A fold's rows come out in the order of the new keys, which differs
+  from the order before for groups keyed by more than one value.
+- `Value::narrower` is new: whether a value is a narrower representation
+  of a number than another.
+
+Why: an answer must not depend on the type a number happened to be read
+as, or on the order a plan ran its premises in.
+
 ### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
 
-Pull request: to be linked when it opens.
+[#883](https://github.com/dialog-db/dialog-db/pull/883)
 
 A rule that does not compile reaches a branch only from elsewhere (a
 replica on another release, another implementation, a writer of raw
@@ -82,6 +153,64 @@ What this changes for you:
 
 Why: a rule that did not compile is one kind of thing whatever the
 reason, and an embedder should find it, and why, in one place.
+
+### A cardinality-one write succeeds only the claims of its own type
+
+[#882](https://github.com/dialog-db/dialog-db/pull/882)
+
+A value of another type under an attribute is a claim of another
+relation, and a typed read already elects only among the claims its
+type reads (#875). The write side did not follow: asserting a value
+under cardinality one retracted the cell's newest claim of any type, so
+writing `"hello"` where a cell held `3` removed the `3`, and a `natural:`
+reader of the cell lost its value to a write it could not see. A
+cardinality-one write now succeeds only the newest claim of its own
+stratum, and leaves the claims of every other stratum standing. Numbers
+of every type are one stratum, as the band keys them: a float succeeds a
+natural. Every other type is a stratum of its own, and a type's finer
+forms share it: a listed text (`as: [low, high]`), a prefixed text and a
+text are all text, so a write of one succeeds the others.
+
+What this changes for you:
+
+- A cardinality-one assert of a text over a cell holding a number (or a
+  number over a text, an entity over a text, and so on) leaves the other
+  claim standing. It retracted it.
+- A cell under cardinality one can hold one live claim per stratum. A
+  typed read answers the newest claim of its own type; a read through a
+  field of no type elects the newest claim of all, as before.
+- An embedder that changes a cardinality-one value's type (writes an
+  entity where a text was) and expects the old value gone must retract
+  it.
+- Two inductive rules asserting one attribute under cardinality one
+  with values of different types no longer succeed each other: both
+  claims stand.
+
+Why: an attribute's type is part of which relation a claim belongs to,
+so a write must not remove a claim of a relation it does not write.
+
+### Two numbers of one value are equal whatever types they were read as
+
+[#881](https://github.com/dialog-db/dialog-db/pull/881)
+
+A rule's `==` compared two values by type first, so two numbers of one
+value read through different number types were not equal and the row
+was dropped, with no error: `3` read as `natural:` was not `3` read as
+`integer:` or as `float:`, since a typed read gives each number the
+representation of its type. `==` now holds between two numbers of one
+value whatever types they were read as, as the band keys them (`3`,
+`+3` and `3.0` are one number). The same holds where a computed value is
+checked against a constant: a formula's output, and a row of the tree's
+inspection relations.
+
+What this changes for you:
+
+- `==` between numbers of one value read through different number types
+  holds. It was a non-match.
+- Two values of one type, and a number against a value of another type,
+  compare as before.
+- A variable joined across two reads of different number types is still
+  refused when the rule compiles.
 
 ### A range predicate orders two numbers of different types by value
 
@@ -1179,12 +1308,6 @@ dropping that scope.
 
 #### Compatibility and migration
 
-- A range predicate between numbers of different types: nothing stored
-  or synced changes, no identity moves and nothing is rewritten. A rule
-  stored before keeps its identity and now keeps the rows its range
-  predicate dropped between numbers of different types; an older
-  release still drops them, so a mixed fleet differs in what such a
-  rule derives until every replica upgrades.
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a
   pattern is written in format 5. Only the reader changed: a body that
@@ -1597,10 +1720,44 @@ and names the rule.
   as it is, inert where it is not a rule here. An older release does
   not refuse such a write, and what it writes arrives here as before.
   An embedder runs nothing.
+- A query's report: nothing stored or synced changes. An embedder runs
+  nothing.
+- One number held as two types groups, counts and joins as one: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A fold's groups, a distinct count and a join's binding are computed
+  as a query runs; an older release still splits them, so a mixed fleet
+  differs in what such a query answers until every replica upgrades.
+
 - `dialog.rule/error`: nothing is stored under it and nothing stored
   changes; it is answered from the rule bodies a branch holds, as
   `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older
   release answers nothing under it. An embedder runs nothing.
+
+- A cardinality-one write succeeds only its own type's claims: nothing
+  stored changes shape, no identity moves and nothing is rewritten on
+  upgrade. Every replica already holds at most one live claim per cell,
+  which is one per stratum. What a write retracts differs: an older
+  release retracts the newest claim of any type, this one only of its
+  own. An older release reads what this one writes; its cardinality-one
+  read elects the newest claim of any type and answers nothing when that
+  claim is of another type than its field. A mixed fleet differs in
+  what a cell holds until every writer upgrades: an older writer's
+  write still retracts the claim of another type, and that retraction
+  reaches every replica on sync. Concurrent writes converge on pull
+  whichever replica merges, before and after this change and in a mixed
+  fleet. Upgrade every writer; an embedder runs nothing.
+- Two numbers of one value equal whatever types read them: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A stored rule keeps its identity and now keeps the rows its `==`
+  dropped between numbers of different types; an older release still
+  drops them, so a mixed fleet differs in what such a rule derives until
+  every replica upgrades.
+- A range predicate between numbers of different types: nothing stored
+  or synced changes, no identity moves and nothing is rewritten. A rule
+  stored before keeps its identity and now keeps the rows its range
+  predicate dropped between numbers of different types; an older
+  release still drops them, so a mixed fleet differs in what such a
+  rule derives until every replica upgrades.
 - A rule's write under cardinality one after the same commit's write
   of the cell: nothing stored changes shape, no identity moves and
   nothing is rewritten on upgrade. What a commit writes differs: one
