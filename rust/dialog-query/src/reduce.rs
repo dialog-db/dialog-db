@@ -37,10 +37,12 @@
 //!   unsigned input beyond `i128::MAX`. The result is the narrowest
 //!   fitting variant: non-negative sums come back `UnsignedInt`,
 //!   negative sums `SignedInt`. Floats accumulate in `f64`, and a
-//!   group mixing whole numbers with floats sums as floats, each
-//!   whole number read as the float nearest it, as formula arithmetic
-//!   computes a whole number and a float: one past `2^53` loses what
-//!   a float cannot hold. The empty (all-absent) group returns the identity
+//!   group mixing whole numbers with floats sums as floats, as formula
+//!   arithmetic computes a whole number and a float: its whole numbers
+//!   sum exactly first (and overflow as above), and their total is read
+//!   once as the float nearest it, so a total past `2^53` loses what a
+//!   float cannot hold. Floats sum in `total_cmp` order, so the order
+//!   rows reach the fold does not move the result. The empty (all-absent) group returns the identity
 //!   `UnsignedInt(0)`.
 //! - **`min`/`max`** use the range-predicate ordering: same-variant
 //!   comparison via [`Numeric::compare`] for numeric values —
@@ -771,29 +773,28 @@ fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, Evaluation
             }
         }
     }
-    // Whole numbers and floats in one group sum as floats, as formula
-    // arithmetic computes them: each whole number is read as the float
-    // nearest it.
-    if !floats.is_empty() {
-        floats.extend(integers.drain(..).map(|value| value as f64));
+    integers.sort_unstable();
+    let mut total: i128 = 0;
+    for value in integers {
+        total = total
+            .checked_add(value)
+            .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
     }
     if floats.is_empty() {
-        integers.sort_unstable();
-        let mut total: i128 = 0;
-        for value in integers {
-            total = total
-                .checked_add(value)
-                .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
-        }
-        if total >= 0 {
-            Ok(Value::UnsignedInt(total as u128))
+        return Ok(if total >= 0 {
+            Value::UnsignedInt(total as u128)
         } else {
-            Ok(Value::SignedInt(total))
-        }
-    } else {
-        floats.sort_unstable_by(|a, b| a.total_cmp(b));
-        Ok(Value::Float(floats.into_iter().sum()))
+            Value::SignedInt(total)
+        });
     }
+    // Whole numbers and floats in one group sum as floats, as formula
+    // arithmetic computes them. The whole numbers sum exactly first, and
+    // their total is read as the float nearest it, once: `2^53 + 1` and
+    // `-(2^53)` are `1` before they meet a float. The floats sum in
+    // `total_cmp` order, so the rows' order does not move the rounding.
+    floats.push(total as f64);
+    floats.sort_unstable_by(|a, b| a.total_cmp(b));
+    Ok(Value::Float(floats.into_iter().sum()))
 }
 
 /// `f64` mean of the present numeric values; `None` (Absent) over an

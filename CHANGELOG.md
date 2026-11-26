@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A whole number and a float compute as floats
 
+[#892](https://github.com/dialog-db/dialog-db/pull/892)
+
 A formula over a whole number and a float (`math/sum`, `math/difference`,
 `math/product`, `math/quotient`, `math/modulo`) gave no row, with no
 error, and a fold's `sum` over whole numbers and floats in one group
@@ -34,7 +36,10 @@ What this changes for you:
 - A whole number past `2^53` mixed with a float loses what a float
   cannot hold: `2^53 + 1` plus `0.5` is `2^53` as a float.
 - `sum` over a group holding whole numbers and floats is the float sum.
-  It failed with "mixed integer and float inputs".
+  It failed with "mixed integer and float inputs". The whole numbers sum
+  exactly first and their total meets the floats once: `2^53 + 1`,
+  `-(2^53)` and `0.5` sum to `1.5`. Whole numbers whose total overflows
+  fail the group, as they do without a float.
 - A rule whose two operands are declared of two number types
   (`natural:` and `float:`) is still refused when it compiles.
 
