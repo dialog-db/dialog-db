@@ -36,12 +36,13 @@
 //!   checked arithmetic and errors loudly on overflow, including an
 //!   unsigned input beyond `i128::MAX`. The result is the narrowest
 //!   fitting variant: non-negative sums come back `UnsignedInt`,
-//!   negative sums `SignedInt`. Floats accumulate in `f64`. Mixing
-//!   the integer band with floats in one group is an error: the
-//!   numeric machinery (formula arithmetic, the range predicates in
-//!   `constraint/compare.rs`) is strictly no-promotion between
-//!   integers and floats for data, and a fold input is always data.
-//!   The empty (all-absent) group returns the identity
+//!   negative sums `SignedInt`. Floats accumulate in `f64`, and a
+//!   group mixing whole numbers with floats sums as floats, as formula
+//!   arithmetic computes a whole number and a float: its whole numbers
+//!   sum exactly first (and overflow as above), and their total is read
+//!   once as the float nearest it, so a total past `2^53` loses what a
+//!   float cannot hold. Floats sum in `total_cmp` order, so the order
+//!   rows reach the fold does not move the result. The empty (all-absent) group returns the identity
 //!   `UnsignedInt(0)`.
 //! - **`min`/`max`** use the range-predicate ordering: same-variant
 //!   comparison via [`Numeric::compare`] for numeric values —
@@ -86,6 +87,7 @@
 //! ```
 
 use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Display;
@@ -501,12 +503,27 @@ impl Table {
                 Binding::Absent => key.push(None),
             }
         }
-        let key_bytes = encode(&key)?;
+        let key_bytes = group_key(&key);
         let entries = &self.entries;
-        let group = self.groups.entry(key_bytes).or_insert_with(|| Group {
-            key,
-            columns: vec![Vec::new(); entries.len()],
-        });
+        let group = match self.groups.entry(key_bytes) {
+            Entry::Vacant(vacant) => vacant.insert(Group {
+                key,
+                columns: vec![Vec::new(); entries.len()],
+            }),
+            // One number held as two types is one group, whose key reads
+            // as the narrowest of them, whatever order its rows arrive in.
+            Entry::Occupied(occupied) => {
+                let group = occupied.into_mut();
+                for (held, value) in group.key.iter_mut().zip(key) {
+                    if let (Some(held), Some(value)) = (held, value)
+                        && value.narrower(held)
+                    {
+                        *held = value;
+                    }
+                }
+                group
+            }
+        };
         for (column, entry) in group.columns.iter_mut().zip(entries) {
             match row.lookup(&entry.input)? {
                 Binding::Present(value) => {
@@ -615,6 +632,26 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, EvaluationError> {
     })
 }
 
+/// The bytes a group is keyed by: each component's identity
+/// ([`Value::identity_key`]), so one number held as two types is one
+/// group, or a marker for an absent one. Each component is written with
+/// its length, so no two keys run together.
+pub(crate) fn group_key(key: &[Option<Value>]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for component in key {
+        match component {
+            Some(value) => {
+                let identity = value.identity_key();
+                bytes.push(1);
+                bytes.extend_from_slice(&(identity.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&identity);
+            }
+            None => bytes.push(0),
+        }
+    }
+    bytes
+}
+
 /// A fold failure scoped to its entry.
 fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
     EvaluationError::Reduce {
@@ -704,7 +741,7 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
         Aggregator::CountDistinct => {
             let mut distinct = BTreeSet::new();
             for value in &values {
-                distinct.insert(encode(value)?);
+                distinct.insert(value.identity_key());
             }
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
         }
@@ -716,7 +753,8 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
     }
 }
 
-/// Checked sum: integers in `i128`, floats in `f64`, never mixed.
+/// Checked sum: integers in `i128`, and floats, or whole numbers mixed
+/// with floats, in `f64`.
 /// Folds in sorted order so overflow behavior and float rounding are
 /// independent of row order.
 fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, EvaluationError> {
@@ -735,30 +773,28 @@ fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, Evaluation
             }
         }
     }
-    if !integers.is_empty() && !floats.is_empty() {
-        return Err(fault(
-            entry,
-            "mixed integer and float inputs in one group; \
-             the numeric machinery does not promote between them",
-        ));
+    integers.sort_unstable();
+    let mut total: i128 = 0;
+    for value in integers {
+        total = total
+            .checked_add(value)
+            .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
     }
     if floats.is_empty() {
-        integers.sort_unstable();
-        let mut total: i128 = 0;
-        for value in integers {
-            total = total
-                .checked_add(value)
-                .ok_or_else(|| fault(entry, "sum overflows the i128 accumulator"))?;
-        }
-        if total >= 0 {
-            Ok(Value::UnsignedInt(total as u128))
+        return Ok(if total >= 0 {
+            Value::UnsignedInt(total as u128)
         } else {
-            Ok(Value::SignedInt(total))
-        }
-    } else {
-        floats.sort_unstable_by(|a, b| a.total_cmp(b));
-        Ok(Value::Float(floats.into_iter().sum()))
+            Value::SignedInt(total)
+        });
     }
+    // Whole numbers and floats in one group sum as floats, as formula
+    // arithmetic computes them. The whole numbers sum exactly first, and
+    // their total is read as the float nearest it, once: `2^53 + 1` and
+    // `-(2^53)` are `1` before they meet a float. The floats sum in
+    // `total_cmp` order, so the rows' order does not move the rounding.
+    floats.push(total as f64);
+    floats.sort_unstable_by(|a, b| a.total_cmp(b));
+    Ok(Value::Float(floats.into_iter().sum()))
 }
 
 /// `f64` mean of the present numeric values; `None` (Absent) over an
@@ -849,6 +885,61 @@ mod tests {
 
     fn dept(name: &str) -> Value {
         Value::String(name.to_string())
+    }
+
+    /// One number held as two types is one distinct value, and one
+    /// group, whatever order its rows arrive in; the group's key reads
+    /// as the narrowest type, the natural.
+    #[dialog_common::test]
+    async fn it_counts_and_groups_one_number_of_two_types_as_one() {
+        for (first, second) in [
+            (Value::UnsignedInt(3), Value::Float(3.0)),
+            (Value::Float(3.0), Value::UnsignedInt(3)),
+        ] {
+            let distinct = Reduce::new(
+                vec!["dept".to_string()],
+                vec![ReduceEntry::new(
+                    "n",
+                    Aggregator::CountDistinct,
+                    Term::var("x"),
+                )],
+            );
+            let rows = distinct
+                .fold(selection(vec![
+                    row(&[("dept", Some(dept("eng"))), ("x", Some(first.clone()))]),
+                    row(&[("dept", Some(dept("eng"))), ("x", Some(second.clone()))]),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(
+                present(&rows[0], "n"),
+                Value::UnsignedInt(1),
+                "{first:?} first"
+            );
+
+            let grouped = Reduce::new(
+                vec!["g".to_string()],
+                vec![ReduceEntry::new("n", Aggregator::Count, Term::var("x"))],
+            );
+            let rows = grouped
+                .fold(selection(vec![
+                    row(&[("g", Some(first.clone())), ("x", Some(dept("a")))]),
+                    row(&[("g", Some(second.clone())), ("x", Some(dept("b")))]),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{first:?} first: one group");
+            assert_eq!(
+                present(&rows[0], "g"),
+                Value::UnsignedInt(3),
+                "{first:?} first"
+            );
+            assert_eq!(
+                present(&rows[0], "n"),
+                Value::UnsignedInt(2),
+                "{first:?} first"
+            );
+        }
     }
 
     #[dialog_common::test]
@@ -1063,23 +1154,65 @@ mod tests {
         );
     }
 
-    /// Integer and float inputs in one group do not promote — same
-    /// strictness as formula arithmetic and the range predicates.
+    /// Integer and float inputs in one group sum as floats, as formula
+    /// arithmetic computes a whole number and a float.
     #[dialog_common::test]
-    async fn it_errors_on_mixed_integer_and_float_sum() {
+    async fn it_sums_mixed_integer_and_float_inputs_as_a_float() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt(1)))]),
+                row(&[("x", Some(Value::Float(1.5)))]),
+                row(&[("x", Some(Value::SignedInt(-3)))]),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(-0.5));
+    }
+
+    /// The whole numbers of a mixed group sum exactly before their total
+    /// meets the floats: `2^53 + 1` and `-(2^53)` are `1`, and `1` plus
+    /// `0.5` is `1.5`. Read as floats one by one, `2^53 + 1` is `2^53`
+    /// and the sum is `0.5`.
+    #[dialog_common::test]
+    async fn it_sums_the_whole_numbers_of_a_mixed_group_exactly() {
+        let reduce = Reduce::new(
+            vec![],
+            vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
+        );
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt((1 << 53) + 1)))]),
+                row(&[("x", Some(Value::SignedInt(-(1 << 53))))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(1.5));
+    }
+
+    /// A mixed group whose whole numbers overflow the exact total fails
+    /// as a group of whole numbers alone does, rather than summing them
+    /// as floats.
+    #[dialog_common::test]
+    async fn it_errors_on_a_mixed_group_whose_whole_numbers_overflow() {
         let reduce = Reduce::new(
             vec![],
             vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
         );
         let result = reduce
             .fold(selection(vec![
+                row(&[("x", Some(Value::UnsignedInt(i128::MAX as u128)))]),
                 row(&[("x", Some(Value::UnsignedInt(1)))]),
-                row(&[("x", Some(Value::Float(1.5)))]),
+                row(&[("x", Some(Value::Float(0.5)))]),
             ]))
             .await;
         assert!(
             matches!(result, Err(EvaluationError::Reduce { .. })),
-            "mixed int/float must error, got {result:?}"
+            "the whole numbers overflow the exact total, got {result:?}"
         );
     }
 

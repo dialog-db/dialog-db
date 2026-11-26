@@ -211,9 +211,19 @@ impl InductiveRule {
     /// human-readable reason: the body did not decode, or its descriptor
     /// did not compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let descriptor: InductiveRuleDescriptor = body::decode(bytes)?;
-        let rule = descriptor.compile().map_err(|e| e.to_string())?;
-        body::check_pattern(bytes, pattern::held(rule.analysis.premises()))?;
+        Self::read(bytes).map_err(|error| error.to_string())
+    }
+
+    /// [`decode`](Self::decode), saying which way it failed: the bytes
+    /// decode to no descriptor, or the descriptor does not compile.
+    pub fn read(bytes: &[u8]) -> Result<Self, body::BodyError> {
+        let descriptor: InductiveRuleDescriptor =
+            body::decode(bytes).map_err(body::BodyError::Undecodable)?;
+        let rule = descriptor
+            .compile()
+            .map_err(|error| body::BodyError::IllTyped(error.to_string()))?;
+        body::check_pattern(bytes, pattern::held(rule.analysis.premises()))
+            .map_err(body::BodyError::Undecodable)?;
         Ok(rule)
     }
 

@@ -97,9 +97,8 @@ use crate::placement::{
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
-use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
-};
+use crate::rules::error::Hydrated;
+use crate::rules::{TriggerFootprint, on_attr, reads_attr, source_attr, transient_attr};
 use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
@@ -790,17 +789,13 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if let Some(body) = cache.body(entity, &bytes) {
-            return Ok(Some(body));
-        }
-        Ok(hydrate(&bytes)
-            .ok()
-            // Content-address check: forged bytes stored under a
-            // mismatching entity are inert.
-            .filter(|body| body.stored_as(entity))
-            .inspect(|body| {
-                cache.record_body(entity.clone(), &bytes, body.clone());
-            }))
+        // Judged once and remembered either way: forged bytes stored
+        // under a mismatching entity, and bytes that are no rule here,
+        // are inert.
+        Ok(match cache.judged(entity, &bytes) {
+            Ok(Hydrated::Deductive(body)) => Some(body),
+            _ => None,
+        })
     }
 
     /// Hydrate the inductive rule stored at `entity`:
@@ -840,22 +835,16 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if let Some(rule) = cache.inductive(entity, &bytes) {
-            return Ok(Some(rule));
-        }
         // Undecodable bytes, or bytes whose content address is not the
         // entity they were stored under, are forged or corrupt entries
         // in the carved-out namespace — inert, like any dangling index
         // entry. This check is what makes the `dialog.rule/*`
-        // reserved-namespace carve-out safe.
-        let Ok(rule) = hydrate_inductive(&bytes) else {
-            return Ok(None);
-        };
-        if !rule.stored_as(entity) {
-            return Ok(None);
-        }
-        cache.record_inductive(entity.clone(), &bytes, rule.clone());
-        Ok(Some(rule))
+        // reserved-namespace carve-out safe. Judged once and remembered
+        // either way.
+        Ok(match cache.judged(entity, &bytes) {
+            Ok(Hydrated::Inductive(rule)) => Some(rule),
+            _ => None,
+        })
     }
 
     /// Whether the concept at `entity` carries the

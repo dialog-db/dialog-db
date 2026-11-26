@@ -62,6 +62,149 @@ Why: a replica cannot refuse what a writer it does not control has
 stored, and must not fail, or answer a value no claim holds, because of
 it.
 
+### A whole number and a float compute as floats
+
+[#892](https://github.com/dialog-db/dialog-db/pull/892)
+
+A formula over a whole number and a float (`math/sum`, `math/difference`,
+`math/product`, `math/quotient`, `math/modulo`) gave no row, with no
+error, and a fold's `sum` over whole numbers and floats in one group
+failed. A read of the number band yields each number as its narrowest
+type, so a rule that compiled met this on the data alone: `3 + 2.5` over
+an untyped or a `number:` read derived nothing. Such a pair now computes
+as floats, each whole number read as the float nearest it, and a `sum`
+over a group mixing them sums as floats. Two whole numbers compute as
+before, a natural and an integer as the integer they make.
+
+What this changes for you:
+
+- `3 + 2.5` is `5.5`, `-5 + 2.5` is `-2.5`, `3 * 2.5` is `7.5`, where
+  each was no row. A field that reads the result through a narrower type
+  reads it as a stored float is read: `natural:` floors `5.5` to `5`.
+- A whole number past `2^53` mixed with a float loses what a float
+  cannot hold: `2^53 + 1` plus `0.5` is `2^53` as a float.
+- `sum` over a group holding whole numbers and floats is the float sum.
+  It failed with "mixed integer and float inputs". The whole numbers sum
+  exactly first and their total meets the floats once: `2^53 + 1`,
+  `-(2^53)` and `0.5` sum to `1.5`. Whole numbers whose total overflows
+  fail the group, as they do without a float.
+- A rule whose two operands are declared of two number types
+  (`natural:` and `float:`) is still refused when it compiles.
+
+Why: a rule that passes analysis must not drop a row because of the type
+a number happened to be read as; computing at the wider precision and
+letting a narrower reader truncate the result is what a stored float
+already gets.
+
+### A query reports the rules it left out, as it runs
+
+[#889](https://github.com/dialog-db/dialog-db/pull/889)
+
+A rule a branch holds that did not compile here works as if it were not
+there (see the entry below on `dialog.rule/error`), and a query whose
+derivation reaches one answered without it and said nothing. A query
+now comes with a report of what it left out. The report is filled as
+the query runs and readable at any point: the rules of a concept are
+assembled before the first row that concept gives, so a report read
+when a row arrives already lists the rules left out of what produced
+it. A report read before the rows are first polled is empty, since
+the query has not run yet. Nothing has to be drained to read it, and
+dropping the query early loses nothing reported. Only rules the
+query's derivation reaches are reported.
+
+What this changes for you:
+
+- `SelectQuery::perform` (a branch's `query().select(..)`) and
+  `TransactionSelectQuery::perform` (a transaction's `query()`) return
+  `dialog_repository::Answered<S>`, a stream of the same rows as
+  before, so code that reads rows is unchanged. Code that named the
+  returned type as `impl Output<..>` still compiles; code that relied
+  on it being exactly the inner stream type does not.
+- New: `Answered::report()`, a `Report` handle; `Report::entries()`,
+  what was reported so far; `Report::stream()`, each entry as it is
+  reported, ending when the query's stream ends or is dropped; and
+  `Answered::try_report()`, which drains the rows and returns them with
+  the report.
+- New: `dialog_repository::Entry`, `#[non_exhaustive]`, with
+  `RuleSkipped { rule, concludes, reason: RuleError }`. `concludes` is
+  the `on:` entity of the relation the rule would have concluded.
+- A rule left out for closing a cycle is reported too, as
+  `RuleError::Cycle`.
+
+Why: a query that answers without a rule it would have used should say
+so, and say it while it runs, not only after every row is read.
+### One number held as two types groups, counts and joins as one
+
+[#888](https://github.com/dialog-db/dialog-db/pull/888)
+
+A fold grouped its rows by the encoding of their key values, counted
+distinct values by their encoding, and a rule's memo of rows looked a
+bound entity up by its encoding, and each encoding tells the types of a
+number apart: `3` and `3.0` made two groups, counted as two distinct
+values, and missed each other in the memo. A variable joined across two
+premises held whichever representation bound it first, so a join
+answered `3` or `3.0` depending on the order the plan ran its premises
+in. Keys, distinct counts and the memo now go by a value's identity, as
+the band keys numbers, and the narrowest type stands for the number, as
+a read of the band yields it: a group of `3` and `3.0` is one group
+keyed `3`, `count-distinct` of them is 1, and a variable bound to both
+holds `3`, whichever came first.
+
+What this changes for you:
+
+- A fold over rows whose group field holds one number as two types gives
+  one row for that number, its key the narrowest type. It gave one row
+  per type.
+- `count-distinct` counts one number held as two types once, folded or
+  run as a subscription steps it.
+- A variable a join binds to one number in two types holds the narrowest
+  of them. It held the first.
+- A fold's rows come out in the order of the new keys, which differs
+  from the order before for groups keyed by more than one value.
+- `Value::narrower` is new: whether a value is a narrower representation
+  of a number than another.
+
+Why: an answer must not depend on the type a number happened to be read
+as, or on the order a plan ran its premises in.
+
+### A rule a branch does not evaluate is answered under `dialog.rule/error`, with its kind
+
+[#883](https://github.com/dialog-db/dialog-db/pull/883)
+
+A rule that does not compile reaches a branch only from elsewhere (a
+replica on another release, another implementation, a writer of raw
+`dialog.rule/*` facts), and works there as if it were not there. Why
+was answered by two relations: `dialog.rule/invalid` for a body this
+release does not read, and `dialog.rule/quarantined` for a rule the
+program analysis sets aside for closing a cycle. Both now come from one
+judgment, `RuleError`, and one more relation answers every such rule:
+`dialog.rule/error`, valued with a diagnostic that begins with its kind.
+A body that decodes and does not type-check is now told apart from
+bytes that are no body.
+
+What this changes for you:
+
+- New: `dialog.rule/error`, answered for every rule a branch holds and
+  does not evaluate, never stored. Its value is `<kind>: <message>`,
+  the kind one of `older`, `newer`, `forged`, `undecodable`,
+  `ill-typed` or `cycle`.
+- New: `dialog_repository::RuleError`, with `code()` and
+  `depends_on_other_rules()` (true for a cycle only, which lifts once a
+  rule of it is retracted).
+- New: `DeductiveRule::read` and `InductiveRule::read`, which return
+  `dialog_query::rule::body::BodyError` (`Undecodable` or `IllTyped`).
+  `decode` is unchanged and returns the same strings.
+- `dialog.rule/invalid` and `dialog.rule/quarantined` answer as before,
+  with one difference: an inductive body stored under an entity it does
+  not hash to is now listed under `dialog.rule/invalid` as forged.
+  Induction already left it out; the relation did not say so.
+- A body that is no rule is judged once per process and remembered, as
+  a body that is one always was. Before, every query that met it
+  decoded it again.
+
+Why: a rule that did not compile is one kind of thing whatever the
+reason, and an embedder should find it, and why, in one place.
+
 ### A cardinality-one write succeeds only the claims of its own type
 
 [#882](https://github.com/dialog-db/dialog-db/pull/882)
@@ -1629,6 +1772,25 @@ and names the rule.
   evicts it, and the write's record, which an older release reads as it
   reads any record, evicts it on every replica that pulls it. An older
   release still fails to read the cell until it has the write.
+- A whole number and a float compute as floats: nothing stored or
+  synced changes, no identity moves and nothing is rewritten. A stored
+  rule keeps its identity and now derives the rows its formula dropped;
+  an older release still drops them, so a mixed fleet differs in what
+  such a rule derives until every replica upgrades.
+
+- A query's report: nothing stored or synced changes. An embedder runs
+  nothing.
+- One number held as two types groups, counts and joins as one: nothing
+  stored or synced changes, no identity moves and nothing is rewritten.
+  A fold's groups, a distinct count and a join's binding are computed
+  as a query runs; an older release still splits them, so a mixed fleet
+  differs in what such a query answers until every replica upgrades.
+
+- `dialog.rule/error`: nothing is stored under it and nothing stored
+  changes; it is answered from the rule bodies a branch holds, as
+  `dialog.rule/invalid` and `dialog.rule/quarantined` are. An older
+  release answers nothing under it. An embedder runs nothing.
+
 - A cardinality-one write succeeds only its own type's claims: nothing
   stored changes shape, no identity moves and nothing is rewritten on
   upgrade. Every replica already holds at most one live claim per cell,
