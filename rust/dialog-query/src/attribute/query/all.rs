@@ -422,10 +422,11 @@ impl AttributeQueryAll {
         // The standing reads the payload's versions: taken here, once, as
         // the checked row keeps only the key and the cause.
         let standing = row.standing();
-        Ok(match row.checked_or_passed_over()? {
-            Some(row) => Placed::InPlace(row, standing, viewed),
-            None => Placed::Corrupt,
-        })
+        match row.checked_or_passed_over() {
+            Ok(row) => Ok(Placed::InPlace(row, standing, viewed)),
+            Err(DialogCorpusError::CorruptEntry(_)) => Ok(Placed::Corrupt),
+            Err(error) => Err(error),
+        }
     }
 
     /// [`Self::merge`] for a row bound in place: its slots and its claim
