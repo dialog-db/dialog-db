@@ -221,7 +221,7 @@ pub(crate) fn refuse_derived_invalid_rules(
     cache: &RuleCache,
 ) -> Result<(), CommitError> {
     let source = source();
-    let primary = derived.iter().map(|(of, the, change)| (of, the, change));
+    let primary = derived.iter();
     let layered = derived
         .iter_in()
         .map(|(_, of, the, change)| (of, the, change));
