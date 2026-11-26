@@ -1,6 +1,6 @@
 //! What a read through a transaction answers of the writes staged in
 //! it, against what committing them makes true: the ground the crate's
-//! driver stands on when a write's `when` reads what earlier forms of
+//! driver stands on when a write's premises reads what earlier forms of
 //! its document wrote.
 
 #![allow(deprecated)]
@@ -43,7 +43,7 @@ fn staged(branch: &Branch, steps: Vec<Step>) -> Transaction<&Branch> {
     transaction
 }
 
-/// What `read`, a `when`, answers: through a transaction that stages
+/// What `read`, a write's premise, answers: through a transaction that stages
 /// `document` over `stored`, and on the branch once that transaction is
 /// committed.
 async fn compare(stored: &str, document: &str, read: &str) -> Result<(Vec<String>, Vec<String>)> {
@@ -59,7 +59,7 @@ async fn compare(stored: &str, document: &str, read: &str) -> Result<(Vec<String
         .await?;
     branch.refresh(&operator).await?;
 
-    let probe = format!("(assert (xyz.seen x:9 v: ?v) (when {read}))");
+    let probe = format!("(assert (xyz.seen x:9 v: ?v) {read})");
     let probed = steps(&mut analyzer, &probe);
     let [Step::Write(write)] = probed.as_slice() else {
         panic!("{probe} is no write");

@@ -1957,8 +1957,8 @@ mod tests {
                 3,
             ),
             (
-                "(assert (xyz.n x:1 v: (+ ?v : 1)) (when (xyz.n x:1 v: ?v)))
-                 (assert (xyz.n x:1 v: (+ ?v : 1)) (when (xyz.n x:1 v: ?v)))",
+                "(assert (xyz.n x:1 v: (+ ?v : 1)) (xyz.n x:1 v: ?v))
+                 (assert (xyz.n x:1 v: (+ ?v : 1)) (xyz.n x:1 v: ?v))",
                 2,
             ),
             (

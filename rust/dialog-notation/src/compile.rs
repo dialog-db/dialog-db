@@ -48,7 +48,7 @@ use crate::syntax::{self, Parameters, Syntax};
 /// itself keeps that only by doing what `apply` does: staging them in
 /// order, reading each [`Write`] through the transaction the steps
 /// before it are staged in, and answering queries and selects after the
-/// commit. Read from the branch instead, a write's `when` does not see
+/// commit. Read from the branch instead, a write's premises does not see
 /// what its document wrote before it.
 #[derive(Debug, Clone)]
 pub enum Step {
@@ -67,7 +67,7 @@ pub enum Step {
     Transient(Entity),
     /// A query to run.
     Query(Box<Query>),
-    /// A write to make once, of every match of its `when`: a write at
+    /// A write to make once, of every match of its premises: a write at
     /// the top level, never installed.
     Write(Box<Write>),
     /// A view: the plan a back end maintains it by, every layer's query
@@ -78,7 +78,7 @@ pub enum Step {
     Select(Box<crate::select::Selection>),
 }
 
-/// A write at the top level with a `when`: what its `when` matches, and
+/// A write at the top level with premises: what its premises match, and
 /// the write each match makes. `apply` reads the
 /// matches through the transaction the document's earlier steps are
 /// staged in, with [`Query::rule`] laid over that read alone, and stages
@@ -88,7 +88,7 @@ pub enum Step {
 /// and [`answer`](crate::answer), and should prefer them over this.
 #[derive(Debug, Clone)]
 pub struct Write {
-    /// What the `when` matches, as a query whose row is every variable
+    /// What the premises match, as a query whose row is every variable
     /// the write holds.
     pub query: Query,
     /// Whether the write retracts.
@@ -114,7 +114,7 @@ impl Write {
         fn bound(term: &Term, values: &BTreeMap<String, Term>) -> Result<Term, Error> {
             Ok(match term {
                 Term::Variable(name) => values.get(name).cloned().ok_or_else(|| {
-                    Error::Refused(format!("a match of the `when` binds no ?{name}"))
+                    Error::Refused(format!("a match of the premises binds no ?{name}"))
                 })?,
                 Term::Formula(formula) => Term::Formula(Box::new(Formula {
                     name: formula.name.clone(),
@@ -172,7 +172,7 @@ fn variables(term: &Term, into: &mut Vec<String>) {
 }
 
 /// `term` with each formula that computes a value lifted out of it into
-/// a premise of `when`, `(+ ?v : 1 is: [once-0])`, and the variable it
+/// a premise of a write, `(+ ?v : 1 is: [once-0])`, and the variable it
 /// binds left in its place. A type, `(:integer …)`, and `(:id …)` stay:
 /// a write fills them from what its variables were bound to.
 fn computed(term: &Term, when: &mut Vec<Premise>, lifted: &mut usize) -> Term {
@@ -199,7 +199,7 @@ fn computed(term: &Term, when: &mut Vec<Premise>, lifted: &mut usize) -> Term {
     Term::Variable(name)
 }
 
-/// A write at the top level with a `when`. It runs once: what the `when`
+/// A write at the top level with premises. It runs once: what the premises
 /// matches is a query, and each match makes the write.
 fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
     let (read, retract) = match &rule.head {
@@ -207,17 +207,17 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
         Head::Retract(read) => (read, true),
         Head::Hold(_) => {
             return Err(Error::Unsupported(format!(
-                "{form} issues a command with a `when`: whether a command at the top level keeps \
-                 `when` is not decided"
+                "{form} issues a command with premises: whether a command at the top level takes \
+                 premises is not decided"
             )));
         }
         _ => {
             return Err(Error::Refused(format!(
-                "{form} is not a write, and only a write takes a `when`"
+                "{form} is not a write, and only a write takes premises at the top level"
             )));
         }
     };
-    // A formula the head computes is computed by the `when`, as a rule
+    // A formula the head computes is computed by the premises, as a rule
     // computes one among its premises: it is lifted out of the head into
     // a premise whose `is:` is a variable of its own, which the head
     // writes. The query binds it, so each match writes its value.
@@ -240,7 +240,7 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
     }
     if let Some(name) = held.iter().find(|name| !bound.contains(*name)) {
         return Err(Error::Refused(format!(
-            "every variable in a write with a `when` is bound by it, and ?{name} is not"
+            "every variable in a write with premises is bound by it, and ?{name} is not"
         )));
     }
     whole(read, &bound)?;
@@ -1891,7 +1891,7 @@ impl Scope {
 ///   it "retracts every field of the concept on that entity": a rule for
 ///   each field reads that field on the entity and retracts what it
 ///   read, so a field the entity holds nothing of leaves the others to
-///   go. At the top level each read is a `when`, run once.
+///   go. At the top level each read is a premise, run once.
 /// - Of one entry of a collection with the entity, the key and the value
 ///   written, it retracts that entry, as a retract of one attribute's
 ///   value retracts just that value (the managing agent's reading).

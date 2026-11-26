@@ -384,12 +384,12 @@ async fn it_keeps_a_text_that_spans_lines() -> Result<()> {
     Ok(())
 }
 
-/// A write at the top level with a `when` runs once, over what the
-/// `when` matches as the branch stood, and is never installed: a to-do
+/// A write at the top level with premises runs once, over what the
+/// premises match as the branch stood, and is never installed: a to-do
 /// added after it is not touched. Under `:one` the write succeeds the
 /// claim the cell holds, as any `last` write on main does.
 #[dialog_common::test]
-async fn it_writes_once_what_a_when_matches() -> Result<()> {
+async fn it_writes_once_what_its_premises_match() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
@@ -403,7 +403,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
     notebook
         .submit(
             r#"(assert (xyz.todo/state of: ?t is: :done as: :entity cardinality: :one)
-                 (when (todo ?t text: "Call mom" ...)))"#,
+                 (todo ?t text: "Call mom" ...))"#,
         )
         .await?;
     assert_eq!(
@@ -417,7 +417,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
     let claims = report(&mut notebook, "(select (xyz.todo todo:1 state: ?s))").await?;
     assert_eq!(claims, vec!["(xyz.todo todo:1 state: :done)"]);
 
-    // Never installed: a to-do the `when` would match, added later, is
+    // Never installed: a to-do the premises would match, added later, is
     // left as it is.
     notebook
         .submit(r#"(assert (todo todo:3 text: "Call mom" state: :open))"#)
@@ -427,11 +427,11 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         vec!["(xyz.todo todo:3 state: :open)"]
     );
 
-    // A retract with a `when`, of what it matched.
+    // A retract with premises, of what it matched.
     notebook
         .submit(
             r#"(retract (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
-                 (when (todo ?t text: ?x state: :done)))"#,
+                 (todo ?t text: ?x state: :done))"#,
         )
         .await?;
     assert_eq!(
@@ -446,7 +446,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         result.map_err(|error| error.downcast::<Error>())
     };
     let unbound = notebook
-        .submit(r#"(assert (xyz.todo/tag ?t ?g) (when (todo ?t text: "Buy milk" ...)))"#)
+        .submit(r#"(assert (xyz.todo/tag ?t ?g) (todo ?t text: "Buy milk" ...))"#)
         .await;
     assert!(
         matches!(why(unbound), Err(Ok(Error::Refused(said))) if said.contains("is bound by it, and ?g is not"))
@@ -455,11 +455,11 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         .submit(
             r#"(concept (todo/ping todo: ?t)
                  (xyz.todo.ping/todo of: ?c is: ?t as: :entity in: :control cardinality: :many))
-               (assert (todo/ping todo: ?t) (when (todo ?t text: "Buy milk" ...)))"#,
+               (assert (todo/ping todo: ?t) (todo ?t text: "Buy milk" ...))"#,
         )
         .await;
     assert!(
-        matches!(why(command), Err(Ok(Error::Unsupported(said))) if said.contains("whether a command at the top level keeps"))
+        matches!(why(command), Err(Ok(Error::Unsupported(said))) if said.contains("whether a command at the top level takes premises"))
     );
     Ok(())
 }
@@ -4336,7 +4336,7 @@ async fn it_reads_a_derived_attribute_through_a_type_as_a_stored_one() -> Result
 
 /// A case a listed type does not list is refused wherever it is written
 /// as a constant, naming the listing: an assert at the top level, a
-/// write with a `when`, and a rule's head, one that writes and one that
+/// write with premises, and a rule's head, one that writes and one that
 /// issues a command; nothing is written. A listed case is written as
 /// before, and a retract of an unlisted case is not refused, so a claim
 /// written before can be taken back. Through a variable the case is not
@@ -4359,7 +4359,7 @@ async fn it_refuses_a_case_the_listing_does_not_list() -> Result<()> {
     let lvl = "(select (xyz.k x:1 lvl: ?v) (xyz.k x:1 lvl: ?v))";
     for text in [
         "(assert (k x:1 lvl: :huge))",
-        "(assert (k ?t lvl: :huge) (when (k ?t lvl: :low)))",
+        "(assert (k ?t lvl: :huge) (k ?t lvl: :low))",
         "(rule (assert (k ?t lvl: :huge)) (k/bump subject: ?t))",
         "(assert (k/set subject: x:1 to: :huge))",
         "(rule (assert (k/set subject: ?t to: :huge)) (k/bump subject: ?t))",
@@ -4403,22 +4403,22 @@ async fn it_refuses_a_case_the_listing_does_not_list() -> Result<()> {
     Ok(())
 }
 
-/// A formula in the head of a write with a `when` is computed from what
-/// the `when` matched, as the same head in a rule is: each match writes
+/// A formula in the head of a write with premises is computed from what
+/// the premises matched, as the same head in a rule is: each match writes
 /// its value, also a formula inside another and in two fields at once.
 #[dialog_common::test]
-async fn it_computes_a_formula_in_the_head_of_a_write_with_a_when() -> Result<()> {
+async fn it_computes_a_formula_in_the_head_of_a_write_with_premises() -> Result<()> {
     let concept = r#"(concept (n ?t v: ?v w: ?w)
           (xyz.n/v of: ?t is: ?v as: :integer cardinality: :one)
           (xyz.n/w of: ?t is: ?w as: :integer cardinality: :one))"#;
     let read = "(select (n ?t v: ?v w: ?w))";
     for (write, after) in [
         (
-            "(assert (n ?t v: (+ ?v : 1) w: ?w) (when (n ?t v: ?v w: ?w)))",
+            "(assert (n ?t v: (+ ?v : 1) w: ?w) (n ?t v: ?v w: ?w))",
             ["(xyz.n x:1 v: 2 w: 10)", "(xyz.n x:2 v: 6 w: 20)"],
         ),
         (
-            "(assert (n ?t v: (* (+ ?v : 1) : 3) w: (- ?w : ?v)) (when (n ?t v: ?v w: ?w)))",
+            "(assert (n ?t v: (* (+ ?v : 1) : 3) w: (- ?w : ?v)) (n ?t v: ?v w: ?w))",
             ["(xyz.n x:1 v: 6 w: 9)", "(xyz.n x:2 v: 18 w: 15)"],
         ),
     ] {

@@ -10,7 +10,7 @@
 //!
 //! A document is a text of forms, read top to bottom. A `concept`
 //! declares a record and the attributes it is stored as; `assert` and
-//! `retract` write, alone or with a `when` that says what they write of;
+//! `retract` write, alone or with premises that say what they write of;
 //! a `rule` installs what Dialog-DB keeps deriving or writing; a `query`
 //! names an answer; a `select` asks one; a view is a select whose answer
 //! is markup.
@@ -54,7 +54,7 @@
 //!        (assert (todo todo:1 title: "Buy milk" done: false))
 //!        (assert (todo todo:2 title: "Call mom" done: false))
 //!        (assert (xyz.todo/done of: ?t is: true cardinality: :one)
-//!          (when (todo ?t title: "Call mom" ...)))
+//!          (todo ?t title: "Call mom" ...))
 //!        (select (todo ?t title: ?x done: false))"#,
 //! );
 //! assert!(checked.refusals().next().is_none(), "{:?}", checked.diagnostics());
@@ -73,11 +73,11 @@
 //! - [`stage`](stage()) stages a document into a transaction the caller
 //!   holds, on a branch or through a stack, and never commits. Its forms
 //!   are a sequence for what they read as for what they write: a write's
-//!   `when` reads, through the transaction, what the forms before it
+//!   a write's premises read, through the transaction, what the forms before it
 //!   wrote, and a form written twice writes twice. It reports what each
 //!   form did ([`DocumentReport`]).
 //! - A command a form issues, and what the rules it fires write, land at
-//!   commit: a later `when` does not see what a rule makes of it.
+//!   commit: a later write's premises does not see what a rule makes of it.
 //! - [`answer`](answer()) answers the queries, selects and views from
 //!   the branch after the commit, form by form: a form that fails says so
 //!   in its own entry and hides no other ([`Answers`]).

@@ -331,7 +331,7 @@ fn hashed(concept: &str, name: &str) -> Result<String, Error> {
 /// | `x[3]`, a variable at a site | a variable and the site's number | the suffix is `[`, digits, `]`; the last `[` of the name is the suffix's, as digits hold none, so the name splits into one variable and one number |
 /// | `[q1]x`, a variable of a view's layer | the layer's number and a variable | the prefix ends at the first `]`, as digits hold none |
 /// | `[collect-0]`, `[collect-0-key]`, `[collect-0-value]` | a number | no label or name of a document is in them |
-/// | `[once-0]`, a value a write with a `when` computes | a number | no label or name of a document is in it |
+/// | `[once-0]`, a value a write with premises computes | a number | no label or name of a document is in it |
 /// | `[source]label`, `[source-key]` | a label, or nothing | a field's has `]` after `[source` and the key's has `-`, and `[source]` before a label is a fixed prefix |
 /// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
 /// | `dialog.n.report.q12` | a site's number | digits only |

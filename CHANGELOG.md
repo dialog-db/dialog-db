@@ -14,6 +14,27 @@ says how to cut a release.
 
 ## Unreleased
 
+### A write at the top level reads its premises as a rule does: `when` is gone
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A write at the
+top level with premises writes them after its head, as a rule does:
+`(assert (xyz.todo/state of: ?t is: :done) (todo ?t text: "Call mom" ...))`.
+It runs once, in its document, over what its premises read then, and is
+never installed. `(rule (assert …) premise…)` is the write that stays.
+
+What this changes for you:
+
+- `(assert head (when premise…))` and `(retract head (when premise…))` are
+  refused with `Error::Refused`, naming the same write with its premises
+  after its head. Move the premises out of `(when …)`.
+- Premises after a top-level write, which were refused, now run it once.
+- A command at the top level with premises is still unsupported; its
+  message now says whether it takes premises is not decided.
+
+Why: the maintainer, 2026-11-26: "I think we either keep `when` or drop it
+not flip flop around". `when` was dropped from rules on 2026-11-13 by his
+decision; 2026-11-18 put it back for a top-level write on the agent's.
+
 ### A document writes no wrapper: a line says a value's type, cardinality and layer
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). A value wrapped as the

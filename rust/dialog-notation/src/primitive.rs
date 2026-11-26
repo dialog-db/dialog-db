@@ -216,7 +216,7 @@ pub struct Rule {
     /// What the rule says it is for.
     pub description: Option<String>,
     /// Whether it runs once, in its document, and is never installed:
-    /// a write at the top level with a `when`.
+    /// a write at the top level with premises.
     pub once: bool,
     /// Its head.
     pub head: Head,

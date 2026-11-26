@@ -17,7 +17,7 @@ async fn report(notebook: &mut Notebook, text: &str) -> Result<Vec<String>> {
     Ok(notebook.submit(text).await?.0)
 }
 
-/// A line is a write's head, at the top level, under a `when` and in a
+/// A line is a write's head, at the top level, among a write's premises and in a
 /// rule's head, and its cardinality decides whether the write succeeds
 /// the newest claim.
 #[dialog_common::test]
@@ -34,7 +34,7 @@ async fn it_writes_a_domain_through_a_line_in_every_write() -> Result<()> {
     notebook
         .submit(
             "(assert (xyz.n/v of: ?x is: 5 as: :integer cardinality: :one)
-               (when (xyz.n/v of: ?x is: 4 as: :integer cardinality: :one)))",
+               (xyz.n/v of: ?x is: 4 as: :integer cardinality: :one))",
         )
         .await?;
     assert_eq!(report(&mut notebook, read).await?, vec!["(xyz.n x:1 v: 5)"]);
@@ -177,7 +177,7 @@ async fn it_elects_a_derived_attributes_value_as_a_line_does() -> Result<()> {
 
 /// A document writes no wrapper: a value wrapped in a type, a pick, a
 /// cardinality or a layer is primitive, which the walker writes for a
-/// line. Wherever a document writes one, in a write, a `when`, a rule's
+/// line. Wherever a document writes one, in a write, a write's premises, a rule's
 /// head or premise, a select's head or premise, `unless` or a concept's
 /// body, it is refused as `Error::Refused`, naming the line to write in
 /// its place, and the document writes nothing.
@@ -191,7 +191,7 @@ fn it_refuses_a_wrapper_a_document_writes_naming_the_line() -> Result<()> {
             "(xyz.n/v of: x:1 is: 3 as: :integer cardinality: :one)",
         ),
         (
-            "(assert (xyz.n ?x v: 5) (when (xyz.n ?x v: (:one (:integer 4)))))",
+            "(assert (xyz.n ?x v: 5) (xyz.n ?x v: (:one (:integer 4))))",
             "(xyz.n/v of: ?x is: 4 as: :integer cardinality: :one)",
         ),
         (

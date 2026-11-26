@@ -99,7 +99,7 @@ struct Choice {
 const POSITION: &str = "dialog/position";
 
 /// What a primitive rule says of itself when it is a write at the top level
-/// with a `when`: it runs once and is not installed.
+/// with premises: it runs once and is not installed.
 pub const ONCE: &str = "once";
 
 /// The words that make a rule's head a write or an answer.
@@ -3209,27 +3209,34 @@ impl Expander {
                     };
                     let mut parts = vec![apply(word, vec![first.clone()])];
                     let mut terms = operand.terms.clone();
-                    // A write at the top level is ground, or takes a
-                    // `when` that binds its variables. It runs once, in
-                    // its document, and is never installed.
+                    // A write at the top level reads as a rule does, its
+                    // premises after its head. It runs once, in its
+                    // document, and is never installed.
                     match (word, rest) {
                         (_, []) => {}
-                        ("assert" | "retract", [when])
-                            if when.applies() == Some("when") && !items(when).is_empty() =>
-                        {
-                            parts.extend(items(when).iter().cloned());
-                            terms.insert(ONCE.into(), Syntax::Constant(Value::Boolean(true)));
-                        }
-                        ("assert" | "retract", _) => {
+                        ("assert" | "retract", [when]) if when.applies() == Some("when") => {
                             let tree = tree.clone();
+                            let written = Syntax::Application(
+                                Box::new(Syntax::Reference(word.into())),
+                                Parameters {
+                                    items: std::iter::once(first.clone())
+                                        .chain(items(when).iter().cloned())
+                                        .collect(),
+                                    terms: operand.terms.clone(),
+                                },
+                            );
                             return self.about(&tree, |_| {
                                 Err(Error::Refused(format!(
-                                    "{tree} has premises: a write at the top level is ground, or \
-                                     takes what it reads in a `(when …)`, `(assert (xyz.todo/state \
-                                     of: ?t is: :done) (when (todo ?t text: \"Call mom\" ...)))`. A \
-                                     write that stays is a `rule`"
+                                    "{tree}: `when` is no longer written. A write's premises follow \
+                                     its head, as a rule's do: {written}, as in `(assert \
+                                     (xyz.todo/state of: ?t is: :done) (xyz.todo/text ?t \"Call \
+                                     mom\"))`. It runs once; a write that stays is a `rule`"
                                 )))
                             });
+                        }
+                        ("assert" | "retract", premises) => {
+                            parts.extend(premises.iter().cloned());
+                            terms.insert(ONCE.into(), Syntax::Constant(Value::Boolean(true)));
                         }
                         _ => parts.extend(rest.iter().cloned()),
                     }
@@ -3343,7 +3350,7 @@ impl Expander {
 }
 
 /// Whether `rule`, a primitive tree, writes where it stands: a write at the
-/// top level, with no premise, or with a `when` and run once.
+/// top level, with no premise, or with premises and run once.
 fn writes(rule: &Syntax) -> bool {
     let Some(operand) = rule.operand() else {
         return false;
@@ -3614,40 +3621,6 @@ mod tests {
                 matches!(expanded("", text), Err(Error::Refused(said)) if said.contains(why)),
                 "{text}: {:?}",
                 expanded("", text)
-            );
-        }
-    }
-
-    /// A write at the top level takes what it reads in a `when`, and is a
-    /// rule that says it runs once. Premises after it with no `when` are
-    /// refused, with the two forms to write.
-    #[test]
-    fn it_reads_a_top_level_write_with_when_as_a_rule_that_runs_once() {
-        assert_eq!(
-            expanded(
-                "",
-                r#"(assert (xyz.todo/state of: ?t is: :done) (when (xyz.todo/text ?t "Call mom")))"#
-            )
-            .unwrap(),
-            vec![
-                r#"(rule (assert (xyz.todo ?t state: :done)) (xyz.todo ?t text: "Call mom") once: true)"#
-            ]
-        );
-        assert!(
-            expanded(
-                "",
-                "(retract (xyz.todo/tag ?t ?g) (when (xyz.todo/tag ?t ?g) (unless (xyz.todo/state ?t :open))))"
-            )
-            .unwrap()[0]
-                .contains("(unless (xyz.todo ?t state: :open)) once: true)")
-        );
-        for text in [
-            r#"(assert (xyz.todo/state of: ?t is: :done) (xyz.todo/text ?t "Call mom"))"#,
-            "(assert (xyz.todo/state of: ?t is: :done) (when))",
-        ] {
-            assert!(
-                matches!(expanded("", text), Err(Error::Refused(why)) if why.contains("a write at the top level is ground")),
-                "{text}"
             );
         }
     }
@@ -3938,7 +3911,7 @@ mod tests {
     /// `(unless …)` once, last, or several times among the premises, is
     /// one rule.
     #[test]
-    fn it_reads_unless_beside_when_or_inside_it() {
+    fn it_reads_unless_once_or_several_times_as_one_rule() {
         let beside = expanded(
             TODO,
             "(rule (xyz.lonely ?t text: ?x)
@@ -3982,7 +3955,7 @@ mod tests {
             "(rule (assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))
                (xyz.move ?t to: ?to from: ?from))",
             "(assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to))
-               (when (xyz.move ?t to: ?to from: ?from)))",
+               (xyz.move ?t to: ?to from: ?from))",
         ] {
             let several = expanded("", written);
             assert!(

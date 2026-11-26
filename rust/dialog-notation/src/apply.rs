@@ -4,14 +4,14 @@
 //! runs it on a branch as one transaction, its forms a sequence:
 //!
 //! - Each write is staged in the order written, and each write with a
-//!   `when` reads the branch as the forms before it left it, through
+//!   a write's premises read the branch as the forms before it left it, through
 //!   the transaction it is part of: what they asserted and retracted,
 //!   and what the rules they installed derive. A write under
 //!   `cardinality: :one` reads as the commit will leave its cell.
-//! - Every match of a `when` is read before any of them is written, so
+//! - Every match of a write's premises is read before any of them is written, so
 //!   a write does not see itself.
 //! - A command a form issues, and what the inductive rules it fires
-//!   write, land at commit, after every form has run: a later `when` in
+//!   write, land at commit, after every form has run: a later write's premises in
 //!   the same document reads the command itself, through the relations
 //!   of the layer commands are on, but not what rules make of it. What
 //!   a rule writes lands in the commit the forms' writes do, and under
@@ -19,14 +19,14 @@
 //!   same document wrote too.
 //! - The document commits once. A refusal or an error on the way writes
 //!   nothing. When another writer moves the branch first, the document
-//!   is run again over the head that won, its `when`s read again.
+//!   is run again over the head that won, its premises read again.
 //! - Queries, selects and views are answered after the commit, so each
 //!   reads what the whole document left, form by form: each form's
 //!   answer is its own, and one that fails hides no other.
 //!
 //! It comes in layers. [`stage`] stages a document into a transaction
 //! the caller holds, on a branch or through a stack ([`Stage`]), reads
-//! each write's `when` through it, and reports what each form did
+//! each write's premises through it, and reports what each form did
 //! ([`DocumentReport`]); it never commits. [`answer`] answers the
 //! document's queries, selects and views from a branch once the caller
 //! has committed. [`apply`] is the two on a branch: it opens the
@@ -105,11 +105,11 @@ pub enum ApplyError {
     /// diagnostic says which, and where.
     #[error("{}", .0.message)]
     Refused(Box<Diagnostic>),
-    /// What a match of a write's `when` made is refused: nothing of the
+    /// What a match of a write's premises made is refused: nothing of the
     /// document was applied.
     #[error("{}", crate::syntax::told(&.0.to_string()))]
     Notation(#[from] Error),
-    /// Dialog-DB failed to read a write's `when`: nothing of the
+    /// Dialog-DB failed to read a write's premises: nothing of the
     /// document was applied.
     #[error(transparent)]
     Evaluation(#[from] EvaluationError),
@@ -129,7 +129,7 @@ mod sealed {
 /// branch or through a stack, that reads back what is staged in it.
 /// Implemented for [`Transaction`] and [`StackTransaction`] on a branch,
 /// and for nothing else: a stage that cannot read what is staged in it
-/// could not read a write's `when`.
+/// could not read a write's premises.
 pub trait Stage: sealed::Sealed + Sized {
     /// `statement` asserted.
     fn assert<S: Statement>(self, statement: S) -> Self;
@@ -204,7 +204,7 @@ pub enum Did {
     /// What was installed, and the entity it is stored under: `None`
     /// for a rule Dialog-DB gives no identity, which the commit refuses.
     Installed(Installation, Option<Entity>),
-    /// A write's `when` read. Each match follows as the
+    /// A write's premises read. Each match follows as the
     /// [`Asserted`](Did::Asserted) or [`Retracted`](Did::Retracted) it
     /// made, so nothing follows when nothing matched.
     Read,
@@ -230,15 +230,15 @@ pub enum Installation {
 /// Stage `checked`, what [`check`](crate::check) or
 /// [`check_forms`](crate::check_forms) made of a document, into
 /// `transaction`, the caller's: its writes in order, each write with a
-/// `when` read through `transaction` as the forms before it left it,
-/// with the rule its `when` reads through laid over that read alone.
+/// premises read through `transaction` as the forms before it left it,
+/// with the rule its premises read through laid over that read alone.
 /// It never commits: the caller commits, or drops the transaction to
 /// write nothing, and may then [`answer`] the document's questions.
 ///
 /// It refuses no form itself: it stages the steps `checked` holds and
 /// says each form's refusal beside it, so a document checked form by
 /// form keeps the forms that were not refused. A document [`check`]
-/// refused holds no step and stages nothing. An error reading a `when`
+/// refused holds no step and stages nothing. An error reading a write's premises
 /// is returned, with nothing more staged.
 ///
 /// [`check`]: crate::check

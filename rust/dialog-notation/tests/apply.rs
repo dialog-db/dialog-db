@@ -79,9 +79,9 @@ fn rows(applied: Applied) -> Result<Vec<String>> {
 /// Each form of a document reads what the forms before it wrote: a
 /// retract by the entity alone after an assert in the same document
 /// retracts what the assert wrote as well as what was stored; a write
-/// whose `when` reads a claim an earlier form asserted makes its write;
-/// two writes with a `when` over one field, the second reading what the
-/// first wrote, the second's `when` of two premises (a read and a sum)
+/// whose premises read a claim an earlier form asserted makes its write;
+/// two writes with premises over one field, the second reading what the
+/// first wrote, the second's two premises (a read and a sum)
 /// read through a rule laid over that read alone.
 #[dialog_common::test]
 async fn it_reads_in_each_form_what_the_forms_before_it_wrote() -> Result<()> {
@@ -106,7 +106,7 @@ async fn it_reads_in_each_form_what_the_forms_before_it_wrote() -> Result<()> {
     );
 
     document
-        .apply(r#"(assert (n x:3 v: 0)) (assert (m ?t tag: "new") (when (n ?t v: 0)))"#)
+        .apply(r#"(assert (n x:3 v: 0)) (assert (m ?t tag: "new") (n ?t v: 0))"#)
         .await?;
     assert_eq!(
         document.answers("(select (m ?t tag: ?g))").await?,
@@ -115,8 +115,8 @@ async fn it_reads_in_each_form_what_the_forms_before_it_wrote() -> Result<()> {
 
     document
         .apply(
-            "(assert (n x:3 v: (+ ?v : 1)) (when (n x:3 v: ?v)))
-             (assert (n x:3 v: (+ ?v : 10)) (when (n x:3 v: ?v)))",
+            "(assert (n x:3 v: (+ ?v : 1)) (n x:3 v: ?v))
+             (assert (n x:3 v: (+ ?v : 10)) (n x:3 v: ?v))",
         )
         .await?;
     assert_eq!(
@@ -128,7 +128,7 @@ async fn it_reads_in_each_form_what_the_forms_before_it_wrote() -> Result<()> {
 
 /// A document is one transaction: a form that fails as it runs, after
 /// forms that wrote, leaves the branch as it was, at its revision. Here
-/// the last form's `when` binds a text where its write takes an integer.
+/// the last form's premises bind a text where its write takes an integer.
 #[dialog_common::test]
 async fn it_writes_nothing_of_a_document_a_later_form_of_which_fails() -> Result<()> {
     let mut document = Document::open().await?;
@@ -138,7 +138,7 @@ async fn it_writes_nothing_of_a_document_a_later_form_of_which_fails() -> Result
         .apply(
             r#"(assert (n x:2 v: 2))
                (assert (m x:2 tag: "two"))
-               (assert (n ?t v: ?g) (when (m ?t tag: ?g)))"#,
+               (assert (n ?t v: ?g) (m ?t tag: ?g))"#,
         )
         .await;
     assert!(
@@ -158,7 +158,7 @@ async fn it_writes_nothing_of_a_document_a_later_form_of_which_fails() -> Result
 }
 
 /// A command a document issues, and what the rules it fires write,
-/// land at commit, after every form has run: a later `when` reads the
+/// land at commit, after every form has run: a later write's premises reads the
 /// level the branch held, not the one the rule writes, and the command
 /// itself, which holds for the transaction, as a row of its layer.
 /// After the commit the rule's write is there.
@@ -169,8 +169,8 @@ async fn it_lands_what_a_command_makes_at_commit() -> Result<()> {
     document
         .apply(
             r#"(assert (k/bump subject: x:1))
-               (assert (xyz.seen x:9 lvl: ?l) (when (k x:1 lvl: ?l)))
-               (assert (xyz.seen x:8 bumped: ?t) (when (xyz.k.bump ?c subject: ?t)))"#,
+               (assert (xyz.seen x:9 lvl: ?l) (k x:1 lvl: ?l))
+               (assert (xyz.seen x:8 bumped: ?t) (xyz.k.bump ?c subject: ?t))"#,
         )
         .await?;
     assert_eq!(
@@ -236,7 +236,7 @@ async fn it_applies_nothing_of_a_refused_document() -> Result<()> {
 
 /// A form written again in a document is a write again: each runs in
 /// its place in the sequence. An assert, a retract and the same assert
-/// leave the claim; the same write with a `when` twice adds twice. A
+/// leave the claim; the same write with premises twice adds twice. A
 /// rule written twice is installed once, as installing it again would
 /// change nothing.
 #[dialog_common::test]
@@ -251,8 +251,8 @@ async fn it_runs_a_write_written_again_in_its_place() -> Result<()> {
     );
     document
         .apply(
-            "(assert (n x:1 v: (+ ?v : 1)) (when (n x:1 v: ?v)))
-             (assert (n x:1 v: (+ ?v : 1)) (when (n x:1 v: ?v)))",
+            "(assert (n x:1 v: (+ ?v : 1)) (n x:1 v: ?v))
+             (assert (n x:1 v: (+ ?v : 1)) (n x:1 v: ?v))",
         )
         .await?;
     assert_eq!(
@@ -267,7 +267,7 @@ async fn it_runs_a_write_written_again_in_its_place() -> Result<()> {
 
 /// What each form staged, as `stage` reports it, the forms in order: a
 /// declaration stages nothing; an assert is `Asserted`; a write with a
-/// `when` is `Read`, then each match's `Asserted` in order, a match
+/// premises are `Read`, then each match's `Asserted` in order, a match
 /// staged by an earlier form among them, and `Read` alone when nothing
 /// matched; a rule is `Installed` under its entity;
 /// a select is `Asked`. A rule written again `Repeats` the form
@@ -280,8 +280,8 @@ async fn it_reports_what_each_form_staged() -> Result<()> {
         r#"(concept (q ?t v: ?v)
              (xyz.q/v of: ?t is: ?v as: :integer cardinality: :many))
            (assert (n x:1 v: 1))
-           (assert (m ?t tag: "seen") (when (n ?t v: 1)))
-           (assert (m ?t tag: "never") (when (n ?t v: 9)))
+           (assert (m ?t tag: "seen") (n ?t v: 1))
+           (assert (m ?t tag: "never") (n ?t v: 9))
            (select (m ?t tag: ?g))
            (rule (assert (m ?t tag: "ruled")) (n ?t v: 2))
            (rule (assert (m ?t tag: "ruled")) (n ?t v: 2))"#,
@@ -327,7 +327,7 @@ async fn it_reports_what_each_form_staged() -> Result<()> {
             "6 false: same as 5",
         ],
     );
-    // The third form's `when` matched `x:1`, which only the second
+    // The third form's premises matched `x:1`, which only the second
     // form staged: it read through the transaction.
     let _ = transaction;
     Ok(())
@@ -386,7 +386,7 @@ async fn it_stages_a_document_into_a_stacks_transaction() -> Result<()> {
     let checked = check(
         &mut document.analyzer,
         r#"(assert (n x:7 v: 1))
-           (assert (m ?t tag: "stacked") (when (n ?t v: 1)))"#,
+           (assert (m ?t tag: "stacked") (n ?t v: 1))"#,
     );
     let (transaction, report) = stage(stack.transaction(), &checked, &document.operator).await?;
     assert!(
