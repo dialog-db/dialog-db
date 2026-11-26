@@ -30,6 +30,7 @@
 //! an extension trait instead.
 
 use crate::Blake3Hash;
+use crate::model::check_stored_entity;
 use crate::reads::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -1290,7 +1291,7 @@ fn reconstruct(
 /// ([`check_stored_entity`](crate::model::check_stored_entity)).
 /// Anything else is refused as an invalid entity.
 fn check_written_entity(entity: &crate::Entity) -> Result<(), DialogCorpusError> {
-    crate::model::check_stored_entity(entity.as_str()).map_err(|error| match error {
+    check_stored_entity(entity.as_str()).map_err(|error| match error {
         DialogCorpusError::CorruptEntry(reason) => DialogCorpusError::InvalidEntity(reason),
         other => other,
     })
