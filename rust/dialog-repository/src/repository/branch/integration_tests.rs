@@ -8734,3 +8734,4 @@ async fn it_reports_a_failed_read_after_losing_at_a_remote_that_does_not_say_wha
 }
 
 mod races;
+mod undecodable;

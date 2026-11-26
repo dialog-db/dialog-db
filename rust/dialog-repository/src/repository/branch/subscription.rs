@@ -1120,8 +1120,17 @@ where
                 let spilled = fetch_spilled(&raw_store, &archive, &entry.key)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
-                let fact = Fact::from_key_datum_with_value(&entry.key, datum, spilled)
-                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
+                let fact = match Fact::from_key_datum_with_value(&entry.key, datum, spilled) {
+                    Ok(fact) => fact,
+                    // A claim this replica cannot read yet changes no answer.
+                    Err(dialog_corpus::DialogCorpusError::CorruptEntry(reason)) => {
+                        dialog_corpus::pass_over(Some(entry.key.as_ref()), reason);
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(EvaluationError::Store(format!("changed datum: {error:?}")));
+                    }
+                };
                 // Dedup on the fact's identity (entity, attribute, value), all
                 // now reconstructed from the key.
                 if !seen.insert((

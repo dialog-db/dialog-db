@@ -36,7 +36,7 @@ use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt as _, stream};
 use std::future::Future;
 use std::sync::OnceLock;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use tokio::sync::OnceCell;
 
 use crate::CommitError;
@@ -538,7 +538,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 let overlay = layer.overlay_at(&views, &operator);
                 let composite = layer.composite(views);
                 let sources = composite.sources.clone();
-                let query_env = QueryEnv::over(composite, overlay, env).with_report(reporting);
+                let query_env = QueryEnv::reporting(composite, overlay, env, reporting);
                 let results = Box::pin(query.perform(&query_env));
                 // The query's own stream drives the env's preload queue:
                 // evaluator hints (its own and any concurrent evaluation's)
@@ -646,14 +646,17 @@ pub(crate) struct QueryEnv<'a> {
     /// demanded range here. Subscriptions use the recorded cover to
     /// gate re-evaluation.
     demand: Option<crate::Demand>,
-    /// When present, what the query this environment runs leaves out is
-    /// reported here as it is found: a rule its derivation reaches that
-    /// did not compile (see [`crate::report`]).
-    report: Option<Report>,
-    /// Every rule-discovery read this environment made, in order: what
-    /// a rule set assembled here is recorded with, so a subscription
-    /// reusing the set still records the reads as demand.
-    reads: Arc<Mutex<Vec<RuleRead>>>,
+    /// Whether what the query this environment runs leaves out is
+    /// reported into [`shared`](Self::shared) as it is found: a rule its
+    /// derivation reaches that did not compile (see [`crate::report`]).
+    reporting: bool,
+    /// The cell this environment shares with its clones, one per query:
+    /// every rule-discovery read it made, in order, which a rule set
+    /// assembled here is recorded with, so a subscription reusing the
+    /// set still records the reads as demand; and, when the environment
+    /// reports, the query's report, which its rows hand to readers. One
+    /// cell holds both, so a query reports at no allocation of its own.
+    shared: Report,
     /// A polling subscription's retained fixpoint for one concept:
     /// attached to that concept's resolved rules so a recursive
     /// evaluation continues (or rebuilds into) the retained answer
@@ -742,7 +745,7 @@ impl<'a> QueryEnv<'a> {
     /// what the tests build directly.
     #[cfg(test)]
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
-        Self::layered(sources, None, overlay, env)
+        Self::layered(sources, None, overlay, env, Report::default(), false)
     }
 
     /// Build a runtime env from already-resolved parts: the lines to
@@ -771,6 +774,8 @@ impl<'a> QueryEnv<'a> {
         layered: Option<Arc<SessionLayers>>,
         overlay: Ephemeral,
         env: &'a Erased,
+        shared: Report,
+        reporting: bool,
     ) -> Self {
         Self {
             sources,
@@ -779,8 +784,8 @@ impl<'a> QueryEnv<'a> {
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
-            report: None,
-            reads: Arc::new(Mutex::new(Vec::new())),
+            reporting,
+            shared,
             fixpoint: None,
             fetches: Arc::default(),
             memo: Memo::default(),
@@ -791,6 +796,29 @@ impl<'a> QueryEnv<'a> {
     /// A runtime env over `composite`: its lines and its memory layers
     /// (see [`layered`](Self::layered)).
     pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
+        Self::composed(composite, overlay, env, Report::default(), false)
+    }
+
+    /// A runtime env over `composite` (see [`over`](Self::over)) that
+    /// reports what its query leaves out into `report`, as it is found.
+    /// The env keeps its own reads in `report`'s cell, so reporting costs
+    /// the query no allocation.
+    pub(crate) fn reporting(
+        composite: Composite,
+        overlay: Ephemeral,
+        env: &'a Erased,
+        report: Report,
+    ) -> Self {
+        Self::composed(composite, overlay, env, report, true)
+    }
+
+    fn composed(
+        composite: Composite,
+        overlay: Ephemeral,
+        env: &'a Erased,
+        shared: Report,
+        reporting: bool,
+    ) -> Self {
         let Composite {
             sources,
             memories,
@@ -805,7 +833,7 @@ impl<'a> QueryEnv<'a> {
                     channels,
                 })
             });
-        Self::layered(sources, layered, overlay, env)
+        Self::layered(sources, layered, overlay, env, shared, reporting)
     }
 
     /// The memory layers read beside the lines, live, each by its name.
@@ -993,18 +1021,11 @@ impl<'a> QueryEnv<'a> {
         self
     }
 
-    /// Report what the query this environment runs leaves out into
-    /// `report`, as it is found.
-    pub(crate) fn with_report(mut self, report: Report) -> Self {
-        self.report = Some(report);
-        self
-    }
-
     /// Report `entry`, something the query left out, if this environment
     /// reports: a read that skips something says so here, as it skips.
     pub(crate) fn record(&self, entry: Entry) {
-        if let Some(report) = &self.report {
-            report.record(entry);
+        if self.reporting {
+            self.shared.record(entry);
         }
     }
 
@@ -1013,7 +1034,7 @@ impl<'a> QueryEnv<'a> {
         if skipped.is_empty() {
             return;
         }
-        if self.report.is_some() {
+        if self.reporting {
             for entry in skipped {
                 self.record(entry.clone());
             }
@@ -1063,9 +1084,8 @@ impl<'a> QueryEnv<'a> {
         if let Some(demand) = &self.demand {
             demand.record_rules(selector, manifest);
         }
-        self.reads
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        self.shared
+            .reads()
             .push((selector.clone(), manifest.clone()));
     }
 }
@@ -1150,8 +1170,8 @@ impl Clone for QueryEnv<'_> {
             layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
-            report: self.report.clone(),
-            reads: self.reads.clone(),
+            reporting: self.reporting,
+            shared: self.shared.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches.clone(),
             memo: Memo::default(),
@@ -1853,7 +1873,7 @@ impl<'a> QueryEnv<'a> {
             let fact = match row.to_owned() {
                 Ok(fact) => fact,
                 Err(DialogCorpusError::CorruptEntry(reason)) => {
-                    tracing::warn!(%reason, "ignoring corrupt stored row");
+                    dialog_corpus::pass_over(row.key(), reason);
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -2107,11 +2127,7 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             }
             return Ok(self.continuing(&concept, bundle));
         }
-        let first_read = self
-            .reads
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .len();
+        let first_read = self.shared.reads().len();
         let (bundle, skipped) = self.assemble_bundle(&input).await?;
         self.report_skipped(&skipped);
         if let Some(cache) = cache {
@@ -2166,9 +2182,8 @@ impl QueryEnv<'_> {
     /// Every rule-discovery read noted since `first`: what an entry
     /// assembled since then was read from.
     fn reads_since(&self, first: usize) -> Vec<RuleRead> {
-        self.reads
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        self.shared
+            .reads()
             .get(first..)
             .map(<[_]>::to_vec)
             .unwrap_or_default()
@@ -2181,8 +2196,8 @@ impl QueryEnv<'_> {
     fn isolated(&self) -> Self {
         let mut isolated = self.clone();
         isolated.demand = None;
-        isolated.report = None;
-        isolated.reads = Arc::default();
+        isolated.reporting = false;
+        isolated.shared = Report::default();
         isolated
     }
 }
@@ -2400,11 +2415,7 @@ impl<'a> QueryEnv<'a> {
             }
             return Ok(quarantined);
         }
-        let first_read = self
-            .reads
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .len();
+        let first_read = self.shared.reads().len();
         let quarantined = self.assemble_quarantined().await?;
         if let Some(cache) = cache {
             cache.record_quarantined(key, quarantined.clone(), self.reads_since(first_read));

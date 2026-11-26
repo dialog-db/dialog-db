@@ -30,6 +30,7 @@ use futures_util::{Stream, TryStreamExt as _};
 use pin_project_lite::pin_project;
 
 use crate::RuleError;
+use crate::rules::RuleRead;
 
 /// One thing a query left out.
 #[non_exhaustive]
@@ -58,11 +59,17 @@ pub struct Report {
 /// What a report's handles share. The query's end is a flag, and the
 /// lock is taken at the end only when a reader is waiting, so a query
 /// whose report nobody streams pays for neither.
+///
+/// The query's environment keeps its rule-discovery reads here too: it
+/// needs one shared cell of its own per query, and holding the report
+/// in that cell is what lets a query report at no allocation of its
+/// own.
 #[derive(Debug, Default)]
 struct Shared {
     inner: Mutex<Inner>,
     finished: AtomicBool,
     waited: AtomicBool,
+    reads: Mutex<Vec<RuleRead>>,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +79,15 @@ struct Inner {
 }
 
 impl Report {
+    /// The rule-discovery reads of the query's environment, in order:
+    /// see [`QueryEnv`](crate::repository::branch::session::QueryEnv).
+    pub(crate) fn reads(&self) -> MutexGuard<'_, Vec<RuleRead>> {
+        self.shared
+            .reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.shared
             .inner

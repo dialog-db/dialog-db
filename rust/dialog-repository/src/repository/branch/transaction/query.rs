@@ -229,9 +229,8 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                 // resolution all share one implementation.
                 let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
                 let sources = composite.sources.clone();
-                let query_env = QueryEnv::over(composite, overlay, env)
-                    .with_layers(layers)
-                    .with_report(reporting);
+                let query_env =
+                    QueryEnv::reporting(composite, overlay, env, reporting).with_layers(layers);
                 let results = Box::pin(query.perform(&query_env));
                 // Mid-transaction queries drive the ambient preload queue
                 // like any other evaluation (see `crate::repository::fetch`).
