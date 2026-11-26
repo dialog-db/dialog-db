@@ -14,6 +14,35 @@ says how to cut a release.
 
 ## Unreleased
 
+### `dialog-peer-iroh` builds on iroh 1.5.0
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD). The workspace
+moves `iroh` and `iroh-base` from 1.2.0 to 1.5.0, still pinned to the
+exact version. `dialog-peer-iroh` takes and returns iroh's own types
+(`Channel::new` takes an `iroh::Endpoint`, `IrohAddress` holds an
+`iroh_base::EndpointAddr`), so an embedder's iroh has to be the same
+version as dialog's.
+
+What this changes for you:
+
+- Move your own `iroh` and `iroh-base` dependencies to `=1.5.0`. An
+  `Endpoint` built with iroh 1.2 no longer fits `Channel::new`, and the
+  build fails until both sides agree.
+- Your own `Cargo.lock` decides the versions you build with, not
+  dialog's. To pick up the security fixes below, run
+  `cargo update -p n0-dns-resolver -p iroh-metrics` (or a plain
+  `cargo update`).
+- No dialog signature changes, and nothing a replica stores or syncs
+  changes.
+
+Why: dialog's exact pin held every embedder on iroh 1.2.0 until dialog
+moved. iroh 1.5.0 updated its lockfile for security fixes
+([n0-computer/iroh#4700](https://github.com/n0-computer/iroh/pull/4700)),
+but a crate's lockfile does not reach the crates that depend on it, so
+dialog's `Cargo.lock` now carries the same fixed versions:
+`iroh-metrics` 1.0.3, `n0-dns-resolver` 0.1.1, `netwatch` 0.20.2 and
+`n0-watcher` 1.0.1. (`portmapper` is not in dialog's tree.)
+
 ### The engine declares `notation/read` and `notation/analyze`, and a dialog crate supplies their code
 
 [#900](https://github.com/dialog-db/dialog-db/pull/900), in place of
