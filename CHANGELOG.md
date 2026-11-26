@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A commit refuses a rule body that does not compile here
 
-Pull request: to be linked when it opens.
+[#903](https://github.com/dialog-db/dialog-db/pull/903)
 
 A rule installed through the API compiles before it is written, but a
 transaction could also write `dialog.rule/source` as a plain fact, and a
