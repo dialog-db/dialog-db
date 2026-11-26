@@ -41,6 +41,7 @@ pub type Output = Vec<(&'static str, Value)>;
 /// (the rules a `#[derive(Concept)]` writes), and a static is `Sync`
 /// wherever it is compiled, so every premise is, and the extension a
 /// premise carries with it.
+// bare-send-ok: a premise is held in statics, which are Sync on every target, wasm included
 pub trait Extension: fmt::Debug + Send + Sync {
     /// Its name, as a premise names it: `notation/parse`.
     fn name(&self) -> &'static str;

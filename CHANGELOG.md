@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### An embedder supplies a formula of its own, asked in a premise query and held by no rule
 
-[#TBD](https://github.com/dialog-db/dialog-db/pulls). The formulas the engine knows are a closed
+[#894](https://github.com/dialog-db/dialog-db/pull/894). The formulas the engine knows are a closed
 set. An embedder whose code is a pure function of a premise's inputs, a
 notation's parser or checker say, now gives it to the engine as an
 `Extension` and builds premises of it through an `Extensions` value it
