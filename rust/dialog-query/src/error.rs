@@ -745,9 +745,9 @@ pub enum EvaluationError {
         /// The cell.
         cell: String,
         /// The type the cell declares.
-        expected: Box<crate::type_system::Type>,
+        expected: Box<Kind>,
         /// The value's own type.
-        actual: crate::corpus::Type,
+        actual: Type,
     },
 
     /// A formula an embedder supplies gave a row without a value for one
