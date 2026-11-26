@@ -4,11 +4,13 @@ mod application;
 mod fold;
 mod hash;
 mod output;
+mod premises;
 
 pub use application::*;
 pub use fold::{Fold, FoldConclusion};
 pub use hash::*;
 pub use output::*;
+pub use premises::{PremiseQuery, PremiseRow};
 
 #[cfg(test)]
 mod tests {
