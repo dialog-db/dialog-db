@@ -1,0 +1,82 @@
+From 837d52892e5108c399ba1ebbb15963171608d305 Mon Sep 17 00:00:00 2001
+From: "R. Daneel Olivaw" <rdaneel@gozala.io>
+Date: Thu, 26 Nov 2026 08:55:25 +0000
+Subject: [PATCH 3/4] docs(query): the supplied formulas in the changelog
+
+---
+ CHANGELOG.md | 59 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4a49fdb31..27992be3d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,65 @@ says how to cut a release.
+ 
+ ## Unreleased
+ 
++### The engine declares `notation/read` and `notation/analyze`, and a dialog crate supplies their code
++
++[#TBD](https://github.com/dialog-db/dialog-db/pulls), in place of
++[#894](https://github.com/dialog-db/dialog-db/pull/894). The engine now
++declares two more by name and by their cells: a formula `notation/read`
++(a text in, a row a form out) and a resolver `notation/analyze` (a form
++in, a row a thing said of it out). Their implementation is not the
++engine's. The notation supplies it to the environment a query runs in,
++through `Holds`, and a premise asking one finds it there. Both are asked
++in a query of premises that no rule holds.
++
++What this changes for you:
++
++- New: `dialog_query::supplied`, with the traits `NotationRead` and
++  `NotationAnalyze`, `supply_read` and `supply_analyze`, the premises
++  `NotationReadQuery` (`FormulaQuery::NotationRead`) and
++  `NotationAnalyzeQuery` (`ResolverQuery::NotationAnalyze`), and `Facts`,
++  the reads an analyzer makes through the query's environment.
++- New: `dialog_query::query::{PremiseQuery, PremiseRow}`, a query of
++  premises planned as a rule's body is and asked with no rule.
++  `TypeError::UnselectedVariable` refuses one that selects what no
++  premise binds.
++- A premise asking either where the environment holds no implementation
++  fails the query with `EvaluationError::Unsupplied`, naming it, before
++  a row is read. It never answers nothing.
++- A row an implementation gives is held to the cells declared here.
++  `EvaluationError::UndeclaredOutput`, `MissingOutput` and
++  `MistypedOutput` fail the query, naming the formula and the cell.
++- A deductive or inductive rule holding either is refused when it is
++  compiled, built directly or read from data, with
++  `TypeError::SuppliedInRule` (from `AnalysisError::SuppliedInRule`).
++- What an analyzer reads through `Facts` is the query's demand, as a
++  scan's is: a subscription over it is evaluated again when a fact it
++  read changes, and left alone otherwise.
++- `FormulaQuery`, `ResolverQuery`, `TypeError`, `AnalysisError` and
++  `EvaluationError` have new variants. None of them is
++  `non_exhaustive`, so an exhaustive `match` outside this crate needs
++  the arms.
++
++Why: the maintainer, 2026-11-26, wants a query to read a source and
++analyze the form it gives, with neither step storing anything, and the
++point other code reaches the engine through locked down: "define formulas
++in the one crate and then implement them in the other through traits".
++The names and the cells are the engine's, so no crate adds a formula;
++`Holds` is open, so any code holding the environment can supply an
++implementation. A built-in formula is on every replica. One whose
++implementation comes from another crate is only where that crate is
++linked, and what it does would become part of what a stored rule means,
++so no rule holds either yet. Opening rules to them is that refusal
++removed, once that behaviour is versioned in what a replica stores and a
++replica lacking an implementation judges such a rule at rule assembly.
++
++#### Compatibility and migration
++
++- Nothing a replica stores or syncs changes. A rule written as data can
++  name `notation/read` or `notation/analyze`, which now read back, but
++  every rule holding one is refused when it is compiled, so none is
++  stored. An older release does not know either name.
++
+ ### A whole number and a float compute as floats
+ 
+ [#892](https://github.com/dialog-db/dialog-db/pull/892)
+-- 
+2.43.0
+
