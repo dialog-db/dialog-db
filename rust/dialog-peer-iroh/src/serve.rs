@@ -20,15 +20,16 @@
 //!
 //! Only then does anything run.
 //!
-//! # What is not served, and why
+//! # What answers with more than a value
 //!
-//! The blob effects are absent. `blob::Read` returns a `BlobReader` and
-//! `blob::Write`/`blob::Import` return a `BlobWriter` — streaming
-//! handles, not values — so there is nothing for a request/response
-//! exchange to encode. Blobs want a stream of their own, which QUIC
-//! gives cheaply and which this module deliberately does not fake by
-//! buffering a whole blob into a response. Until that exists they are
-//! refused by name rather than silently missing.
+//! The blob effects answer with a transfer, and a watch with a state now
+//! and a state per change. Neither fits one encoded answer, so
+//! [`Responder::answer`] hands back an [`Answer`] that the transport
+//! streams: the store's handle for a blob, a [`Watch`] for a watch.
+//! A watch's authority is checked again by [`Responder::recheck`] before
+//! every delivery, and its cell's changes come from [`Changes`], which
+//! the store the responder serves through ([`Announcing`]) tells of
+//! every write made through it.
 
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_capability::{Constraint, Policy};
@@ -46,6 +47,7 @@ use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::changes::{Announcing, Changes, Following};
 use crate::wire::{BlobAnswer, Refusal, Response, encode};
 use dialog_ucan::Args;
 
@@ -103,6 +105,25 @@ pub enum Answer {
     /// Write the body into this, finish it, then answer with the digest
     /// it returns as [`BlobAnswer::Written`].
     Writing(blob::BlobWriter),
+    /// Answer with the cell's state now, then again each time it changes,
+    /// for as long as the watch's authority holds: see [`Watch`].
+    Watching(Box<Watch>),
+}
+
+/// A watch the responder accepted: the cell it follows and the invocation
+/// that authorized it, parsed once and kept so its authority can be
+/// verified again before every delivery.
+pub struct Watch {
+    chain: InvocationChain<dialog_varsig::AnySignature>,
+    resolve: Capability<memory::Resolve>,
+    following: Following,
+}
+
+impl Watch {
+    /// Wait until the cell may have changed since the last wait returned.
+    pub async fn changed(&self) {
+        self.following.changed().await
+    }
 }
 
 impl Answer {
@@ -118,6 +139,9 @@ impl Answer {
             Answer::Reading(_) | Answer::Writing(_) => Response::Refused(Refusal::UnknownCommand(
                 "a blob, which needs a channel that streams".into(),
             )),
+            Answer::Watching(_) => Response::Refused(Refusal::UnknownCommand(
+                "a watch, which needs a channel that streams".into(),
+            )),
         }
     }
 }
@@ -132,26 +156,57 @@ impl Answer {
 ///
 /// [`UnverifiedRevocations`]: dialog_ucan_core::UnverifiedRevocations
 pub struct Responder<S, Resolver, Revocations = dialog_ucan_core::UnverifiedRevocations> {
-    store: S,
+    store: Announcing<S>,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
+    recheck: std::time::Duration,
 }
+
+/// How often a watch nothing happens to has its authority checked again,
+/// by default: the longest a revoked watch stays open while idle.
+pub const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl<S, Resolver> Responder<S, Resolver> {
     /// Serve `store`, resolving issuer DIDs through `resolver`.
     pub fn new(store: S, resolver: Resolver) -> Self {
         Self {
-            store,
+            store: Announcing::new(store),
             resolver: Arc::new(resolver),
             revocations: Arc::new(dialog_ucan_core::UnverifiedRevocations),
+            recheck: RECHECK,
         }
     }
 }
 
 impl<S, Resolver, Revocations> Responder<S, Resolver, Revocations> {
-    /// What invocations are performed against.
-    pub fn store(&self) -> &S {
+    /// What invocations are performed against. Writes made through it
+    /// reach the watches following their cells, so an embedder writing
+    /// the same store locally writes through this (or a clone of it).
+    pub fn store(&self) -> &Announcing<S> {
         &self.store
+    }
+
+    /// Where writes to the store are announced to the watches following
+    /// them.
+    pub fn changes(&self) -> &Arc<Changes> {
+        self.store.changes()
+    }
+
+    /// Announce changes through `changes`, shared with whoever else writes.
+    pub fn with_changes(mut self, changes: Arc<Changes>) -> Self {
+        self.store = Announcing::with_changes(self.store.into_inner(), changes);
+        self
+    }
+
+    /// How often an idle watch's authority is checked again ([`RECHECK`]).
+    pub fn recheck_interval(&self) -> std::time::Duration {
+        self.recheck
+    }
+
+    /// Check an idle watch's authority every `interval`.
+    pub fn with_recheck(mut self, interval: std::time::Duration) -> Self {
+        self.recheck = interval;
+        self
     }
 
     /// Check every proof against `revocations` while verifying.
@@ -163,6 +218,7 @@ impl<S, Resolver, Revocations> Responder<S, Resolver, Revocations> {
             store: self.store,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
+            recheck: self.recheck,
         }
     }
 }
@@ -236,6 +292,23 @@ where
                     Provider::<memory::Resolve>::execute(&self.store, capability).await,
                 )))
             }
+            ["use", "get", "memory", "cell", "watch"] => {
+                // The watch names its cell exactly as a resolve does, so
+                // the resolve it answers with is built from the same
+                // arguments. It follows before it first reads, so a write
+                // between the two is not missed.
+                let resolve = memory_leaf(&subject, args, memory::Resolve)?;
+                let following = self.store.changes().follow(
+                    subject.clone(),
+                    resolve.space().to_string(),
+                    resolve.cell().to_string(),
+                );
+                Ok(Answer::Watching(Box::new(Watch {
+                    chain: chain.clone(),
+                    resolve,
+                    following,
+                })))
+            }
             ["use", "put", "memory", "cell"] => {
                 let capability = self.publish(&bundle, &subject, args)?;
                 Ok(Answer::Value(performed(
@@ -285,6 +358,23 @@ where
             Ok(writer) => Answer::Writing(writer),
             Err(error) => Answer::Value(performed(Err::<BlobAnswer, _>(error))),
         })
+    }
+
+    /// What the watched cell holds now, as one answer of the watch, and
+    /// whether the store failed to say: a failure is the watch's last
+    /// answer, and the watcher begins it again.
+    pub async fn state(&self, watch: &Watch) -> (Response, bool) {
+        let resolved =
+            Provider::<memory::Resolve>::execute(&self.store, watch.resolve.clone()).await;
+        let failed = resolved.is_err();
+        (performed(resolved), failed)
+    }
+
+    /// Verify the watch's invocation again, as of now: a delegation that
+    /// was revoked or lapsed since the watch began refuses it, and so
+    /// does the invocation's own expiry.
+    pub async fn recheck(&self, watch: &Watch) -> Result<(), Refusal> {
+        self.verify(&watch.chain).await
     }
 
     async fn verify(

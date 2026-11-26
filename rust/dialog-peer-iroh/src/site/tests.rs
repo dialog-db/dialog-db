@@ -112,6 +112,7 @@ async fn a_put_signed_here_is_performed_there() {
     assert_eq!(
         responder
             .store()
+            .inner()
             .get(Buffer::from(bytes.clone()).blake3_hash()),
         Some(bytes),
         "the peer stored the block the client signed for"

@@ -13,6 +13,7 @@ mod address;
 mod authorization;
 mod blob;
 mod provider;
+mod watch;
 
 pub use address::IrohAddress;
 pub use authorization::IrohAuthorization;
