@@ -728,82 +728,104 @@ impl FactView {
     /// left to `to_owned`, which decides, so the in-place and the eager
     /// scan of a row agree.
     pub fn checked(self) -> Result<CheckedRow, DialogCorpusError> {
-        let (entity, attribute, value) = {
-            let key = self.key().unwrap_or(&[]);
-            // One walk of the key's components for all three.
-            let (of, the, value) = match &self.backing {
-                Backing::Scanned { spilled, .. } => {
-                    let parts = self.parts()?;
-                    let value = match parts.value {
-                        ValueRef::Inline(payload) => {
-                            super::decode_value_view(parts.value_type, payload)
-                        }
-                        ValueRef::Spilled { .. } => {
-                            let bytes = spilled.as_deref().ok_or_else(|| {
-                                DialogCorpusError::InvalidValue(
-                                    "spilled value key has no fetched block bytes".to_string(),
-                                )
-                            })?;
-                            super::spilled_value_view(parts.value_type, bytes)
-                        }
-                    };
-                    // An entity whose stored URI is its canonical rendering
-                    // reads as stored: `to_owned`'s parse renders it
-                    // unchanged. That parse also refuses whitespace and
-                    // controls, which a canonical rendering can still hold
-                    // in an opaque path ("user:a b"), so they are checked
-                    // apart.
-                    let value = match value {
-                        Ok(super::ValueView::Entity(uri))
-                            if uri
-                                .chars()
-                                .any(|c| c.is_ascii_whitespace() || c.is_control())
-                                || Uri::check_stored(&uri).is_err() =>
-                        {
-                            None
-                        }
-                        Ok(view) => Some(view),
-                        Err(_) => None,
-                    };
-                    let Some(value) = value else {
-                        return self.checked_as_owned();
-                    };
-                    (
-                        super::view::cow_str(parts.entity)?,
-                        super::view::cow_str(parts.attribute)?,
-                        value,
-                    )
-                }
-                Backing::Owned { .. } => (self.of_str()?, self.the_str()?, self.value_view()?),
-            };
-            Uri::check_stored(&of)
-                .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
-            super::view::check_relation(&the)?;
-            (
-                Piece::text(key, of),
-                Piece::text(key, the),
-                Stored::of(key, value),
-            )
+        let checked = self.check_pieces()?;
+        Ok(self.assemble(checked))
+    }
+
+    /// [`Self::checked`], passing over a row this replica cannot read yet
+    /// ([`CorruptEntry`](DialogCorpusError::CorruptEntry)) through
+    /// [`pass_over`](crate::pass_over): `None` for such a row, any other
+    /// error refused as `checked` refuses it.
+    pub fn checked_or_passed_over(self) -> Result<Option<CheckedRow>, DialogCorpusError> {
+        match self.check_pieces() {
+            Ok(checked) => Ok(Some(self.assemble(checked))),
+            Err(DialogCorpusError::CorruptEntry(reason)) => {
+                crate::pass_over(self.key(), reason);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validates this row for [`Self::checked`], borrowing it.
+    fn check_pieces(&self) -> Result<Checked, DialogCorpusError> {
+        let key = self.key().unwrap_or(&[]);
+        // One walk of the key's components for all three.
+        let (of, the, value) = match &self.backing {
+            Backing::Scanned { spilled, .. } => {
+                let parts = self.parts()?;
+                let value = match parts.value {
+                    ValueRef::Inline(payload) => {
+                        super::decode_value_view(parts.value_type, payload)
+                    }
+                    ValueRef::Spilled { .. } => {
+                        let bytes = spilled.as_deref().ok_or_else(|| {
+                            DialogCorpusError::InvalidValue(
+                                "spilled value key has no fetched block bytes".to_string(),
+                            )
+                        })?;
+                        super::spilled_value_view(parts.value_type, bytes)
+                    }
+                };
+                // An entity whose stored URI is its canonical rendering
+                // reads as stored: `to_owned`'s parse renders it
+                // unchanged. That parse also refuses whitespace and
+                // controls, which a canonical rendering can still hold
+                // in an opaque path ("user:a b"), so they are checked
+                // apart.
+                let value = match value {
+                    Ok(super::ValueView::Entity(uri))
+                        if uri
+                            .chars()
+                            .any(|c| c.is_ascii_whitespace() || c.is_control())
+                            || Uri::check_stored(&uri).is_err() =>
+                    {
+                        None
+                    }
+                    Ok(view) => Some(view),
+                    Err(_) => None,
+                };
+                let Some(value) = value else {
+                    return self.checked_as_owned().map(Checked::Whole);
+                };
+                (
+                    super::view::cow_str(parts.entity)?,
+                    super::view::cow_str(parts.attribute)?,
+                    value,
+                )
+            }
+            Backing::Owned { .. } => (self.of_str()?, self.the_str()?, self.value_view()?),
+        };
+        Uri::check_stored(&of)
+            .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
+        super::view::check_relation(&the)?;
+        Ok(Checked::Pieces(
+            Piece::text(key, of),
+            Piece::text(key, the),
+            Stored::of(key, value),
+        ))
+    }
+
+    /// The checked row of `checked`, taking this row's key.
+    fn assemble(self, checked: Checked) -> CheckedRow {
+        let (entity, attribute, value) = match checked {
+            Checked::Pieces(entity, attribute, value) => (entity, attribute, value),
+            Checked::Whole(row) => return row,
         };
         let cause = self.cause().cloned();
         let key = match self.backing {
             Backing::Scanned { key, .. } => Some(key),
             Backing::Owned { .. } => None,
         };
-        Ok(CheckedRow {
+        CheckedRow {
             key,
             cause,
             entity,
             attribute,
             value,
-        })
+        }
     }
-}
 
-impl FactView {
-    /// [`Self::checked`] for a row whose value is not read in place: the
-    /// row `to_owned` reads, held as owned pieces, or its refusal.
-    #[cold]
     fn checked_as_owned(&self) -> Result<CheckedRow, DialogCorpusError> {
         let fact = self.to_owned()?;
         let owned = |text: &str| Piece::Owned(text.as_bytes().into());
@@ -815,6 +837,13 @@ impl FactView {
             value: Stored::of(&[], super::ValueView::from(&fact.is)),
         })
     }
+}
+
+/// What [`FactView::check_pieces`] found: the row's checked components,
+/// read in place, or the whole checked row, read as `to_owned` reads it.
+enum Checked {
+    Pieces(Piece, Piece, Stored),
+    Whole(CheckedRow),
 }
 
 impl Stored {
@@ -915,9 +944,13 @@ pub trait FactViewStream: Stream<Item = Result<FactView, DialogCorpusError>> + S
         Self: ConditionalSend,
     {
         self.filter_map(|row| async move {
-            match row.and_then(|view| view.to_owned()) {
+            let view = match row {
+                Ok(view) => view,
+                Err(error) => return Some(Err(error)),
+            };
+            match view.to_owned() {
                 Err(DialogCorpusError::CorruptEntry(reason)) => {
-                    tracing::warn!(%reason, "ignoring corrupt stored row");
+                    crate::pass_over(view.key(), reason);
                     None
                 }
                 other => Some(other),
@@ -999,6 +1032,10 @@ pub(crate) fn decode_value_parts(
     parts: &KeyRef<'_>,
     spilled: Option<Vec<u8>>,
 ) -> Result<Value, DialogCorpusError> {
+    // These bytes came out of the tree: a value that does not decode, or
+    // that this dialog would not have written, is a claim no reader here
+    // can read (`CorruptEntry`), passed over as if absent. A spilled
+    // block not fetched is not such a claim, and stays an error.
     Ok(match parts.value {
         // The key carries the value's prefix and hash; the raw value bytes
         // live in a content-addressed archive block the caller fetched and
@@ -1009,18 +1046,28 @@ pub(crate) fn decode_value_parts(
                     "spilled value key has no fetched block bytes".to_string(),
                 )
             })?;
-            Value::try_from((parts.value_type, bytes))?
+            match parts.value_type.storage() {
+                ValueDataType::Entity => {
+                    let uri = from_utf8(&bytes).map_err(|error| {
+                        DialogCorpusError::CorruptEntry(format!(
+                            "spilled entity is not UTF-8: {error}"
+                        ))
+                    })?;
+                    Value::Entity(super::view::stored_entity(uri)?)
+                }
+                _ => Value::try_from((parts.value_type, bytes)).map_err(as_corrupt_entry)?,
+            }
         }
         // Decode the inline order-preserving value from the key.
         ValueRef::Inline(inline_payload) => {
             let (value, rest) =
                 decode_value(parts.value_type, inline_payload).ok_or_else(|| {
-                    DialogCorpusError::InvalidValue(
+                    DialogCorpusError::CorruptEntry(
                         "inline value payload did not decode".to_string(),
                     )
                 })?;
             if !rest.is_empty() {
-                return Err(DialogCorpusError::InvalidValue(
+                return Err(DialogCorpusError::CorruptEntry(
                     "inline value payload had trailing bytes".to_string(),
                 ));
             }
