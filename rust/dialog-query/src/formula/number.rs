@@ -187,11 +187,10 @@ impl Number for f64 {
 /// The dynamic number: a numeric [`Value`] with the non-numeric
 /// variants excluded.
 ///
-/// Implements [`Number`] by delegating same-variant operations and
-/// refusing mixed-variant ones (`None`), which is the strict
-/// no-promotion semantics: a row pairing an unsigned integer with a
-/// float in one scheme variable is a non-match. The engine registers
-/// generic formulas at their `Numeric` instantiation.
+/// Implements [`Number`] by delegating same-variant operations, reading
+/// a natural and an integer as integers, and a whole number and a float
+/// as floats. The engine registers generic formulas at their `Numeric`
+/// instantiation.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum Numeric {
@@ -229,9 +228,22 @@ impl Numeric {
             (Numeric::Float(a), Numeric::Float(b)) => {
                 f(a, b).filter(|float| !float.is_nan()).map(Numeric::Float)
             }
-            // Mixed variants: no value of a single type is the
-            // result — strict, no promotion.
-            _ => None,
+            // A whole number and a float compute as floats: the whole
+            // number is read as the float nearest it, so one past
+            // `2^53` loses what a float cannot hold, as a float reader
+            // of it does.
+            (a, b) => f(a.as_float(), b.as_float())
+                .filter(|float| !float.is_nan())
+                .map(Numeric::Float),
+        }
+    }
+
+    /// This number as the float nearest it.
+    fn as_float(self) -> f64 {
+        match self {
+            Numeric::UnsignedInt(value) => value as f64,
+            Numeric::SignedInt(value) => value as f64,
+            Numeric::Float(value) => value,
         }
     }
 }

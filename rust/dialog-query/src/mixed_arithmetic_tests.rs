@@ -58,12 +58,17 @@ async fn computed(
         }
         field
     };
+    let operand = if formula == "math/product" {
+        "times"
+    } else {
+        "with"
+    };
     let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
         "deduce": { "with": { "out": { "the": "mixed/out", "as": "number:", "cardinality": "many" } } },
         "when": [
             { "assert": { "with": { "a": field("mixed/a"), "b": field("mixed/b") } },
               "where": { "this": var("this"), "a": var("a"), "b": var("b") } },
-            { "assert": formula, "where": { "of": var("a"), "with": var("b"), "is": var("out") } }
+            { "assert": formula, "where": { "of": var("a"), operand: var("b"), "is": var("out") } }
         ]
     }))?;
     let mut registry = RuleRegistry::new();

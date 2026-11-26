@@ -36,12 +36,11 @@
 //!   checked arithmetic and errors loudly on overflow, including an
 //!   unsigned input beyond `i128::MAX`. The result is the narrowest
 //!   fitting variant: non-negative sums come back `UnsignedInt`,
-//!   negative sums `SignedInt`. Floats accumulate in `f64`. Mixing
-//!   the integer band with floats in one group is an error: the
-//!   numeric machinery (formula arithmetic, the range predicates in
-//!   `constraint/compare.rs`) is strictly no-promotion between
-//!   integers and floats for data, and a fold input is always data.
-//!   The empty (all-absent) group returns the identity
+//!   negative sums `SignedInt`. Floats accumulate in `f64`, and a
+//!   group mixing whole numbers with floats sums as floats, each
+//!   whole number read as the float nearest it, as formula arithmetic
+//!   computes a whole number and a float: one past `2^53` loses what
+//!   a float cannot hold. The empty (all-absent) group returns the identity
 //!   `UnsignedInt(0)`.
 //! - **`min`/`max`** use the range-predicate ordering: same-variant
 //!   comparison via [`Numeric::compare`] for numeric values —
@@ -716,7 +715,8 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
     }
 }
 
-/// Checked sum: integers in `i128`, floats in `f64`, never mixed.
+/// Checked sum: integers in `i128`, and floats, or whole numbers mixed
+/// with floats, in `f64`.
 /// Folds in sorted order so overflow behavior and float rounding are
 /// independent of row order.
 fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, EvaluationError> {
@@ -735,12 +735,11 @@ fn fold_sum(entry: &ReduceEntry, values: Vec<Value>) -> Result<Value, Evaluation
             }
         }
     }
-    if !integers.is_empty() && !floats.is_empty() {
-        return Err(fault(
-            entry,
-            "mixed integer and float inputs in one group; \
-             the numeric machinery does not promote between them",
-        ));
+    // Whole numbers and floats in one group sum as floats, as formula
+    // arithmetic computes them: each whole number is read as the float
+    // nearest it.
+    if !floats.is_empty() {
+        floats.extend(integers.drain(..).map(|value| value as f64));
     }
     if floats.is_empty() {
         integers.sort_unstable();
