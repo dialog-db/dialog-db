@@ -291,6 +291,29 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A rule holds a formula or resolver the engine declares and another
+    /// crate supplies ([`crate::supplied`]). A built-in formula is on
+    /// every replica; one whose implementation comes from another crate
+    /// is only where that crate is linked, and what it does would become
+    /// part of what a stored rule means. It is asked in a
+    /// [`PremiseQuery`](crate::query::PremiseQuery) alone.
+    #[error(
+        "A rule cannot hold \"{formula}\": its implementation is supplied from outside the \
+         engine, only where that code is, and what it does would become part of what the stored \
+         rule means; ask it in a premise query"
+    )]
+    SuppliedInRule {
+        /// The formula's or resolver's name.
+        formula: String,
+    },
+
+    /// A premise query selects a variable none of its premises binds.
+    #[error("The premise query selects \"{variable}\", which none of its premises binds")]
+    UnselectedVariable {
+        /// The variable.
+        variable: String,
+    },
+
     /// A concept's field is named `this`, the name its entity has in
     /// every query and rule: the field and the entity would be one.
     #[error("A concept field cannot be named \"{field}\": that is the name of the entity")]
@@ -691,6 +714,59 @@ pub enum EvaluationError {
         parameter: String,
     },
 
+    /// A query asks a formula or resolver the engine declares and another
+    /// crate supplies ([`crate::supplied`]), and the environment it runs
+    /// in holds no implementation of it.
+    #[error(
+        "The formula \"{formula}\" is declared and no implementation of it is held where the \
+         query runs: supply one to the environment"
+    )]
+    Unsupplied {
+        /// The formula's or resolver's name.
+        formula: String,
+    },
+
+    /// An implementation supplied from outside the engine gave a value
+    /// for a cell its formula does not declare as an output: a fault in
+    /// the code that supplies it.
+    #[error(
+        "The formula \"{formula}\" gave a value for \"{cell}\", which it does not declare as an output"
+    )]
+    UndeclaredOutput {
+        /// The formula's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+    },
+
+    /// An implementation supplied from outside the engine gave a value
+    /// its cell's declared type does not admit: a fault in the code that
+    /// supplies it.
+    #[error(
+        "The formula \"{formula}\" gave {actual:?} for \"{cell}\", which it declares as {expected}"
+    )]
+    MistypedOutput {
+        /// The formula's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+        /// The type the cell declares.
+        expected: Box<Kind>,
+        /// The value's own type.
+        actual: Type,
+    },
+
+    /// An implementation supplied from outside the engine gave a row
+    /// without a value for an output its formula declares: a fault in the
+    /// code that supplies it.
+    #[error("The formula \"{formula}\" gave a row with no value for its output \"{cell}\"")]
+    MissingOutput {
+        /// The formula's name.
+        formula: String,
+        /// The cell.
+        cell: String,
+    },
+
     /// A selector matched no facts.
     #[error("Empty selector: {message}")]
     EmptySelector {
@@ -1001,6 +1077,14 @@ pub enum AnalysisError {
     SelfNegation {
         /// The conclusion concept's URI.
         concept: String,
+    },
+    /// A premise holds a formula or resolver the engine declares and
+    /// another crate supplies, which no rule may hold. See
+    /// [`TypeError::SuppliedInRule`].
+    #[error("rule holds {formula}, whose implementation is supplied from outside the engine")]
+    SuppliedInRule {
+        /// The formula's or resolver's name.
+        formula: String,
     },
     /// A body premise binds a variable named as a *reduced* head
     /// field — two definitions for one field. See

@@ -20,6 +20,7 @@ use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Entity, Fact, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
+use dialog_query::attribute::Relation;
 use dialog_query::concept::query::ConceptQuery;
 use dialog_query::error::{EvaluationError, TypeError};
 use dialog_query::query::{Output as _, PremiseQuery, PremiseRow};
@@ -192,14 +193,14 @@ fn outs<'a>(rows: impl IntoIterator<Item = &'a PremiseRow>) -> Vec<(Entity, Valu
 async fn write<S: PeerSpace>(
     branch: &Branch,
     session: &Peer<S, Session>,
-    attribute: &str,
+    attribute: Relation,
     of: &Entity,
     value: &str,
 ) -> Result<()> {
     #[allow(deprecated)]
     branch
         .transaction()
-        .assert(the!(attribute).of(of.clone()).is(value.to_string()))
+        .assert(attribute.of(of.clone()).is(value.to_string()))
         .commit()
         .publish()
         .perform(session)
@@ -233,7 +234,7 @@ async fn it_asks_the_reader_the_environment_holds() -> Result<()> {
     let repo = test_repo(&session, &peer).await;
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
-    write(&branch, &session, "note/text", &a, "hello there").await?;
+    write(&branch, &session, the!("note/text"), &a, "hello there").await?;
     let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
     let rows = branch
         .query()
@@ -250,13 +251,31 @@ async fn it_asks_the_reader_the_environment_holds() -> Result<()> {
 
 /// A premise asking a declared formula in an environment that holds no
 /// implementation of it fails the query, naming the formula: never a
-/// query that answers nothing. So does the resolver.
+/// query that answers nothing, with a text to read or with none. So does
+/// the resolver.
 #[dialog_common::test]
 async fn it_fails_a_query_asking_what_no_implementation_is_held_for() -> Result<()> {
     let (session, peer) = test_session_with_peer().await;
     let repo = test_repo(&session, &peer).await;
+    let empty = repo.branch("empty").open().perform(&session).await?;
+    for (premise, name) in [
+        (read_premise("tree")?, "notation/read"),
+        (analyze_premise()?, "notation/analyze"),
+    ] {
+        let query = PremiseQuery::new(vec![texts(), premise], "this", ["out"])?;
+        let answered = empty
+            .query()
+            .select(query)
+            .perform(&session)
+            .try_vec()
+            .await;
+        assert!(
+            matches!(&answered, Err(EvaluationError::Unsupplied { formula }) if formula == name),
+            "with no text: {answered:?}"
+        );
+    }
     let branch = repo.branch("main").open().perform(&session).await?;
-    write(&branch, &session, "note/text", &"id:a".parse()?, "hi").await?;
+    write(&branch, &session, the!("note/text"), &"id:a".parse()?, "hi").await?;
     for (premise, name) in [
         (read_premise("tree")?, "notation/read"),
         (analyze_premise()?, "notation/analyze"),
@@ -276,8 +295,8 @@ async fn it_fails_a_query_asking_what_no_implementation_is_held_for() -> Result<
     Ok(())
 }
 
-/// A declared formula has a name, so a rule written as data can name
-/// it, and it reads back as the formula it names.
+/// A declared formula and resolver have names, so a rule written as data
+/// can name either, and each reads back as what it names.
 #[dialog_common::test]
 fn it_reads_a_declared_formula_written_as_data() -> Result<()> {
     let written = serde_json::json!({
@@ -288,6 +307,16 @@ fn it_reads_a_declared_formula_written_as_data() -> Result<()> {
     assert!(
         matches!(&read, Proposition::Formula(FormulaQuery::NotationRead(_))),
         "{read:?}"
+    );
+    let written = serde_json::json!({
+        "assert": "notation/analyze",
+        "where": { "form": { "?": { "name": "form" } }, "message": { "?": { "name": "out" } } }
+    });
+    let analyze: Proposition = serde_json::from_value(written)?;
+    assert!(
+        matches!(&analyze, Proposition::Resolver(resolver)
+            if matches!(**resolver, ResolverQuery::NotationAnalyze(_))),
+        "{analyze:?}"
     );
     Ok(())
 }
@@ -306,7 +335,14 @@ async fn refuses_a_rule_holding_a_supplied_formula<S: PeerSpace>(
     supply_analyze(session, Arc::new(Defined::default()));
     let repo = test_repo(session, peer).await;
     let branch = repo.branch("main").open().perform(session).await?;
-    write(&branch, session, "note/text", &"id:a".parse()?, "hello").await?;
+    write(
+        &branch,
+        session,
+        the!("note/text"),
+        &"id:a".parse()?,
+        "hello",
+    )
+    .await?;
     for (premise, name) in [
         (read_premise("tree")?, "notation/read"),
         (analyze_premise()?, "notation/analyze"),
@@ -383,7 +419,7 @@ async fn it_keeps_a_subscription_to_what_is_read_current() -> Result<()> {
     let repo = test_repo(&session, &peer).await;
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
-    write(&branch, &session, "note/text", &a, "hi").await?;
+    write(&branch, &session, the!("note/text"), &a, "hi").await?;
     let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
     let mut subscription = branch.subscribe(query);
     let first = subscription.poll(&session).await?.expect("initial");
@@ -421,14 +457,14 @@ async fn it_follows_the_definitions_a_resolver_reads() -> Result<()> {
     let repo = test_repo(&session, &peer).await;
     let branch = repo.branch("main").open().perform(&session).await?;
     let a: Entity = "id:a".parse()?;
-    write(&branch, &session, "note/text", &a, "hi").await?;
+    write(&branch, &session, the!("note/text"), &a, "hi").await?;
     let query = PremiseQuery::new(vec![texts(), analyze_premise()?], "this", ["out"])?;
     let mut subscription = branch.subscribe(query);
     let first = subscription.poll(&session).await?.expect("initial");
     assert_eq!(first.asserted.len(), 1, "hi is unknown: {first:?}");
     let analyzed = analyzer.analyzed.load(Ordering::SeqCst);
 
-    write(&branch, &session, "note/other", &a, "unrelated").await?;
+    write(&branch, &session, the!("note/other"), &a, "unrelated").await?;
     let unmoved = subscription.poll(&session).await?;
     assert!(unmoved.is_none(), "a fact nothing read: {unmoved:?}");
     assert_eq!(
@@ -437,7 +473,7 @@ async fn it_follows_the_definitions_a_resolver_reads() -> Result<()> {
         "not analyzed again for a fact it did not read"
     );
 
-    write(&branch, &session, "def/name", &"id:d".parse()?, "hi").await?;
+    write(&branch, &session, the!("def/name"), &"id:d".parse()?, "hi").await?;
     let moved = subscription
         .poll(&session)
         .await?
@@ -453,7 +489,7 @@ async fn broken_answer(broken: Broken) -> Result<Result<Vec<PremiseRow>, Evaluat
     supply_read(&session, Arc::new(broken));
     let repo = test_repo(&session, &peer).await;
     let branch = repo.branch("main").open().perform(&session).await?;
-    write(&branch, &session, "note/text", &"id:a".parse()?, "hi").await?;
+    write(&branch, &session, the!("note/text"), &"id:a".parse()?, "hi").await?;
     let query = PremiseQuery::new(vec![texts(), read_premise("tree")?], "this", ["out"])?;
     Ok(branch
         .query()

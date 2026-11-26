@@ -286,6 +286,7 @@ fn compile_rule_as<T: Compile>(
                     rule: Box::new(rule.into()),
                     concept,
                 },
+                AnalysisError::SuppliedInRule { formula } => TypeError::SuppliedInRule { formula },
                 AnalysisError::ReducedFieldCollision { field } => {
                     TypeError::ReducedFieldCollision {
                         rule: Box::new(rule.into()),
