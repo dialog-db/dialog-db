@@ -828,6 +828,25 @@ fn ruled(rule: Rule, form: &Syntax) -> Result<Vec<Step>, Error> {
         }
         return Ok(vec![ground(&rule.head)?]);
     }
+    // A head's layer variable is bound by what the rule reads, as a
+    // field's is. Dialog-DB takes a layer it is not given for the
+    // primary, so one nothing binds is refused here, or the write would
+    // land there unsaid.
+    if let Head::Derive(read) | Head::Assert(read) | Head::Retract(read) | Head::Hold(read) =
+        &rule.head
+    {
+        let bound = rule.bound();
+        if let Some((field, layer)) = read.fields.iter().find_map(|field| match &field.layer {
+            Some(Term::Variable(layer)) if !bound.contains(layer) => Some((field, layer)),
+            _ => None,
+        }) {
+            return Err(Error::Refused(format!(
+                "{} is written in: ?{layer}, and no premise binds ?{layer}: name its layer, \
+                 `in: :session`, or read ?{layer} in the rule's premises",
+                field.attribute
+            )));
+        }
+    }
     let mut steps = match &rule.head {
         Head::Derive(read) => vec![deduce(&rule, read)?],
         Head::Assert(read) => vec![Step::Induce(Box::new(induce(&rule, read, "assert!")?))],
@@ -1831,13 +1850,23 @@ impl Scope {
                         read.domain, field.label
                     )));
                 }
-                let value = self.term(key, None)?;
-                self.when.push(tie(&format!("{}/key", field.label), value));
+                // A variable named after the operand is the operand: the
+                // premises bind it, and nothing ties it.
+                match key {
+                    Term::Variable(name) if self.name(name) == operand => {}
+                    key => {
+                        let value = self.term(key, None)?;
+                        self.when.push(tie(&operand, value));
+                    }
+                }
             }
-            if let Some(layer @ Term::Variable(_)) = &field.layer {
+            if let Some(Term::Variable(name)) = &field.layer {
                 layer_operand(read)?;
-                let layer = self.term(layer, None)?;
-                self.when.push(tie(&layered(field), layer));
+                let operand = layered(field);
+                if self.name(name) != operand {
+                    let layer = self.term(&Term::Variable(name.clone()), None)?;
+                    self.when.push(tie(&operand, layer));
+                }
             }
             match &field.term {
                 Term::Variable(name) if self.name(name) == field.label => {}
@@ -1881,6 +1910,19 @@ impl Scope {
                 self.names
                     .entry(name.clone())
                     .or_insert_with(|| field.label.clone());
+            }
+            // A key and a layer are operands of the head as its fields
+            // are, `block/key` and `v/in`, and bound as they are: by the
+            // variable written there, named after the operand.
+            if let Some((Term::Variable(name), _)) = &field.key {
+                self.names
+                    .entry(name.clone())
+                    .or_insert_with(|| format!("{}/key", field.label));
+            }
+            if let Some(Term::Variable(name)) = &field.layer {
+                self.names
+                    .entry(name.clone())
+                    .or_insert_with(|| layered(field));
             }
         }
     }
@@ -2064,7 +2106,13 @@ fn rule_refused(error: dialog_query::error::TypeError, read: &Read) -> Error {
             let field = read.fields.iter().find(|field| {
                 field.label == variable || field.attribute.ends_with(&format!("/{variable}"))
             });
-            let written = match field.map(|field| &field.term) {
+            // The key of an entry, `block/key`, is named by what was
+            // written in its place, `?k` of `block: {?k ?b}`.
+            let key = read.fields.iter().find_map(|field| match &field.key {
+                Some((term, _)) if format!("{}/key", field.label) == variable => Some(term),
+                _ => None,
+            });
+            let written = match key.or(field.map(|field| &field.term)) {
                 Some(Term::Variable(name)) if !crate::syntax::unwritten(name) => format!("?{name}"),
                 _ => format!("what the head gives `{variable}:`"),
             };
@@ -2507,8 +2555,7 @@ mod tests {
     /// Whether `rule` ties `operand` to a value with an equality among
     /// its premises.
     fn ties(rule: &Json, operand: &str) -> bool {
-        rule.to_string()
-            .contains(&format!(r#""assert":"==","where":{{"is":"#))
+        rule.to_string().contains(r#""assert":"==","where":{"is":"#)
             && rule
                 .to_string()
                 .contains(&format!(r#""this":{{"?":{{"name":"{operand}"}}}}"#))
@@ -2557,6 +2604,17 @@ mod tests {
                 "{head}: the premise binds {operand} itself: {k}"
             );
             assert_eq!(k, compiled("position"), "{head}");
+        }
+        // A key or a layer nothing binds is refused still, named.
+        for text in [
+            "(rule (xyz.nb ?n block: (:entry ?b key: ?k by: :position)) (xyz.src ?n block: ?b))",
+            "(rule (assert (xyz.seen ?n v: (:in ?b at: ?k))) (xyz.src ?n v: ?b))",
+        ] {
+            let refused = steps(text);
+            assert!(
+                matches!(&refused, Err(Error::Refused(why)) if why.contains("?k")),
+                "{text}: {refused:?}"
+            );
         }
     }
 

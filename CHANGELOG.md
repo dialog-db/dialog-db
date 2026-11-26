@@ -14,6 +14,39 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule concluding a keyed entry binds its key as it binds its fields
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A rule whose head
+writes an entry of a keyed collection, `(notebook ?n block: {?k ?b})`, or
+a value in a layer a variable names, `in: ?l`, bound the key's operand,
+`block/key`, or the layer's, `v/in`, with an equality premise,
+`(== ?block/key ?k)`. It now names the variable after the operand, as a
+head's entity and fields already were, and holds no equality.
+
+What this changes for you:
+
+- Such a rule's body has one premise fewer, and its identity changes. A
+  rule written two ways that differ only in that variable's name is one
+  rule.
+- A head's layer variable that no premise binds is refused by the
+  notation, `Error::Refused`, naming the variable. Before, the
+  equality's refusal by Dialog-DB stood in for it; without it, Dialog-DB
+  would take the layer as the primary.
+- A head's key that no premise binds is refused naming the variable as
+  written, `?k`, not the operand.
+
+Why: a rule of one meaning should be one rule, whichever spelling wrote
+it. tonk binds the operand directly; by tonk's tally of its notebook's
+seventeen rules (2026-11-26), seven differed from the notation's by this
+equality.
+
+#### Compatibility and migration
+
+- A rule an earlier build of the notation installed for such a head keeps
+  its old identity on a replica. Applying the same text with this build
+  installs the new rule beside it; both conclude the same rows. Nothing
+  is rewritten. Retract the old rule's facts to drop it.
+
 ### A line names any layer: `in: :session`, and `in: ?layer`
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). `in:` on a line,
