@@ -469,6 +469,7 @@ What this changes for you:
 Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
+
 ### A body variable used once is a blank in a rule's identity
 
 [#893](https://github.com/dialog-db/dialog-db/pull/893)
