@@ -44,6 +44,7 @@ What this changes for you:
 
 Why: a rule that would not compile is refused when it is asserted, and
 writing its facts by hand is asserting it.
+
 ### A claim this replica cannot read yet is treated as if it did not exist
 
 [#884](https://github.com/dialog-db/dialog-db/pull/884)
