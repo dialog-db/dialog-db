@@ -452,3 +452,29 @@ async fn it_answers_each_form_apart_so_one_failing_hides_no_other() -> Result<()
     );
     Ok(())
 }
+
+/// A write at the top level with premises runs once, in its document,
+/// over what its premises read then, and is not installed: a fact the
+/// premises would read, written later, writes nothing.
+#[dialog_common::test]
+async fn it_runs_a_top_level_write_with_premises_once() -> Result<()> {
+    let mut document = Document::open().await?;
+    document
+        .apply(r#"(assert (n x:3 v: 0)) (assert (m ?t tag: "new") (n ?t v: 0))"#)
+        .await?;
+    assert_eq!(
+        document
+            .answers("(select (xyz.m x:3 tag: ?g) (xyz.m x:3 tag: ?g))")
+            .await?,
+        vec![r#"(xyz.m x:3 tag: "new")"#.to_string()]
+    );
+    document.apply("(assert (n x:4 v: 0))").await?;
+    assert_eq!(
+        document
+            .answers("(select (xyz.m x:4 tag: ?g) (xyz.m x:4 tag: ?g))")
+            .await?,
+        Vec::<String>::new(),
+        "the write ran once, and was never installed"
+    );
+    Ok(())
+}

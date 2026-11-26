@@ -3652,6 +3652,43 @@ mod tests {
         }
     }
 
+    /// A write at the top level reads as a rule does: its premises follow
+    /// its head, and it is a rule that says it runs once, never installed.
+    /// `(when …)` there is a former word, refused naming the form to write.
+    #[test]
+    fn it_reads_premises_after_a_top_level_write_as_a_rule_that_runs_once() {
+        assert_eq!(
+            expanded(
+                "",
+                r#"(assert (xyz.todo/state of: ?t is: :done) (xyz.todo/text ?t "Call mom"))"#
+            )
+            .unwrap(),
+            vec![
+                r#"(rule (assert (xyz.todo ?t state: :done)) (xyz.todo ?t text: "Call mom") once: true)"#
+            ]
+        );
+        assert!(
+            expanded(
+                "",
+                "(retract (xyz.todo/tag ?t ?g) (xyz.todo/tag ?t ?g) (unless (xyz.todo/state ?t :open)))"
+            )
+            .unwrap()[0]
+                .contains("(unless (xyz.todo ?t state: :open)) once: true)")
+        );
+        for text in [
+            r#"(assert (xyz.todo/state of: ?t is: :done) (when (xyz.todo/text ?t "Call mom")))"#,
+            "(assert (xyz.todo/state of: ?t is: :done) (when))",
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Refused(why))
+                    if why.contains("`when` is no longer written")
+                        && why.contains("(assert (xyz.todo/state of: ?t is: :done) (xyz.todo/text ?t \"Call mom\"))")),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+    }
+
     /// `id` stands as a premise and binds its entity to what `(:id …)`
     /// names in the domain of the head it is the entity of. Whether it
     /// names a domain or a concept is not decided, so an entity of no
