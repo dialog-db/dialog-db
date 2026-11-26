@@ -1063,24 +1063,23 @@ mod tests {
         );
     }
 
-    /// Integer and float inputs in one group do not promote — same
-    /// strictness as formula arithmetic and the range predicates.
+    /// Integer and float inputs in one group sum as floats, as formula
+    /// arithmetic computes a whole number and a float.
     #[dialog_common::test]
-    async fn it_errors_on_mixed_integer_and_float_sum() {
+    async fn it_sums_mixed_integer_and_float_inputs_as_a_float() {
         let reduce = Reduce::new(
             vec![],
             vec![ReduceEntry::new("total", Aggregator::Sum, Term::var("x"))],
         );
-        let result = reduce
+        let rows = reduce
             .fold(selection(vec![
                 row(&[("x", Some(Value::UnsignedInt(1)))]),
                 row(&[("x", Some(Value::Float(1.5)))]),
+                row(&[("x", Some(Value::SignedInt(-3)))]),
             ]))
-            .await;
-        assert!(
-            matches!(result, Err(EvaluationError::Reduce { .. })),
-            "mixed int/float must error, got {result:?}"
-        );
+            .await
+            .unwrap();
+        assert_eq!(present(&rows[0], "total"), Value::Float(-0.5));
     }
 
     /// count-distinct dedups by dag-cbor bytes: equal values collapse,

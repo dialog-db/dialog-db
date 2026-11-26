@@ -465,14 +465,34 @@ mod tests {
         );
     }
 
-    /// Mixed variants are a non-match, never a promotion: dialog's
-    /// value lattice has no type that holds both ranges losslessly.
+    /// A whole number and a float compute as floats, whichever side
+    /// each is on and whatever the operation; a natural and an integer
+    /// still compute as integers.
     #[dialog_common::test]
-    fn it_refuses_mixed_variants() {
-        let a = Numeric::UnsignedInt(2);
-        let b = Numeric::Float(3.5);
-        assert_eq!(a.add(b), None);
-        assert_eq!(b.multiply(a), None);
+    fn it_computes_a_whole_number_and_a_float_as_floats() {
+        let natural = Numeric::UnsignedInt(3);
+        let integer = Numeric::SignedInt(-5);
+        let float = Numeric::Float(2.5);
+        assert_eq!(natural.add(float), Some(Numeric::Float(5.5)));
+        assert_eq!(float.add(natural), Some(Numeric::Float(5.5)));
+        assert_eq!(integer.add(float), Some(Numeric::Float(-2.5)));
+        assert_eq!(natural.subtract(float), Some(Numeric::Float(0.5)));
+        assert_eq!(float.multiply(natural), Some(Numeric::Float(7.5)));
+        assert_eq!(natural.divide(float), Some(Numeric::Float(1.2)));
+        assert_eq!(natural.remainder(float), Some(Numeric::Float(0.5)));
+        assert_eq!(natural.add(integer), Some(Numeric::SignedInt(-2)));
+    }
+
+    /// A whole number past `2^53` mixed with a float computes as a float
+    /// and loses what a float cannot hold: `2^53 + 1` reads as `2^53`, so
+    /// adding `0.5` gives `2^53`, as a float reader of `2^53 + 1` would see.
+    #[dialog_common::test]
+    fn it_loses_a_whole_number_past_two_to_the_fifty_three_to_the_float() {
+        let past = Numeric::UnsignedInt((1u128 << 53) + 1);
+        assert_eq!(
+            past.add(Numeric::Float(0.5)),
+            Some(Numeric::Float(9_007_199_254_740_992.0))
+        );
     }
 
     /// Integer edge cases produce no value instead of wrapping or
