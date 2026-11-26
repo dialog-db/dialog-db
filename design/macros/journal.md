@@ -2133,3 +2133,14 @@ The sketches of tonk's notebook and table, and the two to-do documents, stay as 
 - **6.** Cells not yet evaluated are not seen by analysis, as expected. Layers of another repository are deferred until the notation is rolled out.
 
 **Learned.** The reader and the walker accept the domain form today. It is the primitive read, the form a line is expanded to (`primitive.rs`, `design/macros/primitive.md`). A select of a stored attribute answers in it (`Query::row`, `(xyz.c x:1 name: "r")`). It is written 764 times in the crate's sources, tests and these notes, most of them trees the walker makes or tests of the primitive forms. Refusing it where a document writes it is the wrapper refusal of 2026-11-25 again: the walker still writes it, and the primitive forms still read it.
+
+## 2026-11-26, Decided: a line names any layer, and `Live` reads the stack
+
+**Asked.** The maintainer, of two expectations the paged spike showed are not met, relayed:
+
+1. A line names any layer, `in: :session`, or a variable, `in: ?layer`. Today `primitive::LAYERS` admits `:control` alone.
+2. `Live` subscribes through `Branch::subscribe`, so it does not see writes to the session layer. He expects it to subscribe through the stack, as `spike/paged-views` at `2adbbc5` does by hand in `it_moves_a_window_kept_in_the_session_layer`.
+
+**Learned.** Why only `:control`: no decision limits layers. On 2026-11-16 ("a concept as lines") the agent refused `in:` outright, before the engine's layers landed: the day before, the maintainer had called it "a whole another thread of work that is close to landing". On 2026-11-18 ("a command is a declared concept on a control layer") `in: :control` was admitted alone, for a command's one-tick lifetime. The comment on `LAYERS` still gives the reason, "Dialog-DB has no other layer yet", which no longer holds: the stack has `memory:` (the primary), `session:`, and the layers a schema declares.
+
+**Decided.** By the maintainer: both, queued after the engine pull request that replaces #894 and before definitions on the branch, which depend on them. A line names any layer the stack declares, on a read and on a write. A variable `in: ?layer` binds the layer on a read, and must be bound on a write: an unbound one is refused at compile time, not at run time. `Live` subscribes through the stack and settles. Not built.
