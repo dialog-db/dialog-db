@@ -98,6 +98,9 @@ pub use importer::Importer;
 mod state;
 pub use state::*;
 
+mod unread;
+pub use unread::*;
+
 mod blob_index;
 pub use blob_index::*;
 

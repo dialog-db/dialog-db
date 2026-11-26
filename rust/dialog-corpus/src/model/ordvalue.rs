@@ -132,7 +132,10 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
         }
         ValueDataType::Entity => {
             let (raw, rest) = decode_bytes(bytes)?;
-            let entity = String::from_utf8(raw).ok()?.parse().ok()?;
+            // As stored: an entity is written in its canonical rendering,
+            // so bytes that are not one are not an entity this dialog
+            // wrote, and are not read as the entity they would parse to.
+            let entity = super::view::stored_entity(&String::from_utf8(raw).ok()?).ok()?;
             (Value::Entity(entity), rest)
         }
         ValueDataType::Symbol => {
