@@ -226,6 +226,7 @@ mod pattern;
 mod primitive;
 mod print;
 mod select;
+pub mod supplied;
 mod syntax;
 pub mod view;
 mod written;

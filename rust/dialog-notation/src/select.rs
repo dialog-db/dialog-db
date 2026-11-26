@@ -421,6 +421,12 @@ impl Selection {
             .cloned()
             .collect();
         let (groups, inputs) = (&self.queries[groups], &self.queries[inputs]);
+        // Dialog-DB folds over a query's rule, and a query asking a
+        // formula whose code is the notation's has none: what it gathers
+        // is gathered here, from its rows.
+        if groups.asked.is_some() || inputs.asked.is_some() {
+            return None;
+        }
         let label = |columns: &[String], name: &str| {
             columns
                 .iter()

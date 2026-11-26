@@ -2982,6 +2982,23 @@ impl Expander {
                     operand.clone(),
                 ));
             }
+            // `(notation/read text: ?s at: ?n …)` and `notation/analyze`,
+            // whose code is the notation's, kept by a keyword a `/` cannot
+            // be in: `notation.read`.
+            if let Some(name) = word
+                .as_deref()
+                .filter(|word| [crate::supplied::READ, crate::supplied::ANALYZE].contains(word))
+                && !self.concepts.contains(name)
+                && let Syntax::Application(_, operand) = &tree
+            {
+                return Ok(Syntax::Application(
+                    Box::new(Syntax::Constant(syntax::entity(&format!(
+                        "{}:",
+                        crate::supplied::keyword(name)
+                    ))?)),
+                    operand.clone(),
+                ));
+            }
             // A concept declared under a name that holds a `/` is the
             // concept, not an attribute.
             let declared = word
@@ -5098,7 +5115,7 @@ mod tests {
     #[test]
     fn it_lists_every_word_the_notation_defines_in_forms() {
         use std::collections::BTreeSet;
-        let files: [(&str, &str); 23] = [
+        let files: [(&str, &str); 24] = [
             ("analyze.rs", include_str!("analyze.rs")),
             ("apply.rs", include_str!("apply.rs")),
             ("check.rs", include_str!("check.rs")),
@@ -5116,6 +5133,7 @@ mod tests {
             ("pattern.rs", include_str!("pattern.rs")),
             ("print.rs", include_str!("print.rs")),
             ("select.rs", include_str!("select.rs")),
+            ("supplied.rs", include_str!("supplied.rs")),
             ("syntax.rs", include_str!("syntax.rs")),
             ("view.rs", include_str!("view.rs")),
             ("view/markup.rs", include_str!("view/markup.rs")),
@@ -5203,6 +5221,8 @@ mod tests {
                 ONCE,
                 THIS,
                 POSITION,
+                crate::supplied::READ,
+                crate::supplied::ANALYZE,
                 crate::primitive::QUOTE,
                 crate::select::COLLECT,
                 crate::select::DISTINCT,

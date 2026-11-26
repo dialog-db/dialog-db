@@ -451,6 +451,18 @@ async fn rows<E: Reader>(
     query: &crate::Query,
     env: &E,
 ) -> Result<Vec<Syntax>, LiveError> {
+    if let Some(asked) = &query.asked {
+        let found: Vec<dialog_query::query::PremiseRow> = branch
+            .query()
+            .select(asked.query.clone())
+            .perform(env)
+            .try_vec()
+            .await?;
+        return Ok(found
+            .iter()
+            .map(|row| query.asked_row(row))
+            .collect::<Result<_, Error>>()?);
+    }
     let mut layer = branch.query();
     if let Some(rule) = &query.rule {
         layer = layer.with(rule.clone());

@@ -50,6 +50,7 @@ use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Output as _;
+use dialog_query::query::{PremiseQuery, PremiseRow};
 use dialog_query::{ConceptConclusion, ConceptQuery, FoldConclusion};
 use dialog_repository::{Branch, Delta, Ephemeral, FoldSubscription, RemoteSite, Subscription};
 use dialog_search_tree::nodes;
@@ -420,6 +421,19 @@ impl Live {
         query: &Query,
         env: &E,
     ) -> Result<Vec<BTreeMap<String, Value>>, LiveError> {
+        if let Some(asked) = &query.asked {
+            let rows: Vec<PremiseRow> = self
+                .branch
+                .query()
+                .select(asked.query.clone())
+                .perform(env)
+                .try_vec()
+                .await?;
+            return Ok(rows
+                .iter()
+                .map(|row| query.asked_values(row))
+                .collect::<Result<Vec<_>, _>>()?);
+        }
         let rows = self.conclusions(query, env).await?;
         Ok(rows
             .iter()
@@ -489,8 +503,15 @@ impl Live {
         let read = selection.read();
         let mut lease = self.lease();
         let mut feeds = Vec::new();
+        let mut asked = Vec::new();
         for (query, read) in selection.queries.iter().zip(read) {
-            feeds.push(if read {
+            // A query asking a formula whose code is the notation's lays
+            // no rule, and is kept by a subscription of its own kind.
+            asked.push(match (&query.asked, read) {
+                (Some(premises), true) => Some(self.branch.subscribe(premises.query.clone())),
+                _ => None,
+            });
+            feeds.push(if read && query.asked.is_none() {
                 self.lay(&mut lease, &query.rule, query.derives.as_ref())?;
                 Some(self.branch.subscribe(query.select.clone()))
             } else {
@@ -504,6 +525,8 @@ impl Live {
         }
         Ok(Standing {
             rows: vec![Vec::new(); feeds.len()],
+            asked_rows: vec![Vec::new(); asked.len()],
+            asked,
             folded: vec![Vec::new(); folds.len()],
             selection,
             feeds,
@@ -607,6 +630,12 @@ pub struct Standing {
     feeds: Vec<Option<Subscription<ConceptQuery>>>,
     /// The rows each one has reported.
     rows: Vec<Vec<ConceptConclusion>>,
+    /// A subscription of each query asking a formula whose code is the
+    /// notation's, by its index in [`Selection::queries`]: such a query
+    /// is in `feeds` as `None`.
+    asked: Vec<Option<Subscription<PremiseQuery>>>,
+    /// The rows each one has reported.
+    asked_rows: Vec<Vec<PremiseRow>>,
     /// A standing fold of each of [`Selection::folds`].
     folds: Vec<FoldSubscription<ConceptQuery, ConceptQuery>>,
     /// The rows each one has reported.
@@ -674,6 +703,12 @@ impl Standing {
             .map(Subscription::recomputes)
             .sum::<usize>()
             + self
+                .asked
+                .iter()
+                .flatten()
+                .map(Subscription::recomputes)
+                .sum::<usize>()
+            + self
                 .folds
                 .iter()
                 .map(FoldSubscription::recomputes)
@@ -697,6 +732,14 @@ impl Standing {
                 applied(rows, delta);
             }
         }
+        for (feed, rows) in self.asked.iter_mut().zip(&mut self.asked_rows) {
+            if let Some(feed) = feed
+                && let Some(delta) = feed.poll(env).await?
+            {
+                self.moved = true;
+                applied(rows, delta);
+            }
+        }
         for (fold, rows) in self.folds.iter_mut().zip(&mut self.folded) {
             if let Some(delta) = fold.poll(env).await? {
                 self.moved = true;
@@ -710,11 +753,16 @@ impl Standing {
             .selection
             .queries
             .iter()
-            .zip(&self.rows)
-            .map(|(query, rows)| {
-                rows.iter()
+            .zip(self.rows.iter().zip(&self.asked_rows))
+            .map(|(query, (rows, asked))| match query.asked {
+                Some(_) => asked
+                    .iter()
+                    .map(|row| query.asked_values(row))
+                    .collect::<Result<Vec<_>, _>>(),
+                None => rows
+                    .iter()
                     .map(|row| query.values(row))
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Result<Vec<_>, _>>(),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let folded = self

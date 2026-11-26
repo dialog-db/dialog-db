@@ -19,12 +19,11 @@ use dialog_notation::{
 };
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
-use dialog_query::query::{PremiseQuery, PremiseRow};
+use dialog_query::query::{Output as _, PremiseQuery, PremiseRow};
 use dialog_query::supplied::{NotationAnalyzeQuery, NotationReadQuery};
 use dialog_query::{FormulaQuery, Parameters, Premise, Proposition, ResolverQuery, Term};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
-use futures_util::TryStreamExt as _;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### The notation supplies its reader to `notation/read`, and a document asks it in a `select`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). The engine declares
+`notation/read` and `notation/analyze` (#900); the notation now supplies
+their code. `dialog_notation::supplied::supply(env, analyzer)` holds, in the
+environment queries run in, the crate's reader, and an analyzer over the
+definitions `analyzer` holds now.
+
+What this changes for you:
+
+- `notation/read` of a text answers a row a form the parser reads: `at`,
+  `tree` (the form as data) and its range, a line and a character from
+  zero, the character in UTF-16 units, as an editor speaking LSP counts it.
+- A document asks it in a `select`, or a `query` a select asks:
+  `(notation/read text: ?s at: ?n start-line: ?l)`. A select kept standing
+  answers again as the texts change. A rule, a write's premises and a
+  view's layer holding it are refused with `Error::Refused`, saying it is
+  asked in a `select` alone.
+- `notation/analyze` answers what the notation says of a document's forms,
+  read together, a row a thing said, `at` naming the form. It is
+  temporary: it analyzes against the definitions the analyzer given to
+  `supply` held, in memory, not the branch's, and reads nothing through
+  the engine's `Facts`. A document asking it is refused with
+  `Error::Unsupported`: nothing a document writes can build its `forms`.
+- `notation/read` and `notation/analyze` are words of the notation: no
+  concept or query may be declared under them.
+
+Why: a notebook cell reads its own text and what is said of it with an
+ordinary `select`, the maintainer's requirement (2026-11-26), with the
+names and cells the engine's.
+
 ### A rule concluding a keyed entry binds its key as it binds its fields
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). A rule whose head

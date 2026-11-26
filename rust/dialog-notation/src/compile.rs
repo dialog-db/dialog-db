@@ -15,6 +15,7 @@
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
+//! | `(report A)` whose premises ask `notation/read` | a [`PremiseQuery`] of them, and no rule: a rule cannot hold it ([`crate::supplied`]) |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
 //! | `(dialog.n.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
 //! | `(dialog.n.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
@@ -28,10 +29,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use dialog_corpus::{Entity, Relation, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
+use dialog_query::query::{PremiseQuery, PremiseRow};
+use dialog_query::supplied::NotationReadQuery;
 use dialog_query::{
     Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, DeductiveRule,
-    DeductiveRuleDescriptor, InductiveRule, InductiveRuleDescriptor, ListPattern, MapPattern,
-    Pattern, Premise as DialogPremise, Proposition, Term as Variable,
+    DeductiveRuleDescriptor, FormulaQuery, InductiveRule, InductiveRuleDescriptor, ListPattern,
+    MapPattern, Negation, Parameters as Cells, Pattern, Premise as DialogPremise, Proposition,
+    Term as Variable,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -281,6 +285,11 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
             "{form} matches nothing a query can say"
         )));
     };
+    if let Some(name) = query.asks() {
+        return Err(Error::Refused(format!(
+            "({name} …) is asked in a `select` alone: a write's premises are a rule"
+        )));
+    }
     Ok(Step::Write(Box::new(Write {
         query: *query,
         retract,
@@ -343,6 +352,24 @@ pub struct Query {
     /// named after, where it derives one: two sites of one name would
     /// derive into one relation.
     pub(crate) derives: Option<(String, String)>,
+    /// The query asked in place of [`rule`](Self::rule) and
+    /// [`select`](Self::select), where the premises ask a formula whose
+    /// code is the notation's ([`crate::supplied`]), which no rule may
+    /// hold: its rows are read with [`asked_values`](Self::asked_values).
+    /// `select` is then the query of the relation a rule would have
+    /// derived, and is not asked.
+    pub(crate) asked: Option<Asked>,
+}
+
+/// A query asked with no rule, as one asking a formula whose code is the
+/// notation's is.
+#[derive(Debug, Clone)]
+pub(crate) struct Asked {
+    /// The query.
+    pub(crate) query: PremiseQuery,
+    /// The first such formula it asks, to say where a form that cannot
+    /// hold it is refused.
+    pub(crate) formula: &'static str,
 }
 
 impl Step {
@@ -390,6 +417,51 @@ impl Query {
             .iter()
             .map(|(label, _, slot)| Ok((label.clone(), value(slot)?)))
             .collect()
+    }
+
+    /// The formula whose code is the notation's the query asks, where it
+    /// asks one.
+    pub(crate) fn asks(&self) -> Option<&'static str> {
+        self.asked.as_ref().map(|asked| asked.formula)
+    }
+
+    /// What `slot` is in a row of [`asked`](Self::asked): the entity the
+    /// row carries, or the value of the variable the slot is bound to.
+    fn asked_value(row: &PremiseRow, slot: &Slot) -> Result<Value, Error> {
+        match slot {
+            Slot::Is(Syntax::Constant(value)) => Ok(value.clone()),
+            Slot::Is(other) => Err(Error::Refused(format!("{other} is not a value"))),
+            Slot::Bound(name) if name == "this" => row
+                .entity()
+                .map(|entity| Value::Entity(entity.clone()))
+                .ok_or_else(|| Error::Refused("a match binds no entity".into())),
+            Slot::Bound(name) => row
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::Refused(format!("a match binds no {name}"))),
+            Slot::Built(_) | Slot::Field(..) => Err(Error::Unsupported(
+                "a part of a struct in a select asking a formula whose code is the notation's"
+                    .into(),
+            )),
+        }
+    }
+
+    /// The values of a row of [`asked`](Self::asked): each field's, from
+    /// the variable its slot is bound to.
+    pub(crate) fn asked_values(&self, row: &PremiseRow) -> Result<BTreeMap<String, Value>, Error> {
+        self.fields
+            .iter()
+            .map(|(label, _, slot)| Ok((label.clone(), Self::asked_value(row, slot)?)))
+            .collect()
+    }
+
+    /// A row of [`asked`](Self::asked), as the head the query reports
+    /// with its variables replaced by what they were bound to.
+    pub(crate) fn asked_row(&self, row: &PremiseRow) -> Result<Syntax, Error> {
+        self.filled(|slot: &Slot| match slot {
+            Slot::Is(form) => Ok(form.clone()),
+            slot => Self::asked_value(row, slot).map(|value| written(&value)),
+        })
     }
 
     /// The variable the select binds a field to, by the field's label,
@@ -475,6 +547,11 @@ impl Query {
                 within(conclusion, record, key).map(|value| written(&value))
             }
         };
+        self.filled(fill)
+    }
+
+    /// The head the query reports, each slot as `fill` says it.
+    fn filled(&self, fill: impl Fn(&Slot) -> Result<Syntax, Error>) -> Result<Syntax, Error> {
         let mut operand = Parameters {
             items: vec![fill(&self.entity)?],
             ..Parameters::default()
@@ -482,7 +559,7 @@ impl Query {
         // An entry of a collection is said under its key, as the
         // attribute it is: `(xyz.tonk.notebook notebook:1 N1: block:a)`.
         for (label, key, slot) in &self.fields {
-            let label = match key.as_ref().map(fill).transpose()? {
+            let label = match key.as_ref().map(&fill).transpose()? {
                 Some(Syntax::Constant(Value::String(key))) => key,
                 Some(other) => other.to_string(),
                 None => label.clone(),
@@ -783,7 +860,7 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
             if plan.layers[layer].conditions.is_empty() {
                 continue;
             }
-            plan.query(layer, None).map_err(|error| match error {
+            let query = plan.query(layer, None).map_err(|error| match error {
                 Error::Refused(why) => {
                     Error::Refused(format!("the view {}, layer {layer}: {why}", plan.name))
                 }
@@ -792,6 +869,13 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
                 }
                 other => other,
             })?;
+            if let Some(name) = query.asks() {
+                return Err(Error::Refused(format!(
+                    "({name} …) is asked in a `select` alone: the view {}, layer {layer}, is kept \
+                     by a rule",
+                    plan.name
+                )));
+            }
         }
         return Ok(vec![Step::View(Box::new(plan))]);
     }
@@ -1502,6 +1586,13 @@ struct Scope {
     /// The records a head builds, each from what its premises bind, under
     /// the field it concludes.
     built: Vec<(String, Pattern)>,
+    /// Whether what is compiled is a report, which may ask a formula
+    /// whose code is the notation's: anything else is a rule, which may
+    /// not.
+    asks: bool,
+    /// The premises asking such a formula, each with its name, kept apart
+    /// from [`when`](Self::when): they have no form as data.
+    asked: Vec<(&'static str, DialogPremise)>,
 }
 
 impl Scope {
@@ -1533,7 +1624,11 @@ impl Scope {
                 continue;
             }
             let compiled = self.premise(premise)?;
-            self.when.push(compiled);
+            // A premise asking a formula whose code is the notation's is
+            // kept apart.
+            if !compiled.is_null() {
+                self.when.push(compiled);
+            }
         }
         self.negated = true;
         for premise in &rule.when {
@@ -1703,6 +1798,9 @@ impl Scope {
     /// to when it stands where a term does; otherwise its `is:` part
     /// says.
     fn formula(&mut self, formula: &Formula, result: Option<Json>) -> Result<Json, Error> {
+        if let Some(asked) = crate::supplied::named(&formula.name) {
+            return self.ask(asked, formula, result);
+        }
         let name = formula.name.as_str();
         let missing = |what: &str| Error::Refused(format!("({name} …) has no {what}"));
         let subject = || formula.subject.as_ref().ok_or_else(|| missing("subject"));
@@ -1795,6 +1893,60 @@ impl Scope {
                  :value, dialog/position and the types"
             ))),
         }
+    }
+
+    /// A premise asking `name`, a formula whose code is the notation's,
+    /// kept in [`asked`](Self::asked): `Json::Null` stands in its place.
+    fn ask(
+        &mut self,
+        name: &'static str,
+        formula: &Formula,
+        result: Option<Json>,
+    ) -> Result<Json, Error> {
+        if name == crate::supplied::ANALYZE {
+            return Err(Error::Unsupported(format!(
+                "({name} …) is not asked by a document yet: its `forms:` is a list of a \
+                 document's trees, and no query a document writes builds one, since nothing \
+                 gathers rows into an ordered list and a quoted form is not built"
+            )));
+        }
+        if !self.asks {
+            return Err(Error::Refused(format!(
+                "({name} …) is asked in a `select` alone: a rule is stored and read back from its \
+                 body, and Dialog-DB refuses a rule holding a formula whose code is the \
+                 notation's; a write's premises and a view's layer are rules"
+            )));
+        }
+        if result.is_some() {
+            return Err(Error::Refused(format!(
+                "({name} …) gives rows, and stands as a premise, not where a value does"
+            )));
+        }
+        if self.negated {
+            return Err(Error::Unsupported(format!(
+                "({name} …) inside what must not hold"
+            )));
+        }
+        if formula.subject.is_some() {
+            return Err(Error::Refused(format!(
+                "({name} …) has a part without a label, and every part of it has one: `text:`"
+            )));
+        }
+        let mut cells = Cells::new();
+        for (label, term) in &formula.labelled {
+            let term = self.term(term, None)?;
+            cells.insert(
+                label.clone(),
+                serde_json::from_value(term).map_err(|error| refused("the term", error))?,
+            );
+        }
+        let asked = NotationReadQuery::new(cells)
+            .map_err(|error| Error::Refused(format!("({name} …): {error}")))?;
+        self.asked.push((
+            name,
+            DialogPremise::Assert(Proposition::Formula(FormulaQuery::NotationRead(asked))),
+        ));
+        Ok(Json::Null)
     }
 
     /// A head, as the concept a Dialog-DB rule concludes. Its fields are
@@ -2313,6 +2465,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     entity,
                     fields,
                     derives: None,
+                    asked: None,
                 })));
             }
         }
@@ -2326,7 +2479,10 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         site.chars().take(length).collect::<String>()
     );
     let derives = Some((relation.clone(), site.to_string()));
-    let mut scope = Scope::default();
+    let mut scope = Scope {
+        asks: true,
+        ..Scope::default()
+    };
     let entity = match (&read.entity, shown(&read.entity)?) {
         (Term::Variable(name), _) => {
             scope.names.insert(name.clone(), "this".into());
@@ -2424,6 +2580,10 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     // field of the other. The row is concluded as one record too, which
     // is one value, and read back from it. A query's row is one already.
     let recorded = columns.len() > 1 && read.domain != crate::select::ROW;
+    // A query asking a formula whose code is the notation's reads its
+    // rows from the variables of its premises, so nothing of it is
+    // recorded.
+    let plain = slots.clone();
     if recorded {
         // Each column's variable, under a name no author can write.
         for column in &columns {
@@ -2487,18 +2647,88 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         with.retain(|label, _| label == RECORD);
     }
     let select = json!({ "assert": selected, "where": terms });
+    let select: ConceptQuery =
+        serde_json::from_value(select).map_err(|error| refused("the query", error))?;
+    if !scope.asked.is_empty() {
+        let asked = asked(scope, concept, patterns, read, &entity, &plain)?;
+        return Ok(Step::Query(Box::new(Query {
+            rule: None,
+            select,
+            domain: read.written.clone().unwrap_or_else(|| read.domain.clone()),
+            entity,
+            fields: plain,
+            derives: None,
+            asked: Some(asked),
+        })));
+    }
     Ok(Step::Query(Box::new(Query {
         rule: Some(deductive(
             scope.rule("deduce", concept, None),
             patterns,
             read,
         )?),
-        select: serde_json::from_value(select).map_err(|error| refused("the query", error))?,
+        select,
         domain: read.written.clone().unwrap_or_else(|| read.domain.clone()),
         entity,
         fields: slots,
         derives,
+        asked: None,
     })))
+}
+
+/// The query of a report whose premises ask a formula whose code is the
+/// notation's: the premises the rule would hold, asked with no rule, a
+/// row each column's variable, and the entity where the report's is a
+/// variable. A pattern or a record the head builds is bound among the
+/// premises (`patterns`), as the rule binds it.
+fn asked(
+    mut scope: Scope,
+    concept: Json,
+    patterns: Vec<Proposition>,
+    read: &Read,
+    entity: &Slot,
+    slots: &[(String, Option<Slot>, Slot)],
+) -> Result<Asked, Error> {
+    let (names, asked): (Vec<&'static str>, Vec<DialogPremise>) =
+        std::mem::take(&mut scope.asked).into_iter().unzip();
+    let descriptor: DeductiveRuleDescriptor =
+        serde_json::from_value(scope.rule("deduce", concept, None))
+            .map_err(|error| refused("the query", error))?;
+    let mut premises: Vec<DialogPremise> = descriptor
+        .when
+        .into_iter()
+        .chain(patterns)
+        .map(DialogPremise::Assert)
+        .collect();
+    premises.extend(asked);
+    premises.extend(
+        descriptor
+            .unless
+            .into_iter()
+            .map(|proposition| DialogPremise::Unless(Negation(proposition))),
+    );
+    let mut selected: Vec<String> = Vec::new();
+    for (_, key, slot) in slots {
+        for slot in key.iter().chain([slot]) {
+            if let Slot::Bound(name) = slot
+                && name != "this"
+                && !selected.contains(name)
+            {
+                selected.push(name.clone());
+            }
+        }
+    }
+    let failed = |error| Error::Refused(format!("{}: {error}", read.domain));
+    let mut query = PremiseQuery::new(premises, selected).map_err(failed)?;
+    // A row carries an entity where the report's is a variable; a
+    // constant one is the report's own.
+    if matches!(entity, Slot::Bound(name) if name == "this") {
+        query = query.this("this").map_err(failed)?;
+    }
+    Ok(Asked {
+        query,
+        formula: names[0],
+    })
 }
 
 #[cfg(test)]
