@@ -163,6 +163,12 @@ impl The {
     pub fn key_operand(field: &str) -> String {
         format!("{field}/key")
     }
+
+    /// Whether `operand` is [`key_operand`](Self::key_operand) of
+    /// `field`, without spelling the key operand out.
+    pub fn is_key_operand(operand: &str, field: &str) -> bool {
+        operand.strip_suffix("/key") == Some(field)
+    }
 }
 
 impl The {

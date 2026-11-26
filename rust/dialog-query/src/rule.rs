@@ -366,13 +366,17 @@ fn compile_rule_as<T: Compile>(
         });
     }
 
-    // The rule's canonical spelling: locals renamed by the body's
-    // structure and premises sorted, so one body spelled two ways is
-    // one rule to everything keyed by its identity. The head's operands
-    // (`this`, each field and each keyed field's key) are fixed names. The narrowed
-    // premises are canonicalised and analysed again, which is the
-    // same analysis under other names; the authored spelling is kept
-    // for display, and the canonical one is what the body stores.
+    // The rule's canonical spelling: variables renamed by the body's
+    // structure, a variable used once spelled as a blank and premises
+    // sorted, so one body spelled two ways is one rule to everything
+    // keyed by its identity. The identity names the head's fields by
+    // the same structure, so how a writer labels them does not reach
+    // it; the spelling the rule runs under keeps the head's operands
+    // (`this`, each field and each keyed field's key) as written, since
+    // a query binds the head by them. The narrowed premises are
+    // canonicalised and analysed again, which is the same analysis
+    // under other names; the authored spelling is kept for display,
+    // and the canonical one is what the body stores.
     let analysis = match canonical::canonicalize(
         &conclusion,
         &analysis.premises,
