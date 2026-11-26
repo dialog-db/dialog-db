@@ -700,7 +700,10 @@ impl Match {
                 // whichever was bound first: a variable bound to the
                 // integer 4 takes the stored 4, 4.0 and 4.3, as a scan for
                 // the constant 4 admits them, and one bound to the stored
-                // 4.3 takes the constant 4. The first binding is kept.
+                // 4.3 takes the constant 4. The first binding is kept,
+                // unless the second is the same number in a narrower type:
+                // then the variable holds the narrowest, whichever premise
+                // bound it first.
                 Binding::Present(existing_value) => {
                     if *existing_value != value
                         && !value.reads_as(existing_value)
@@ -713,6 +716,9 @@ impl Match {
                             ),
                         })
                     } else {
+                        if value.narrower(existing_value) && value.same_number(existing_value) {
+                            self.rebind_narrower(name.into_name(), value);
+                        }
                         Ok(())
                     }
                 }
@@ -727,6 +733,23 @@ impl Match {
             self.bindings
                 .push((name.into_name(), Slot::Bound(Binding::Present(value))));
             Ok(())
+        }
+    }
+
+    /// Hold `value` for `name`, a narrower representation of the number
+    /// it is bound to: in place when this row bound it, or over the
+    /// binding a frame it extends holds, which the row's own binding
+    /// shadows.
+    fn rebind_narrower(&mut self, name: Arc<str>, value: Value) {
+        let own = self
+            .bindings
+            .iter_mut()
+            .find(|(held, _)| held.as_ref() == name.as_ref());
+        match own {
+            Some((_, slot)) => *slot = Slot::Bound(Binding::Present(value)),
+            None => self
+                .bindings
+                .push((name, Slot::Bound(Binding::Present(value)))),
         }
     }
 
@@ -914,6 +937,49 @@ impl Match {
 mod tests {
     use super::*;
     use crate::corpus::Value;
+
+    /// A variable bound to one number in two types, in either order,
+    /// holds the narrowest of them, so a join answers one
+    /// representation whichever premise binds it first.
+    #[dialog_common::test]
+    fn a_rebind_of_one_number_keeps_the_narrowest_type() {
+        let term: Term<Any> = Term::var("n");
+        for (first, second) in [
+            (Value::Float(3.0), Value::UnsignedInt(3)),
+            (Value::UnsignedInt(3), Value::Float(3.0)),
+            (Value::SignedInt(-3), Value::Float(-3.0)),
+        ] {
+            let mut row = Match::new();
+            row.bind(&term, first.clone()).expect("binds");
+            row.bind(&term, second.clone()).expect("agrees");
+            let narrow = if matches!(first, Value::Float(_)) {
+                second.clone()
+            } else {
+                first.clone()
+            };
+            assert_eq!(
+                row.lookup(&term)
+                    .expect("bound")
+                    .content()
+                    .expect("present"),
+                narrow,
+                "{first:?} then {second:?}"
+            );
+        }
+        // A rebind the lens agrees with but that is another number keeps
+        // the first binding.
+        let mut row = Match::new();
+        row.bind(&term, Value::SignedInt(4)).expect("binds");
+        row.bind(&term, Value::Float(4.3))
+            .expect("agrees through the lens");
+        assert_eq!(
+            row.lookup(&term)
+                .expect("bound")
+                .content()
+                .expect("present"),
+            Value::SignedInt(4)
+        );
+    }
 
     /// A typed variable only accepts values inhabiting its kind:
     /// the contract check behind every merge and propagation.
