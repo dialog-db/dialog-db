@@ -1,0 +1,33 @@
+From 4e948620f1054969ffef797621a942fe81bdb1f3 Mon Sep 17 00:00:00 2001
+From: "R. Daneel Olivaw" <rdaneel@gozala.io>
+Date: Thu, 26 Nov 2026 01:42:42 +0000
+Subject: [PATCH 3/4] style(query): import what the premise query uses
+
+---
+ rust/dialog-query/src/query/premises.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rust/dialog-query/src/query/premises.rs b/rust/dialog-query/src/query/premises.rs
+index 64490b935..4a86b6b37 100644
+--- a/rust/dialog-query/src/query/premises.rs
++++ b/rust/dialog-query/src/query/premises.rs
+@@ -1,6 +1,7 @@
+ //! A query of premises: what a rule's body is, asked with no rule.
+ 
+ use std::collections::BTreeMap;
++use std::iter;
+ use std::sync::Arc;
+ 
+ use dialog_corpus::Entity;
+@@ -44,7 +45,7 @@ impl PremiseQuery {
+         let this = this.into();
+         let select: Vec<String> = select.into_iter().map(Into::into).collect();
+         let plan = Planner::from(premises).plan(&Environment::new())?;
+-        if let Some(variable) = std::iter::once(&this)
++        if let Some(variable) = iter::once(&this)
+             .chain(&select)
+             .find(|variable| !plan.binds.contains(variable))
+         {
+-- 
+2.43.0
+

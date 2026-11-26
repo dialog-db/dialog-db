@@ -1,0 +1,78 @@
+From 0746922b0e76b309d937fc8cc742cef5b9c32b41 Mon Sep 17 00:00:00 2001
+From: "R. Daneel Olivaw" <rdaneel@gozala.io>
+Date: Thu, 26 Nov 2026 01:47:22 +0000
+Subject: [PATCH 4/4] style(repository): import what the extension tests use
+
+---
+ .../src/repository/branch/extension_tests.rs  | 20 ++++++++-----------
+ 1 file changed, 8 insertions(+), 12 deletions(-)
+
+diff --git a/rust/dialog-repository/src/repository/branch/extension_tests.rs b/rust/dialog-repository/src/repository/branch/extension_tests.rs
+index 16c26d432..ab8972702 100644
+--- a/rust/dialog-repository/src/repository/branch/extension_tests.rs
++++ b/rust/dialog-repository/src/repository/branch/extension_tests.rs
+@@ -18,7 +18,9 @@ use dialog_corpus::{Entity, Fact, Selector, Value};
+ use dialog_peer::helpers::test_session_with_peer;
+ use dialog_peer::{Peer, PeerSpace, Session};
+ use dialog_query::concept::query::ConceptQuery;
++use dialog_query::corpus::Type as ValueType;
+ use dialog_query::error::{EvaluationError, TypeError};
++use dialog_query::formula::extension::Output;
+ use dialog_query::formula::{Bindings, Cells, Extension, Extensions};
+ use dialog_query::query::{Output as _, PremiseQuery, PremiseRow};
+ use dialog_query::type_system::Type as Kind;
+@@ -39,11 +41,11 @@ struct Shout;
+ static SHOUT: LazyLock<Cells> = LazyLock::new(|| {
+     Cells::define(|builder| {
+         builder
+-            .cell("of", Some(Kind::from(dialog_query::corpus::Type::String)))
++            .cell("of", Some(Kind::from(ValueType::String)))
+             .the("what is shouted")
+             .required();
+         builder
+-            .cell("is", Some(Kind::from(dialog_query::corpus::Type::String)))
++            .cell("is", Some(Kind::from(ValueType::String)))
+             .the("it, shouted")
+             .output(0);
+     })
+@@ -58,10 +60,7 @@ impl Extension for Shout {
+         &SHOUT
+     }
+ 
+-    fn compute(
+-        &self,
+-        bindings: &mut Bindings,
+-    ) -> Result<Vec<dialog_query::formula::extension::Output>, EvaluationError> {
++    fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
+         let of: String = bindings.read("of")?;
+         Ok(vec![vec![(
+             "is",
+@@ -77,11 +76,11 @@ struct Words;
+ static WORDS: LazyLock<Cells> = LazyLock::new(|| {
+     Cells::define(|builder| {
+         builder
+-            .cell("of", Some(Kind::from(dialog_query::corpus::Type::String)))
++            .cell("of", Some(Kind::from(ValueType::String)))
+             .the("the text")
+             .required();
+         builder
+-            .cell("word", Some(Kind::from(dialog_query::corpus::Type::String)))
++            .cell("word", Some(Kind::from(ValueType::String)))
+             .the("one of its words")
+             .output(0);
+     })
+@@ -96,10 +95,7 @@ impl Extension for Words {
+         &WORDS
+     }
+ 
+-    fn compute(
+-        &self,
+-        bindings: &mut Bindings,
+-    ) -> Result<Vec<dialog_query::formula::extension::Output>, EvaluationError> {
++    fn compute(&self, bindings: &mut Bindings) -> Result<Vec<Output>, EvaluationError> {
+         let of: String = bindings.read("of")?;
+         Ok(of
+             .split_whitespace()
+-- 
+2.43.0
+

@@ -1,0 +1,282 @@
+From 62824650115823de7825110880969682c63efbd4 Mon Sep 17 00:00:00 2001
+From: "R. Daneel Olivaw" <rdaneel@gozala.io>
+Date: Thu, 26 Nov 2026 01:40:53 +0000
+Subject: [PATCH 2/4] feat(query)!: an embedder supplies a formula, asked in a
+ premise query and held by no rule
+
+`Extension` and `Extensions` give the engine an embedder's pure formula,
+evaluated by the new `PremiseQuery`. A rule holding one is refused at
+compile, and a premise naming none the embedder holds when it is built.
+---
+ CHANGELOG.md                               | 55 ++++++++++++++++++++++
+ rust/dialog-query/src/formula/extension.rs | 41 +++++++++++++---
+ rust/dialog-query/src/query/premises.rs    | 55 +++++++++++++++++-----
+ rust/dialog-query/src/rule/analyzer.rs     | 14 ++++++
+ 4 files changed, 145 insertions(+), 20 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8bb5475a1..b1d271ec1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,61 @@ says how to cut a release.
+ 
+ ## Unreleased
+ 
++### An embedder supplies a formula of its own, asked in a premise query and held by no rule
++
++[#TBD](https://github.com/dialog-db/dialog-db/pulls). The formulas the engine knows are a closed
++set. An embedder whose code is a pure function of a premise's inputs, a
++notation's parser or checker say, now gives it to the engine as an
++`Extension` and builds premises of it through an `Extensions` value it
++owns: nothing is registered globally, and a premise carries the
++extension it was built of. Such a premise is evaluated by the new
++`PremiseQuery`, a query of premises planned as a rule's body is and asked
++with no rule, whose rows are an entity and the values of the variables it
++selects.
++
++What this changes for you:
++
++- `dialog_query::formula::{Extension, Extensions, ExtensionQuery}`: an
++  extension names itself, declares its cells as a derived formula does,
++  and computes any number of rows for a row in. `Extensions::apply(name,
++  terms)` gives the premise, `FormulaQuery::Extension`.
++- `dialog_query::query::{PremiseQuery, PremiseRow}`:
++  `PremiseQuery::new(premises, "this", ["out", ...])` plans when it is
++  built; `select` and `subscribe` take it as any query. A subscription
++  over it evaluates it again in full when what its premises read
++  changes: it is never restricted to one entity.
++- New refusals, each before any evaluation:
++  `TypeError::UnknownFormula` for a premise naming an extension the
++  `Extensions` does not hold; `TypeError::EmbedderFormula` (from the new
++  `AnalysisError::EmbedderFormula`) for a deductive or inductive rule
++  holding one, directly or compiled from its descriptor; and
++  `TypeError::UnselectedVariable` for a premise query selecting a
++  variable no premise binds. A query or a rule written as data cannot
++  name an extension: it does not deserialize, and an extension's
++  premise has no serialized form.
++- `FormulaQuery` has a variant more. A `match` on it outside this crate
++  needs an arm for it.
++- An `Extension` is `Send + Sync` on every target, the browser's
++  included, since premises are held in statics.
++
++Why: a notebook asks the notation to parse and check its source with
++ordinary queries, and the notation's code cannot be one of the engine's
++formulas. A rule is stored and read back from its body, and even a rule
++laid over one query only is written as facts and read back, so a rule
++holding an embedder's code would run only where that embedder is, or
++not at all. Keeping extensions out of every rule, and asking them in a
++query of premises, makes that refusal one check at rule compile, with
++nothing about the embedder's code frozen into what a replica stores.
++What this gives up: a rule, and so a command a rule answers, cannot ask
++an extension. That would take a formula every replica has, with its
++behaviour versioned in what is stored.
++
++#### Compatibility and migration
++
++- Nothing a replica stores or syncs changes: no rule body, fact or
++  format moves, and an older release reads everything this one writes.
++  An extension is never stored.
++
+ ### A cardinality-one write succeeds only the claims of its own type
+ 
+ [#882](https://github.com/dialog-db/dialog-db/pull/882)
+diff --git a/rust/dialog-query/src/formula/extension.rs b/rust/dialog-query/src/formula/extension.rs
+index 0554443b1..3eba3fbb4 100644
+--- a/rust/dialog-query/src/formula/extension.rs
++++ b/rust/dialog-query/src/formula/extension.rs
+@@ -22,8 +22,6 @@ use std::collections::BTreeMap;
+ use std::fmt;
+ use std::sync::Arc;
+ 
+-use dialog_common::{ConditionalSend, ConditionalSync};
+-
+ use crate::error::{EvaluationError, TypeError};
+ use crate::formula::bindings::Bindings;
+ use crate::formula::cell::Cells;
+@@ -37,7 +35,13 @@ pub type Output = Vec<(&'static str, Value)>;
+ 
+ /// A formula an embedder supplies: a pure function of its input cells,
+ /// giving any number of rows.
+-pub trait Extension: fmt::Debug + ConditionalSend + ConditionalSync {
++///
++/// `Send` and `Sync` on every target, the browser's too, where
++/// `ConditionalSend` asks for neither: a premise is held in `static`s
++/// (the rules a `#[derive(Concept)]` writes), and a static is `Sync`
++/// wherever it is compiled, so every premise is, and the extension a
++/// premise carries with it.
++pub trait Extension: fmt::Debug + Send + Sync {
+     /// Its name, as a premise names it: `notation/parse`.
+     fn name(&self) -> &'static str;
+ 
+@@ -80,8 +84,14 @@ impl Extensions {
+ 
+     /// The premise applying the extension `name` to `terms`.
+     pub fn apply(&self, name: &str, terms: Parameters) -> Result<FormulaQuery, TypeError> {
+-        let _ = (name, terms);
+-        todo!("Extensions::apply")
++        let extension = self
++            .by_name
++            .get(name)
++            .ok_or_else(|| TypeError::UnknownFormula { name: name.into() })?;
++        Ok(FormulaQuery::Extension(ExtensionQuery {
++            terms: extension.cells().conform(terms)?,
++            extension: extension.clone(),
++        }))
+     }
+ }
+ 
+@@ -122,9 +132,26 @@ impl ExtensionQuery {
+     }
+ 
+     /// The matches the extension's rows make of `bindings`.
++    ///
++    /// Each row is written to its own copy of the row in, and a write that
++    /// disagrees with what that row holds filters the row, as every
++    /// formula's does ([`emit`](crate::formula::emit)).
+     pub(crate) fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
+-        let _ = bindings;
+-        todo!("ExtensionQuery::resolve")
++        let mut matches = Vec::new();
++        for output in self.extension.compute(bindings)? {
++            let mut row = bindings.clone();
++            let written = output
++                .iter()
++                .try_for_each(|(cell, value)| row.write(cell, value));
++            match written {
++                Ok(()) => matches.push(row.source),
++                Err(EvaluationError::Conflict { .. })
++                | Err(EvaluationError::Absent { .. })
++                | Err(EvaluationError::TypeMismatch { .. }) => continue,
++                Err(error) => return Err(error),
++            }
++        }
++        Ok(matches)
+     }
+ }
+ 
+diff --git a/rust/dialog-query/src/query/premises.rs b/rust/dialog-query/src/query/premises.rs
+index aa6e9acac..64490b935 100644
+--- a/rust/dialog-query/src/query/premises.rs
++++ b/rust/dialog-query/src/query/premises.rs
+@@ -7,8 +7,10 @@ use dialog_corpus::Entity;
+ 
+ use crate::Value;
+ use crate::concept::Conclusion;
++use crate::corpus::Type as ValueType;
++use crate::environment::Environment;
+ use crate::error::{EvaluationError, TypeError};
+-use crate::planner::Conjunction;
++use crate::planner::{Conjunction, Planner};
+ use crate::premise::Premise;
+ use crate::selection::{self, Match};
+ 
+@@ -21,9 +23,9 @@ use super::Application;
+ /// It is where a formula an embedder supplies
+ /// ([`Extension`](crate::formula::Extension)) is evaluated, since no rule
+ /// may hold one. It is planned when it is built, so a premise it cannot
+-/// plan is refused then. A subscription over it evaluates it again
+-/// whenever what its premises read changes: it is never restricted to
+-/// one entity.
++/// plan, or a selected variable no premise binds, is refused then. A
++/// subscription over it evaluates it again whenever what its premises
++/// read changes: it is never restricted to one entity.
+ #[derive(Clone, Debug)]
+ pub struct PremiseQuery {
+     plan: Arc<Conjunction>,
+@@ -39,12 +41,22 @@ impl PremiseQuery {
+         this: impl Into<String>,
+         select: impl IntoIterator<Item = impl Into<String>>,
+     ) -> Result<Self, TypeError> {
+-        let _ = (
+-            premises,
+-            this.into(),
+-            select.into_iter().map(Into::into).collect::<Vec<String>>(),
+-        );
+-        todo!("PremiseQuery::new")
++        let this = this.into();
++        let select: Vec<String> = select.into_iter().map(Into::into).collect();
++        let plan = Planner::from(premises).plan(&Environment::new())?;
++        if let Some(variable) = std::iter::once(&this)
++            .chain(&select)
++            .find(|variable| !plan.binds.contains(variable))
++        {
++            return Err(TypeError::UnselectedVariable {
++                variable: variable.clone(),
++            });
++        }
++        Ok(Self {
++            plan: Arc::new(plan),
++            this,
++            select,
++        })
+     }
+ }
+ 
+@@ -74,12 +86,29 @@ impl Application for PremiseQuery {
+     where
+         Env: crate::Scope<'a>,
+     {
+-        let _ = (&self.plan, &self.this, &self.select);
+         (*self.plan).clone().evaluate(selection, env)
+     }
+ 
+     fn realize(&self, input: Match) -> Result<PremiseRow, EvaluationError> {
+-        let _ = input;
+-        todo!("PremiseQuery::realize")
++        let this = match input.value_of(&self.this) {
++            Some(Value::Entity(entity)) => entity.clone(),
++            Some(other) => {
++                return Err(EvaluationError::TypeMismatch {
++                    expected: ValueType::Entity,
++                    actual: other.data_type(),
++                });
++            }
++            None => {
++                return Err(EvaluationError::UnboundVariable {
++                    variable_name: self.this.clone(),
++                });
++            }
++        };
++        let values = self
++            .select
++            .iter()
++            .filter_map(|variable| Some((variable.clone(), input.value_of(variable)?.clone())))
++            .collect();
++        Ok(PremiseRow { this, values })
+     }
+ }
+diff --git a/rust/dialog-query/src/rule/analyzer.rs b/rust/dialog-query/src/rule/analyzer.rs
+index c02891222..65f41be7e 100644
+--- a/rust/dialog-query/src/rule/analyzer.rs
++++ b/rust/dialog-query/src/rule/analyzer.rs
+@@ -32,6 +32,7 @@ use crate::concept::descriptor::ConceptDescriptor;
+ use crate::constraint::Constraint;
+ use crate::corpus::Type as ValueType;
+ use crate::error::{AnalysisError, TypeError};
++use crate::formula::FormulaQuery;
+ use crate::planner::categorize;
+ use crate::premise::Negation;
+ use crate::proposition::Proposition;
+@@ -421,6 +422,19 @@ pub fn analyze_with(
+     kind: RuleKind,
+     reduce: Vec<(String, ReduceSpec)>,
+ ) -> Result<AnalyzedRule, AnalysisError> {
++    // No rule holds a formula an embedder supplies: a rule is stored and
++    // read back from its body, which cannot say the embedder's code.
++    if let Some(formula) = premises.iter().find_map(|premise| match premise {
++        Premise::Assert(Proposition::Formula(FormulaQuery::Extension(extension)))
++        | Premise::Unless(Negation(Proposition::Formula(FormulaQuery::Extension(extension)))) => {
++            Some(extension.name())
++        }
++        _ => None,
++    }) {
++        return Err(AnalysisError::EmbedderFormula {
++            formula: formula.to_string(),
++        });
++    }
+     let head: Vec<(String, Kind)> = conclusion
+         .with()
+         .iter()
+-- 
+2.43.0
+
