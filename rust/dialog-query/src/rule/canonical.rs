@@ -50,7 +50,9 @@ use crate::pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
-use crate::rule::deductive::rename::{Rename, rename_premises, rename_term, variables};
+use crate::rule::deductive::rename::{
+    Rename, blank_premises, rename_premises, rename_term, variables,
+};
 use crate::rule::reference;
 use crate::term::Term;
 use crate::types::Any;
@@ -132,6 +134,25 @@ pub(crate) fn canonicalize(
             field: field.to_string(),
         });
     }
+    // A body reading an attribute through a raw scan, as a concept's
+    // implicit rule does, has no encoding (see `encode_premise`): it keeps
+    // the spelling it was given, and nothing below is worth building.
+    if premises.iter().any(unencodable) {
+        return Ok(None);
+    }
+    // A body variable used once matches what a blank matches and binds
+    // nothing anything else reads, so it is spelled as one. Most rules
+    // have none, and keep their premises and their variables as given.
+    let named = variables(premises);
+    let once = once_used(conclusion, premises, reduce, &named);
+    let blanked;
+    let (premises, named) = if once.is_empty() {
+        (premises, named)
+    } else {
+        blanked = blank_premises(premises, &once)?;
+        let named = variables(&blanked);
+        (blanked.as_slice(), named)
+    };
     let fields: Vec<(String, Option<String>)> = conclusion
         .with()
         .iter()
@@ -144,7 +165,7 @@ pub(crate) fn canonicalize(
         })
         .collect();
 
-    let mut locals: BTreeSet<String> = variables(premises);
+    let mut locals: BTreeSet<String> = named;
     for (_, spec) in reduce {
         if let Some(name) = spec.of.name() {
             locals.insert(name.to_string());
@@ -273,6 +294,57 @@ pub(crate) fn canonicalize(
         reduce,
         identity,
     }))
+}
+
+/// The variables other than `this` that a rule concluding
+/// `conclusion` uses exactly once: in one place of one premise, and
+/// nowhere in the head or the reduce clause. `named` is every variable
+/// the premises name; the uses are counted beside it, so a rule with
+/// none used once builds nothing but the count.
+fn once_used(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+    named: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut uses = vec![0usize; named.len()];
+    let mut count = |name: &str| {
+        if let Some(at) = named.iter().position(|known| known == name) {
+            uses[at] += 1;
+        }
+    };
+    for premise in premises {
+        let parameters = premise.parameters();
+        if parameters.has_shapes() {
+            parameters
+                .leaves()
+                .filter_map(Term::name)
+                .for_each(&mut count);
+        } else {
+            parameters
+                .iter()
+                .filter_map(|(_, term)| term.name())
+                .for_each(&mut count);
+        }
+    }
+    // The head and the reduce clause read a variable too, so one they
+    // name is not used once.
+    let in_head = |name: &str| {
+        conclusion.with().iter().any(|(field, descriptor)| {
+            field == name
+                || (matches!(descriptor.the(), The::Collection { .. })
+                    && The::is_key_operand(name, field))
+        })
+    };
+    let in_reduce = |name: &str| reduce.iter().any(|(_, spec)| spec.of.name() == Some(name));
+    named
+        .iter()
+        .zip(uses)
+        .filter(|(name, uses)| {
+            *uses == 1 && name.as_str() != "this" && !in_head(name) && !in_reduce(name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// The names a labeling assigns the variables: the spelling with the
@@ -568,6 +640,21 @@ fn without_descriptions(premise: &Premise) -> Premise {
 /// premise and of nothing else, and that orders it and tells it apart
 /// here. Its polarity is tagged apart from an encoded premise's, so the
 /// two never read as one another.
+/// Whether `premise` reads an attribute through a raw scan, which the
+/// formal notation cannot express: [`encode_premise`] gives it no
+/// encoding.
+fn unencodable(premise: &Premise) -> bool {
+    let proposition = match premise {
+        Premise::Assert(proposition) => proposition,
+        Premise::Unless(negation) => &negation.0,
+    };
+    !pattern::holds_shape(proposition)
+        && matches!(
+            proposition,
+            Proposition::Attribute(_) | Proposition::OptionalAttribute(_)
+        )
+}
+
 fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
     let (tag, proposition) = match premise {
         Premise::Assert(proposition) => (0u8, proposition),
@@ -663,6 +750,117 @@ mod tests {
         rule_headed("friend", when)
     }
 
+    /// `of knows _`, the value a blank.
+    fn knows_someone(of: &str) -> Value {
+        json!({
+            "assert": head("knows", "social/knows"),
+            "where": {
+                "this": { "?": { "name": of } },
+                "knows": { "?": {} }
+            }
+        })
+    }
+
+    /// A body variable used once matches what a blank matches, and binds
+    /// nothing anything else reads: naming it does not make another rule,
+    /// and the body stored for one decodes to the other's identity.
+    #[dialog_common::test]
+    fn it_identifies_a_once_used_variable_with_a_blank() {
+        let named = rule(vec![knows("this", "friend"), knows("this", "z")]);
+        let blank = rule(vec![knows("this", "friend"), knows_someone("this")]);
+        assert_eq!(named.this(), blank.this());
+        assert_eq!(named.canonical_descriptor(), blank.canonical_descriptor());
+        let decoded = DeductiveRule::decode(&named.encode()).expect("the body decodes");
+        assert_eq!(decoded.this(), blank.this());
+    }
+
+    /// A variable used twice is a join, not a blank: `this` knowing
+    /// someone who knows someone is not `this` knowing two people.
+    #[dialog_common::test]
+    fn it_keeps_a_variable_used_twice_apart_from_blanks() {
+        let joined = rule(vec![
+            knows("this", "friend"),
+            knows("friend", "z"),
+            knows("z", "w"),
+        ]);
+        let apart = rule(vec![
+            knows("this", "friend"),
+            knows_someone("friend"),
+            json!({
+                "assert": head("knows", "social/knows"),
+                "where": { "this": { "?": {} }, "knows": { "?": { "name": "w" } } }
+            }),
+        ]);
+        assert_ne!(joined.this(), apart.this());
+    }
+
+    /// Under `unless` only a blank is a once-used variable: a named
+    /// variable the absence test alone uses has nothing to bind it, so
+    /// the rule is refused, and the blank spelling is the one rule
+    /// there is. A once-used variable beside an absence test is a blank
+    /// as anywhere else.
+    #[dialog_common::test]
+    fn it_identifies_a_once_used_variable_with_a_blank_beside_unless() {
+        let absent = |is: Value| {
+            json!({
+                "assert": head("knows", "social/knows"),
+                "where": { "this": { "?": { "name": "friend" } }, "knows": is }
+            })
+        };
+        let compile = |when: Vec<Value>, unless: Value| {
+            serde_json::from_value::<DeductiveRuleDescriptor>(json!({
+                "deduce": head("friend", "social/friend"),
+                "when": when,
+                "unless": [unless],
+            }))
+            .expect("descriptor parses")
+            .compile()
+        };
+        let named_inside = compile(
+            vec![knows("this", "friend")],
+            absent(json!({ "?": { "name": "z" } })),
+        );
+        assert!(
+            matches!(&named_inside, Err(TypeError::RequiredBindings { .. })),
+            "{:?}",
+            named_inside.map(|rule| rule.this())
+        );
+        let blank_inside = compile(vec![knows("this", "friend")], absent(json!({ "?": {} })));
+        assert!(blank_inside.is_ok(), "{blank_inside:?}");
+
+        let named = compile(
+            vec![knows("this", "friend"), knows("this", "z")],
+            absent(json!({ "?": {} })),
+        )
+        .expect("rule compiles");
+        let blank = compile(
+            vec![knows("this", "friend"), knows_someone("this")],
+            absent(json!({ "?": {} })),
+        )
+        .expect("rule compiles");
+        assert_eq!(named.this(), blank.this());
+    }
+
+    /// A head field no premise binds is used once, in the head, and is
+    /// no blank: the rule is refused when it compiles, as it was.
+    #[dialog_common::test]
+    fn it_refuses_a_head_field_the_body_does_not_bind() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head("friend", "social/friend"),
+            "when": [knows("this", "x"), knows("x", "y"), knows("y", "x")],
+        }))
+        .expect("descriptor parses");
+        let compiled = descriptor.compile();
+        assert!(
+            matches!(
+                &compiled,
+                Err(TypeError::UnboundVariable { variable, .. }) if variable == "friend"
+            ),
+            "{:?}",
+            compiled.map(|rule| rule.this())
+        );
+    }
+
     /// A head field named `this`, the entity's own name, is refused
     /// with a typed error where it panicked looking up its canonical
     /// name, which only the entity does not get.
@@ -754,6 +952,48 @@ mod tests {
             knows("this", "a"),
         ]);
         assert_eq!(xy.this(), ba.this());
+    }
+
+    /// A two-field head deriving `social/<x>` and `social/<y>` from
+    /// `source/<x>` and `source/<y>`, its fields named `x` and `y`.
+    fn two_fields(x: &str, y: &str, relations: [&str; 2]) -> DeductiveRule {
+        let field = |the: &str| json!({ "the": format!("social/{the}"), "as": "text:", "cardinality": "many" });
+        let read = |the: &str, name: &str| {
+            json!({
+                "assert": { "with": { "read": { "the": format!("source/{the}"), "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "read": { "?": { "name": name } } }
+            })
+        };
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": { "with": { x: field(relations[0]), y: field(relations[1]) } },
+            "when": [read("first", x), read("second", y)],
+        }))
+        .expect("descriptor parses");
+        descriptor.compile().expect("rule compiles")
+    }
+
+    /// The labels a writer generates for head fields (`~0`, `~1`) are
+    /// names like any other: numbering them the other way, or naming
+    /// them, is one rule.
+    #[dialog_common::test]
+    fn it_identifies_a_rule_regardless_of_how_its_head_fields_are_numbered() {
+        let relations = ["first", "second"];
+        let forward = two_fields("~0", "~1", relations);
+        let backward = two_fields("~1", "~0", relations);
+        let named = two_fields("alpha", "beta", relations);
+        assert_eq!(forward.this(), backward.this());
+        assert_eq!(forward.this(), named.this());
+    }
+
+    /// Two head fields writing one relation are told apart by what they
+    /// read, not by their labels, so numbering them the other way is
+    /// still one rule.
+    #[dialog_common::test]
+    fn it_identifies_two_head_fields_on_one_relation_regardless_of_their_labels() {
+        let relations = ["seen", "seen"];
+        let forward = two_fields("~0", "~1", relations);
+        let backward = two_fields("~1", "~0", relations);
+        assert_eq!(forward.this(), backward.this());
     }
 
     /// Which variable reaches the head is structure, not naming:
