@@ -14,15 +14,44 @@ pub use fs::*;
 mod flaky;
 pub use flaky::*;
 
-/// Returns a name unique within this process, formed as `{prefix}-{ts}-{seq}`.
+/// Returns a name unique across the processes of a test run, formed as
+/// `{prefix}-{ts}-{process}-{seq}`.
 ///
-/// Uses a high-resolution timestamp combined with a process-local counter so
-/// tests can run concurrently without colliding on database / directory names.
+/// The test runner starts one process per test, so every test draws its
+/// first name with sequence 0, and two tests whose first draw reads one
+/// clock value (a coarse clock, or the millisecond clock a browser has)
+/// would share a database or directory and find each other's data in it.
+/// The process part names them apart: the process id on native, random
+/// bytes drawn once per module on wasm, which has no process id.
 pub fn unique_name(prefix: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = timestamp_nanos();
-    format!("{prefix}-{ts}-{seq}")
+    name_of(prefix, timestamp_nanos(), process_part(), seq)
+}
+
+/// The name [`unique_name`] forms from its parts: the clock reading
+/// `timestamp`, the part naming this process, `process`, and the
+/// process-local `sequence`.
+pub fn name_of(prefix: &str, timestamp: u128, process: &str, sequence: u64) -> String {
+    format!("{prefix}-{timestamp}-{process}-{sequence}")
+}
+
+/// The part of a [`unique_name`] that names this process: its id on
+/// native, random bytes drawn once on wasm.
+pub fn process_part() -> &'static str {
+    static PART: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PART.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::process::id().to_string()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `Math.random` has 53 bits; two draws give the part 64.
+            let draw = || (js_sys::Math::random() * (1u64 << 32) as f64) as u64;
+            format!("{:016x}", (draw() << 32) | draw())
+        }
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -61,4 +90,61 @@ pub fn unique_subject(prefix: &str) -> Subject {
 pub async fn test_credential() -> Credential {
     let signer = Ed25519Signer::generate().await.unwrap();
     Credential::Signer(SignerCredential::from(signer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two processes that read one clock value as their first name draw
+    /// it with the same sequence, 0: the test runner starts a process per
+    /// test. The process part is what names them apart.
+    #[dialog_common::test]
+    fn names_drawn_at_one_instant_by_two_processes_differ() {
+        assert_ne!(name_of("vault", 42, "a", 0), name_of("vault", 42, "b", 0));
+    }
+
+    /// The marker a child process prints its name between.
+    const MARKER: &str = "process-part:";
+
+    /// Run only as a child of
+    /// [`two_child_processes_name_apart_at_one_instant`]: prints the name
+    /// this process forms at a fixed clock reading.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "a child of two_child_processes_name_apart_at_one_instant"]
+    fn print_a_name_at_a_fixed_instant() {
+        println!("{MARKER}{}", name_of("vault", 42, process_part(), 0));
+    }
+
+    /// Two processes forming a name at one fixed clock reading, each its
+    /// first, form two names. Native only: a browser test cannot start a
+    /// process. On wasm the process part is random bytes drawn once per
+    /// module, which
+    /// [`names_drawn_at_one_instant_by_two_processes_differ`] covers by
+    /// its parts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn two_child_processes_name_apart_at_one_instant() -> std::io::Result<()> {
+        let name = || -> std::io::Result<String> {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "helpers::tests::print_a_name_at_a_fixed_instant",
+                    "--include-ignored",
+                    "--nocapture",
+                ])
+                .output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok(stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(MARKER))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("no name printed: {stdout}")))
+        };
+        let (first, second) = (name()?, name()?);
+        assert!(first.starts_with("vault-42-"), "{first}");
+        assert_ne!(first, second);
+        Ok(())
+    }
 }

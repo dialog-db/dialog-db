@@ -469,6 +469,37 @@ What this changes for you:
 Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
+### A body variable used once is a blank in a rule's identity
+
+[#893](https://github.com/dialog-db/dialog-db/pull/893)
+
+A rule's identity hashes its canonical spelling, which already ignores
+how its variables are named and the order its premises are listed in.
+It did not ignore whether a variable used once was named: `_` is a
+blank, and a named variable no other place reads matches what a blank
+matches, yet the two spelled two rules, under two entities, and a space
+holding both fired both. A body variable used once, in a premise that
+reads facts (a concept, an attribute, an optional attribute, inside
+`unless` too), is now spelled as a blank, in the identity and in the
+spelling the rule runs under. A formula, a resolver and a constraint
+keep their names.
+
+What this changes for you:
+
+- Two rules that differ only in `_` versus a variable used once are one
+  rule, with one entity. A rule with no such variable keeps its entity.
+- A rule whose variable is used once moves to another entity. Its
+  `this()` and `migration::rule_identity_v2` return the new one.
+  Generation 2 is the generation of the next release, which no tag has
+  computed yet, so `IDENTITY_GENERATION` stays 2.
+- A head field no premise binds is still refused when the rule
+  compiles (`TypeError::UnboundVariable`), and a named variable only an
+  absence test uses is still refused (`TypeError::RequiredBindings`):
+  only the blank spelling of such a test compiles.
+
+Why: a rule's entity should be one per rule, not one per writer's
+habit of naming what it does not read.
+
 ### A claim this replica cannot read yet is treated as if it did not exist
 
 [#884](https://github.com/dialog-db/dialog-db/pull/884)
@@ -2396,6 +2427,21 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A body variable used once is a blank: what a rule hashes changes, so
+  a rule with such a variable has another entity, and nothing stored is
+  rewritten until the embedder runs the upgrade. A body in format 4 or
+  5 holding such a rule, which only builds of `main` after 0.5.0 wrote,
+  no longer hashes to the entity it is stored under: it is judged
+  `forged`, is answered under `dialog.rule/error` and
+  `dialog.rule/invalid` and listed in the report of a query that reaches
+  it, and derives nothing and fires at no commit until
+  `Branch::upgrade_rules` reinstalls it under its new entity. A body
+  0.5.0 or earlier stored, holding such a rule, is judged `older` and is
+  reinstalled by the same upgrade, as other older bodies are. A rule
+  with no such variable is not touched. A build of `main` from before
+  this change reads what this one writes: the body spells the variable
+  as a blank, which both releases hash alike. 0.5.0 reads neither
+  format. Run `Branch::upgrade_rules`.
 - A claim this replica cannot read yet: nothing stored is rewritten on
   upgrade, and no identity moves. A replica that holds one reads its cell
   as if it were absent; the first cardinality-one write to the cell
