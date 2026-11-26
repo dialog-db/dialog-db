@@ -97,27 +97,14 @@ impl ValueView<'_> {
 /// `user:a b`, and which an entity's parse refuses). Anything else is a
 /// claim this replica cannot read yet (`CorruptEntry`).
 pub(crate) fn check_stored_entity(uri: &str) -> Result<(), DialogCorpusError> {
-    refuse_blanks(uri)?;
-    Uri::check_stored(uri).map_err(|error| corrupt(format!("{error}")))
+    Uri::check_written(uri).map_err(|error| corrupt(format!("{error}: {uri:?}")))
 }
 
 /// The entity a stored entity value names, checked as
 /// [`check_stored_entity`] checks it.
 pub(crate) fn stored_entity(uri: &str) -> Result<crate::Entity, DialogCorpusError> {
-    refuse_blanks(uri)?;
-    crate::Entity::from_stored(uri).map_err(|error| corrupt(format!("{error}")))
-}
-
-fn refuse_blanks(uri: &str) -> Result<(), DialogCorpusError> {
-    if uri
-        .chars()
-        .any(|c| c.is_ascii_whitespace() || c.is_control())
-    {
-        return Err(corrupt(format!(
-            "stored entity holds whitespace or a control character: {uri:?}"
-        )));
-    }
-    Ok(())
+    check_stored_entity(uri)?;
+    crate::Entity::try_from(Uri::stored_unchecked(uri)).map_err(|error| corrupt(format!("{error}")))
 }
 
 fn corrupt(reason: String) -> DialogCorpusError {
