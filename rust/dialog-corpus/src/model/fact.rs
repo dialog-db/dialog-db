@@ -728,102 +728,101 @@ impl FactView {
     /// left to `to_owned`, which decides, so the in-place and the eager
     /// scan of a row agree.
     pub fn checked(self) -> Result<CheckedRow, DialogCorpusError> {
-        let checked = self.check_pieces()?;
-        Ok(self.assemble(checked))
+        self.check_in_place(false)
     }
 
     /// [`Self::checked`], passing over a row this replica cannot read yet
     /// ([`CorruptEntry`](DialogCorpusError::CorruptEntry)) through
-    /// [`pass_over`](crate::pass_over): `None` for such a row, any other
-    /// error refused as `checked` refuses it.
-    pub fn checked_or_passed_over(self) -> Result<Option<CheckedRow>, DialogCorpusError> {
-        match self.check_pieces() {
-            Ok(checked) => Ok(Some(self.assemble(checked))),
-            Err(DialogCorpusError::CorruptEntry(reason)) => {
-                crate::pass_over(self.key(), reason);
-                Ok(None)
-            }
-            Err(error) => Err(error),
+    /// [`pass_over`](crate::pass_over) before refusing it as `checked`
+    /// does: the caller takes such a row as absent, and any other error
+    /// as `checked` gives it.
+    #[inline]
+    pub fn checked_or_passed_over(self) -> Result<CheckedRow, DialogCorpusError> {
+        self.check_in_place(true)
+    }
+
+    /// `error`, passed over through [`pass_over`](crate::pass_over) when
+    /// it is a row this replica cannot read yet and `passing_over` asks
+    /// for that. Only a refusal pays for it.
+    #[cold]
+    fn refuse(&self, error: DialogCorpusError, passing_over: bool) -> DialogCorpusError {
+        if passing_over && let DialogCorpusError::CorruptEntry(reason) = &error {
+            crate::pass_over(self.key(), reason.clone());
         }
+        error
     }
 
-    /// Validates this row for [`Self::checked`], borrowing it.
-    fn check_pieces(&self) -> Result<Checked, DialogCorpusError> {
-        let key = self.key().unwrap_or(&[]);
-        // One walk of the key's components for all three.
-        let (of, the, value) = match &self.backing {
-            Backing::Scanned { spilled, .. } => {
-                let parts = self.parts()?;
-                let value = match parts.value {
-                    ValueRef::Inline(payload) => {
-                        super::decode_value_view(parts.value_type, payload)
-                    }
-                    ValueRef::Spilled { .. } => {
-                        let bytes = spilled.as_deref().ok_or_else(|| {
-                            DialogCorpusError::InvalidValue(
-                                "spilled value key has no fetched block bytes".to_string(),
-                            )
-                        })?;
-                        super::spilled_value_view(parts.value_type, bytes)
-                    }
-                };
-                // An entity whose stored URI is its canonical rendering
-                // reads as stored: `to_owned`'s parse renders it
-                // unchanged. That parse also refuses whitespace and
-                // controls, which a canonical rendering can still hold
-                // in an opaque path ("user:a b"), so they are checked
-                // apart.
-                let value = match value {
-                    Ok(super::ValueView::Entity(uri))
-                        if uri
-                            .chars()
-                            .any(|c| c.is_ascii_whitespace() || c.is_control())
-                            || Uri::check_stored(&uri).is_err() =>
-                    {
-                        None
-                    }
-                    Ok(view) => Some(view),
-                    Err(_) => None,
-                };
-                let Some(value) = value else {
-                    return self.checked_as_owned().map(Checked::Whole);
-                };
-                (
-                    super::view::cow_str(parts.entity)?,
-                    super::view::cow_str(parts.attribute)?,
-                    value,
-                )
-            }
-            Backing::Owned { .. } => (self.of_str()?, self.the_str()?, self.value_view()?),
-        };
-        Uri::check_stored(&of)
-            .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
-        super::view::check_relation(&the)?;
-        Ok(Checked::Pieces(
-            Piece::text(key, of),
-            Piece::text(key, the),
-            Stored::of(key, value),
-        ))
-    }
-
-    /// The checked row of `checked`, taking this row's key.
-    fn assemble(self, checked: Checked) -> CheckedRow {
+    /// Validates this row and builds its checked row in place: the pieces
+    /// are located in the key as they are checked, and the key is moved
+    /// into the row, with nothing in between.
+    #[inline(always)]
+    fn check_in_place(self, passing_over: bool) -> Result<CheckedRow, DialogCorpusError> {
+        let checked = (|| {
+            let key = self.key().unwrap_or(&[]);
+            // One walk of the key's components for all three.
+            let (of, the, value) = match &self.backing {
+                Backing::Scanned { spilled, .. } => {
+                    let parts = self.parts()?;
+                    let value = match parts.value {
+                        ValueRef::Inline(payload) => {
+                            super::decode_value_view(parts.value_type, payload)
+                        }
+                        ValueRef::Spilled { .. } => {
+                            let bytes = spilled.as_deref().ok_or_else(|| {
+                                DialogCorpusError::InvalidValue(
+                                    "spilled value key has no fetched block bytes".to_string(),
+                                )
+                            })?;
+                            super::spilled_value_view(parts.value_type, bytes)
+                        }
+                    };
+                    // An entity value is read in place only when its stored
+                    // URI is its canonical rendering, with no whitespace or
+                    // control character: both readers above check it
+                    // (`check_stored_entity`), so one that is not falls to
+                    // `to_owned`, which decides, as any value that does not
+                    // decode does.
+                    let Ok(value) = value else {
+                        return Ok(None);
+                    };
+                    (
+                        super::view::cow_str(parts.entity)?,
+                        super::view::cow_str(parts.attribute)?,
+                        value,
+                    )
+                }
+                Backing::Owned { .. } => (self.of_str()?, self.the_str()?, self.value_view()?),
+            };
+            Uri::check_stored(&of)
+                .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
+            super::view::check_relation(&the)?;
+            Ok(Some((
+                Piece::text(key, of),
+                Piece::text(key, the),
+                Stored::of(key, value),
+            )))
+        })();
         let (entity, attribute, value) = match checked {
-            Checked::Pieces(entity, attribute, value) => (entity, attribute, value),
-            Checked::Whole(row) => return row,
+            Ok(Some(pieces)) => pieces,
+            Ok(None) => {
+                return self
+                    .checked_as_owned()
+                    .map_err(|error| self.refuse(error, passing_over));
+            }
+            Err(error) => return Err(self.refuse(error, passing_over)),
         };
         let cause = self.cause().cloned();
         let key = match self.backing {
             Backing::Scanned { key, .. } => Some(key),
             Backing::Owned { .. } => None,
         };
-        CheckedRow {
+        Ok(CheckedRow {
             key,
             cause,
             entity,
             attribute,
             value,
-        }
+        })
     }
 
     fn checked_as_owned(&self) -> Result<CheckedRow, DialogCorpusError> {
@@ -837,13 +836,6 @@ impl FactView {
             value: Stored::of(&[], super::ValueView::from(&fact.is)),
         })
     }
-}
-
-/// What [`FactView::check_pieces`] found: the row's checked components,
-/// read in place, or the whole checked row, read as `to_owned` reads it.
-enum Checked {
-    Pieces(Piece, Piece, Stored),
-    Whole(CheckedRow),
 }
 
 impl Stored {
