@@ -14,6 +14,526 @@ says how to cut a release.
 
 ## Unreleased
 
+### The notation supplies its reader to `notation/read`, and a document asks it in a `select`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). The engine declares
+`notation/read` and `notation/analyze` (#900); the notation now supplies
+their code. `dialog_notation::supplied::supply(env, analyzer)` holds, in the
+environment queries run in, the crate's reader, and an analyzer over the
+definitions `analyzer` holds now.
+
+What this changes for you:
+
+- `notation/read` of a text answers a row a form the parser reads: `at`,
+  `tree` (the form as data) and its range, a line and a character from
+  zero, the character in UTF-16 units, as an editor speaking LSP counts it.
+- A document asks it in a `select`, or a `query` a select asks:
+  `(notation/read text: ?s at: ?n start-line: ?l)`. A select kept standing
+  answers again as the texts change. A rule, a write's premises and a
+  view's layer holding it are refused with `Error::Refused`, saying it is
+  asked in a `select` alone.
+- `notation/analyze` answers what the notation says of a document's forms,
+  read together, a row a thing said, `at` naming the form. It is
+  temporary: it analyzes against the definitions the analyzer given to
+  `supply` held, in memory, not the branch's, and reads nothing through
+  the engine's `Facts`. A document asking it is refused with
+  `Error::Unsupported`: nothing a document writes can build its `forms`.
+- `notation/read` and `notation/analyze` are words of the notation: no
+  concept or query may be declared under them.
+
+Why: a notebook cell reads its own text and what is said of it with an
+ordinary `select`, the maintainer's requirement (2026-11-26), with the
+names and cells the engine's.
+
+### A rule concluding a keyed entry binds its key as it binds its fields
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A rule whose head
+writes an entry of a keyed collection, `(notebook ?n block: {?k ?b})`, or
+a value in a layer a variable names, `in: ?l`, bound the key's operand,
+`block/key`, or the layer's, `v/in`, with an equality premise,
+`(== ?block/key ?k)`. It now names the variable after the operand, as a
+head's entity and fields already were, and holds no equality.
+
+What this changes for you:
+
+- Such a rule's body has one premise fewer, and its identity changes. A
+  rule written two ways that differ only in that variable's name is one
+  rule.
+- A head's layer variable that no premise binds is refused by the
+  notation, `Error::Refused`, naming the variable. Before, the
+  equality's refusal by Dialog-DB stood in for it; without it, Dialog-DB
+  would take the layer as the primary.
+- A head's key that no premise binds is refused naming the variable as
+  written, `?k`, not the operand.
+
+Why: a rule of one meaning should be one rule, whichever spelling wrote
+it. tonk binds the operand directly; by tonk's tally of its notebook's
+seventeen rules (2026-11-26), seven differed from the notation's by this
+equality.
+
+#### Compatibility and migration
+
+- A rule an earlier build of the notation installed for such a head keeps
+  its old identity on a replica. Applying the same text with this build
+  installs the new rule beside it; both conclude the same rows. Nothing
+  is rewritten. Retract the old rule's facts to drop it.
+
+### A line names any layer: `in: :session`, and `in: ?layer`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). `in:` on a line,
+which took `:control` alone, takes any layer a stack declares, by its
+keyword, and a variable. A write `in: :session` lands in that layer and
+not in the primary. A read `in: ?layer` reads every layer and binds
+`?layer` to the one each row is in: `:memory` for the primary,
+`:session` for the stack's own. The layer is compiled into the
+attribute's descriptor, `"in"`, as the engine reads it.
+
+What this changes for you:
+
+- `in: :session`, or a layer a schema declares, which was refused as
+  `Error::Unsupported` ("Dialog-DB has no layers yet"), is accepted, on a
+  concept's line as on a premise's or a write's.
+- `in: ?layer` on a write is refused with `Error::Refused`, naming the
+  variable, when nothing the write reads binds it: a write with no
+  premise, a write whose premises do not read it, a rule likewise.
+- A layer written as anything but a keyword or a variable, `in: "draft"`,
+  is refused, saying a layer is one of the two.
+- A derived attribute is still concluded and read on the default layer
+  only, whatever layer is named; the refusal now says `in: <layer>`.
+- `primitive::LAYERS` is gone; `primitive::IN` names the new wrapper and
+  `primitive::Field::layer` is a `Term` (the layer's entity, or a
+  variable) instead of a keyword's name. `Line::layer` keeps a keyword's
+  name and gives a variable as written, `?layer`.
+- A select is still answered over the branch, not the stack, so a
+  select reads the primary alone; reading a stack's layers through
+  `apply` and `answer` waits on the driver reading through the stack.
+
+Why: the maintainer, reviewing #773, expected a line to name any layer
+and a variable to name one. The engine has read and written layers by a
+descriptor's `in` since the stack landed; the notation's limit to
+`:control` predated it (`design/macros/journal.md`, 2026-11-26).
+
+### A write at the top level reads its premises as a rule does: `when` is gone
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A write at the
+top level with premises writes them after its head, as a rule does:
+`(assert (xyz.todo/state of: ?t is: :done) (todo ?t text: "Call mom" ...))`.
+It runs once, in its document, over what its premises read then, and is
+never installed. `(rule (assert …) premise…)` is the write that stays.
+
+What this changes for you:
+
+- `(assert head (when premise…))` and `(retract head (when premise…))` are
+  refused with `Error::Refused`, naming the same write with its premises
+  after its head. Move the premises out of `(when …)`.
+- Premises after a top-level write, which were refused, now run it once.
+- A command at the top level with premises is still unsupported; its
+  message now says whether it takes premises is not decided.
+
+Why: the maintainer, 2026-11-26: "I think we either keep `when` or drop it
+not flip flop around". `when` was dropped from rules on 2026-11-13 by his
+decision; 2026-11-18 put it back for a top-level write on the agent's.
+
+### A document writes no wrapper: a line says a value's type, cardinality and layer
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A value wrapped as the
+primitive forms read it, in a type `(:integer ?n)`, a pick `(:last ?x)`, a
+cardinality `(:one ?x)`, a listed type's cases `(:among ?s cases: [:a :b])`
+or a layer `(:control ?x)`, is refused wherever a document writes it, as
+`Error::Refused` naming the line to write in its place. The walker still
+writes these for a line, and the primitive forms still read them.
+
+What this changes for you:
+
+- A wrapped field of a domain read is written as a line:
+  `(xyz.n ?x v: (:one (:integer 3)))` is
+  `(xyz.n/v of: ?x is: 3 as: :integer cardinality: :one)`, `(:last ?x)` is
+  `cardinality: :one`, `(:all ?x)` is `cardinality: :many`, `(:max ?x)` is
+  `is: (max ?x)`, `(:control …)` is `in: :control`, and
+  `(:among (:entity ?s) cases: [:open :done])` is `as: [:open :done]`. This
+  holds in a write, a `when`, a rule's head and premises, a select's head
+  and premises, `unless` and a concept's body. The refusal writes the line
+  out.
+- A write of several fields of one domain under `:one`, which was one
+  read with each field wrapped, is a line a form, or a write through a
+  concept: a write's head is one application.
+- A derived attribute types its labelled fields with `as:` a map of a
+  label to its type, `(list/tally ?l status: ?s as: {:status :text})`, and
+  takes a listed type's cases as a line does, `as: [:open :done]`, where
+  `(:text ?s)` and `(:among …)` were written. An elector on its value in a
+  read is written as on a line, `(list/size of: ?l is: (max ?n))`, where
+  `(:max ?n)` was; in a head that derives, `(max ?n)` is still a fold.
+- A cardinality on a derived attribute's field, `(:one ?n)`, is refused
+  saying its cardinality is what its rules conclude, and a wrapped field
+  of a concept read saying to read the field as it is: the concept's lines
+  say it.
+- A primitive tree built through the Rust API and passed to `compile` is no
+  document, and compiles with its wrappers as before. Rules a branch
+  holds are unchanged. A document text kept and checked again is refused
+  where it writes a wrapper, and is mended by writing the line the
+  refusal names.
+
+Why: the maintainer's word, "more forms add things to keep in
+mind/context": a line already says each of these, so the wrapper was a
+second spelling of one thing.
+
+### A document is applied by the notation's own driver, its forms a sequence
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). `dialog_notation::apply`
+takes what `check` gave and runs it on a branch as one transaction, its
+forms a sequence for what they read as for what they write: each write
+with a `when` reads what the forms before it wrote, through the
+transaction, and the document commits once. Commands land at commit,
+and queries and selects are answered after it.
+
+What this changes for you:
+
+- New, with the `repository` feature: `stage(transaction, &checked,
+  &env) -> Result<(T, DocumentReport), ApplyError>` stages a document
+  into a transaction the caller holds, a `Transaction<&Branch>` or a
+  `StackTransaction<&Branch>` (the sealed trait `Stage`), and never
+  commits; its `DocumentReport` says per form whether it was refused
+  and what it did (`Did`: asserted, retracted, issued, installed, a
+  `when` read and then each match it wrote, asked, or the same as an
+  earlier form). `answer(&branch, &checked, &env) -> Answers` answers
+  the queries, selects and views after the caller's commit, form by form:
+  each `FormAnswer` names its form as the report does and holds its own
+  `Result<Answer, LiveError>`, `Answer::Rows` or `Answer::Rendered`, so a
+  form that fails hides no other. `apply(&branch, &checked, &env) ->
+  Result<Applied, ApplyError>` is the two on a branch, with the `Writer`
+  bound it takes. `Applied` holds the revision, the answers, the
+  warnings and the report.
+- `ApplyError` is what writes nothing: `Refused` (the first refusal),
+  `Notation` and `Evaluation` (a write's `when` failed as it ran), and
+  `Commit`. Once the document has committed, a form not answered is its
+  own entry's error.
+- `Did::Installed` says what was installed, an `Installation`:
+  `Deduction`, `Induction` or `Transient`. A rule, concept or query
+  written again is `Did::Repeats(earlier)`.
+- `Checked` is read through methods: `analyzed()`, `steps()`,
+  `step_forms()`, `declarations()`, `declaration_forms()`,
+  `diagnostics()` and `refusals()`, where its fields were public. What a
+  form repeats is in the report, `Did::Repeats`.
+- Narrowed, as no embedder reads them: `Checked.written`; `Analyzer::analyze_forms`
+  (`check_forms` stays); the fields of `Selection` and `Folded`, and of
+  `Plan` but `given`; the plan's parts (`Layer`, `Condition`, `Count`,
+  `FoldedCount`, `Place`, `Placed`, `Source`, `Why`); a template's tree
+  and the reading of one (`Node`, `Element`, `Attribute`, `Piece`,
+  `Event`, `Input`, `CALLED`, `view::template`, `view::variables`,
+  `view::events`); `Signature`; and the one-shot `Live::render`
+  (`answer` renders a view). The `inspect` feature, for the tests, still
+  shows them. What stays public that `stage` and `answer` cover is
+  marked as plumbing in its docs.
+- A write's `when` reads the forms before it in its document: an assert
+  and then a retract by the entity alone retracts what the assert wrote,
+  and a `when` matches a claim an earlier form asserted. It read the
+  branch as it stood before the document. A `when` of several premises
+  reads through a rule laid over that read alone
+  (`TransactionQuery::with_rule`).
+- A command a form issues, and what the rules it fires write, land at
+  commit: a later `when` reads the command through its relations, but
+  not what a rule makes of it. Under `cardinality: :one` a claim a rule
+  writes succeeds the newest, one a form of the same document wrote too
+  (#872).
+- The document is built again over the head that won when another
+  writer moves the branch first (`Branch::transact`), its `when`s read
+  again.
+- An embedder that drives `Step`s itself keeps none of this unless it
+  does what `apply` does. Call `apply` instead.
+
+Why: what a document means is the notation's, not each embedder's. A
+driver in the test support read each `when` from the branch before the
+document, so a document's forms were a sequence for writes and not for
+reads, and an embedder had to rediscover the rule to get it right.
+
+### A concept read that leaves fields out says `...`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A read of a concept names every field, or ends with `...`. One that
+leaves fields out without it is refused, naming the fields it leaves out
+and the read written with `...`:
+
+```clj
+(concept (todo ?t list: ?l title: ?title state: ?s) …)
+(select (todo ?t title: ?title))      ; refused: leaves out list: state:
+(select (todo ?t title: ?title ...))  ; reads every to-do's title
+```
+
+What this changes for you:
+
+- A read in a select, a rule's or a query's premise, or under `unless`
+  that leaves fields out is `Error::Refused` until it ends with `...`.
+- Of several concepts of one name, a read without `...` fits the one
+  whose fields are those it says; with `...` it is read through every one
+  whose fields include its own, as every fitting one was read before.
+- A write is not a read and is unchanged: an assert says every field,
+  and a retract every field or the entity alone.
+- A retract at the top level by a variable entity and no field,
+  `(retract (todo ?t))`, is refused as `a write with no premise needs
+  its entity`, as one naming fields was. It retracted every to-do.
+  `(retract (todo todo:1))`, and the same in a rule with premises, are
+  unchanged. One field is retracted through its relation,
+  `(retract (xyz.todo/state of: todo:1 is: :open))`.
+
+Why: a read that leaves fields out by mistake read nothing about them
+and said nothing; `...` says it is meant.
+
+### A name is checked where it is written
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A name decides which relation a form reads or writes, and which definition it applies. One the notation or Dialog-DB would read otherwise than it is written is refused at the form that writes it, naming the name and why.
+
+What this changes for you:
+
+- A name that is no name is refused wherever it is applied or labels
+  a part: empty, with space in it, beginning or ending with a `/` or
+  with two together, `a/`, `/a`, `a//b`, `a/b/`, or an attribute whose
+  name holds a `/`, `a.b/c/d`, which was read as a stored attribute
+  `c/d`. Words with a single `/` between each two, `notebook/blocks`
+  and `nb/blocks/count`, are names as before.
+- No concept, query, command or derived attribute is named with a `.`
+  anywhere: `xyz.memo/note`, `a.b/c`, `a/b.c` and `my/list.count` are
+  refused as `xyz.memo` was. A name with a `.` is stored, read directly.
+- No concept, command or query is declared under an entity, `(concept
+  (a:b ?x …) …)`, which was kept as a rule about syntax nothing read, or
+  under one of the notation's own words, `concept`, `select`, `query`,
+  `rule`, `assert`, `retract`, `report`, `unless`, `once`, `is`, `this`,
+  `all`, `when`, `view`, `rows`, `expand`, `syntax`, `warning`,
+  `quote`, `collect`, `distinct`, the words of a query's plan `call`, `required` and
+  `missing`, `dialog/position` and the folds `count`, `count-distinct`, `sum`,
+  `min`, `max`, `avg` (`syntax::FORMS`), which it would shadow, and nor
+  is a document's macro, whatever its template. The refusal names the
+  name and why.
+- A declared name is strict kebab-case in each part between `/`:
+  lowercase words of letters and digits joined by one `-`, starting with
+  a lowercase letter, `[a-z][a-z0-9]*(-[a-z0-9]+)*`. A concept, query,
+  command, document macro or derived attribute named otherwise, `café`,
+  `Todo`, `to_do`, `to--do`, `a#b`, a name with a zero-width space, is
+  refused naming
+  the part and the character, where it was declared and read under
+  exactly what was written. So is a field a declaration declares: a
+  concept's, a command's or a query's head label, and a derived
+  attribute's head label, which Dialog-DB refused at compile in its own
+  terms. A select head's labels, a value's map keys and variables are
+  free.
+- A name of words joined by `/` with no `.` is never read as a stored
+  attribute: `(foo/x ?x ?n)` under no concept `foo/x` or `foo` is refused,
+  saying neither is declared above what reads it, in a rule's head, its
+  premises, `unless` and a select, where it was read as a relation `foo`
+  and refused as `?x applies no relation` or `(foo ?x x: ?n) is not a
+  primitive premise`. `(xyz.t/name ?x ?n)` reads the stored attribute as
+  before.
+- A name Dialog-DB cannot keep is refused naming it, its length and the
+  limit, where it was refused as `not a symbol: Invalid attribute:
+  Relation "/<name>" …` or `invalid relation ".a/name"`: a name of no
+  `.` is at most 63 bytes, or 64 with a `/` in it; a domain or an
+  attribute at most 64, and a domain's read `(xyz.t ?x label: …)` at most
+  64 for `xyz.t/label`; no name holds a NUL; and no domain has an empty
+  part between its dots, `.a`, `a.`, `x..y`. A derived attribute's
+  written name, `nb/blocks/count`, is kept under a hash and may be longer.
+- A label under the notation's namespace, `dialog.n.c.<hash>/is:` or
+  `dialog.n/x:`, is `Error::Reserved` wherever it is written, so no
+  document concludes or reads a derived attribute by its hash. A label
+  with a `/`, `io.contact/email:`, is refused: a label is a field of the
+  read's own domain, and another domain is read by itself.
+- A name is a concept or a derived attribute of one, never both: with
+  `list` and `list/open` both declared concepts, `(list/open ?l ?n)` or
+  `(list/open ?l is: ?n)` is refused naming the declaration of
+  `list/open`, where it was `nothing says what (list/open ?l ?n) is`.
+  `check_forms` quotes the author's form in what the compiler refuses,
+  as `check` does, where it quoted the rule it expanded to.
+- A concept whose body reads another concept, `(concept (doc/plain ?d
+  part: ?v) (alt ?d v: ?v))`, is declared as a concept whatever its name.
+  Under a name whose first part was a declared concept it was read as a
+  derived attribute that nothing concludes, and answered nothing.
+- A read above the use of a macro that declares the concept it reads
+  is read once the use has declared it, as a read above a `(concept …)`
+  is, where it was refused, saying to declare the concept above.
+
+Why: a misspelled or misplaced name read silently as another relation answers nothing and says nothing; refused where it is written, it is mended where it is written.
+
+### A derived attribute is named by what was written and read as a line reads
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A derived attribute, `list/label`, is the author's relation: a tree names it by what was written, it is read with `of:`, `is:` and `as:` as a line is, and it lives on the default layer.
+
+What this changes for you:
+
+- An analyzed tree names a derived attribute by what was written,
+  `dialog.n.c/list/count-open`, and no longer by the hash Dialog-DB
+  knows it by, which `compile` makes from that name: a tree analyzed in
+  one process compiles in any other. `compile` refuses as
+  `Error::Reserved` any `dialog.n.c.<hash>` text, a malformed derived
+  name, and a tree that asserts, retracts or issues into the notation's
+  namespace. A tree analyzed by an earlier release holds hashes and is
+  refused: analyze its document again. `nb/blocks/count` is the field
+  `count` of the concept `nb/blocks`, split at the last `/`.
+- A derived attribute read with its entity under `of:`,
+  `(list/label of: ?l is: ?n)`, is read as `(list/label ?l ?n)`, of which
+  it is the spelling, where it was refused as needing its entity. `as:`
+  on it is the type of the value under `is:`, as on a line,
+  `(list/label of: ?l is: ?n as: :text)`, where it was read as a field
+  named `as` and answered nothing. `cardinality:` on one is refused, its
+  cardinality being what its rules conclude, and so is `as:` with no
+  `is:` to type.
+- A read of a derived attribute's label that no rule the analyzer knows
+  concludes of it, `(select (list/label ?l wat: ?q))` beside a rule
+  concluding `is:` and `other:`, is a warning naming what they conclude,
+  never a refusal: a rule on the branch may conclude it. With no
+  conclusion of the attribute known nothing is said, so a read before
+  the document that concludes it is accepted as before.
+- A derived attribute is concluded and read on the default layer only:
+  `in: :control` on one, `(list/label of: ?l is: ?n in: :control)`, in a
+  rule's head, where it issued a command into the attribute every round,
+  and in a read, where it answered nothing, is refused naming the
+  attribute and the layer, where it was kept as a field named `in`. A
+  command is a concept of its own.
+- A line of a concept or a command is a stored attribute: one that names
+  a derived attribute, `(concept (list/go label: ?x) (list/label of: ?c
+  is: ?x in: :control cardinality: :many))`, is refused at the
+  declaration naming the line, where the concept was left undeclared and
+  its use refused as an attribute of `list`. A line is told by
+  `cardinality:`, `as:`, `in:` or `by:`.
+
+Why: a derived attribute should read as a stored one does, and a tree should compile in any process that reads it.
+
+### A write does what it says
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). Each write below wrote something other than what its form says, or failed only at the commit. Each now writes what it says, or is refused when it is checked.
+
+What this changes for you:
+
+- A write under `dialog.` that Dialog-DB refuses to commit, `(assert
+  (dialog.meta x:1 description: "z"))`, is refused when it is checked, in
+  the author's terms, once per form, where it was accepted and the commit
+  failed with Dialog-DB's text. The facts of rules, concepts, layers,
+  commands and providers and a branch's revision and tree are written as
+  Dialog-DB writes them, and every read stays allowed.
+- A write written again in a document is a step again, in its place:
+  `(assert X) (retract X) (assert X)` leaves `X`, and a write with a
+  `when` written twice runs twice. The second was dropped as a copy of
+  the first, as a rule or a concept written again is, which installs
+  nothing new and is still kept once.
+- A formula in the head of a write with a `when`,
+  `(assert (n ?t v: (+ ?v : 1)) (when (n ?t v: ?v)))`, is computed from
+  each match, as the same head in a rule is, where it was refused saying
+  the write had no premise.
+- A case a listed type does not list, written as a constant, is
+  refused naming the listing: `(assert (k x:1 lvl: :huge))` under
+  `as: [:low :mid :high]`, the same in a write with a `when`, in a rule's
+  head and in a command, where it was stored. A retract of such a case
+  is not refused, so a claim stored before can be taken back. A case a
+  variable carries is still written as it is bound (gaps row 55).
+- A retract through a concept by its entity alone, `(retract (p x:1))`
+  or a rule's `(retract (p ?t))`, retracts every claim of each of the
+  concept's fields on that entity, where it retracted only the claim a
+  read under `cardinality: :one` or an elector picked, so an older claim,
+  another replica's, was left and read again. Each field is retracted
+  apart from the others, so an entity that holds nothing of one field
+  loses every claim of the rest, where it lost nothing. It compiles to a
+  step for each field, a `Step::Write` at the top level and a
+  `Step::Induce` in a rule, where it was one.
+
+Why: a write that silently writes something else is the costliest kind of mistake: nothing says it happened.
+
+### A refusal is said in the author's terms
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). What the crate refuses names what the author wrote and says what to write instead, never the compiler's own names for it.
+
+What this changes for you:
+
+- Every error the crate gives is in the author's terms: `compile`
+  called directly, and `LiveError`'s `Notation` and `Rule`, as `check`
+  was. `LiveError::Evaluation` shows Dialog-DB's own text, which may
+  name a derived attribute by its hash; `Standing::told` and
+  `Watched::told` say it in the author's terms. A head variable no
+  premise binds is named as written, `?z`. `Error::Clash` no longer
+  shows the relation; it names the two sites, and from `Live` "a
+  selection another document laid on this branch" for the one it has
+  no form of.
+- Refusals say what the author can act on. One that offers the stored
+  attribute to write instead offers one that is accepted, its domain
+  dotted, `xyz.foo.bar/baz` for `foo/bar/baz`. A word with a `:` that is
+  no entity, `:on/htmx:after-swap`, is refused saying so, not in the URI
+  parser's text. A read of a concept with a field wrapped in a type, a
+  cardinality or a pick, `(a ?t n: (:one ?v))`, is refused saying that
+  the concept's lines say the field's type and cardinality, and to read
+  the field as it is, `n: ?v`. A select whose only premise must not hold is told
+  that its first part is its head and is not read. `check` says a
+  compile refusal once per form. An element a view does not make,
+  `[:svg]`, is `Error::Refused` saying so, and `Error::Unsafe` only where
+  it would let a row's values reach script.
+- A refusal names what the author wrote: the author's form where it
+  quoted the compiled rule, `?t` for the notation's `?t[0]`, and `_`
+  for a variable the notation made for none. Dialog-DB's "Required
+  bindings ?[2], part" is said as the head concluding under `part:` what
+  its premises do not bind.
+
+Why: an author mends what they can read, and the compiler's names are not theirs.
+
+### What a read gathers is `(distinct ?x)`, a set
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). What a read gathers is marked `(distinct ?x)` and is a set; `(count ?x)` counts it.
+
+What this changes for you:
+
+- What a read gathers is marked `(distinct ?x)`, Datomic's word for the
+  set of a variable's distinct values, where it was `(collect ?x)`.
+  `(collect ?x)` is refused saying to write `(distinct ?x)`. What is
+  gathered, and what `(count ?x)` of it counts, is unchanged: a set.
+- A count asked of what was not gathered says that count counts what
+  was gathered, a set of distinct values, and how to count entities:
+  gather a record that holds each, then count it. A fold not there yet
+  names the one that is, `(count ?x)`. The crate's documentation says
+  what a collection holds and what is counted, against Datomic.
+
+Why: it is Datomic's word for what it is, a set of distinct values, confirmed by the maintainer on 2026-11-25.
+
+### A view refuses what a page would read otherwise
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773). A view's attribute names and event bindings are refused where a page would read them otherwise than written, and a listed case renders by its name.
+
+What this changes for you:
+
+- A view's attribute name is one a page can set, a letter or `_`, then
+  letters, digits, `-`, `_`, `.`, with at most one `/` between two such
+  parts: `{:a//b …}`, `{:a/ …}` and `{:-a …}` are refused naming the
+  attribute, where they were given to the back end. An event's path has
+  a step between each two `.`: `..x`, `.a..b` and `.a.` are refused,
+  where empty steps were dropped; a bare `.` is read as before. An event
+  names its kind: `:on/` is refused, and so is a kind under `dialog.n`.
+  A kind is otherwise free-form, as a custom DOM event's is.
+- A view shows a case of a listing by its name: `:open` renders as
+  `open`, where it rendered as `open:`, its entity. An entity with more
+  after its colon, `todo:1`, renders as before.
+
+Why: a back end hands what a view says to a page as is; what the page would drop or misread is refused before it gets there.
+
+### The notation elects by `min` and `max`, and refuses `top`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773).
+
+A concept field's elector is `min` or `max`, written in the concept's
+head, `status: (max ?s)`, or on a line's value, `is: (max ?s)`. Over a
+listed `as:` they rank by the listing, written least first: `min` elects
+the case listed first and `max` the case listed last.
+
+```clj
+(concept (account ?a status: (max ?s))
+  (xyz.account/status of: ?a is: ?s
+    as: [:registered :active :suspended] cardinality: :many))
+```
+
+What this changes for you:
+
+- A document that writes `top`, `(top ?s)` or `(:top ?s)`, is refused
+  with `Error::Refused`, naming the replacement: `top` over a list is
+  `max` over the list reversed, or `min` over the same list.
+- A concept that elected by `top` is rewritten with `max` over its list
+  reversed; its identity changes, as any concept's does when its
+  descriptor does.
+
+Why: #858 ranks `max` and `min` over a listed type by the listing and
+deprecates `top`; the notation does not keep a spelling the engine is
+taking away.
+
 ### The engine declares `notation/read` and `notation/analyze`, and a dialog crate supplies their code
 
 [#900](https://github.com/dialog-db/dialog-db/pull/900), in place of
@@ -200,6 +720,7 @@ a number happened to be read as; computing at the wider precision and
 letting a narrower reader truncate the result is what a stored float
 already gets.
 
+
 ### A query reports the rules it left out, as it runs
 
 [#889](https://github.com/dialog-db/dialog-db/pull/889)
@@ -237,6 +758,7 @@ What this changes for you:
 
 Why: a query that answers without a rule it would have used should say
 so, and say it while it runs, not only after every row is read.
+
 ### One number held as two types groups, counts and joins as one
 
 [#888](https://github.com/dialog-db/dialog-db/pull/888)
@@ -901,6 +1423,168 @@ What this changes for you:
 Why: an embedder can build such a descriptor without the notation, and
 a descriptor a caller can build must not take the process down.
 
+### Dialog-DB has a notation: concepts, rules, queries and views written as forms, in `dialog-notation`
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/design-queries.md](./design/macros/design-queries.md) and
+[design/macros/claims.md](./design/macros/claims.md).
+
+`dialog-notation` reads a Lisp-like notation and compiles it to
+Dialog-DB's own descriptors. A small set of primitive forms (`rule`, the application of
+a relation or a formula, and the writes) is all that is compiled; every
+other form is a macro written as a rule about syntax, in a prelude the
+crate reads. `(concept (todo ?t title: ?x) line…)` declares a concept, a
+line being one attribute: `(xyz.todo/title of: ?t is: ?x as: :text
+cardinality: :one)`. `(rule head premise…)` derives or writes.
+`(query (name ?e … is: ?answer) condition… (is ?answer shape))` defines
+a query that nests and collects, and `(view ?answer template)` in its
+body makes its answer markup. Asking is `(select …)`.
+
+A query's reads run as Dialog-DB queries, each reporting its rows under
+the entity they are about. A read that collects one variable or one
+entry is folded by Dialog-DB's `Fold` where its shape allows; a collected
+call to another query, the shapes built in an answer and the joins
+between queries are put together by the crate from the rows. A view
+compiles to a `Plan` of layers, each one Dialog-DB query, and the
+driver turns the rows that arrive and leave into patches of the rendered
+tree. `dialog_notation::live` keeps a selection or a view
+current on a branch: `Live::select` asks once, `Live::standing` and
+`Live::watch` subscribe and give the answers or the patches on each
+poll.
+
+What this changes for you:
+
+- A new crate, `dialog-notation`, with a `repository` feature, on by
+  default, that brings the driver (`live`) and depends on
+  `dialog-repository`. Without it the crate is the reader, the analyzer
+  and the compiler, and does not depend on the repository.
+- `Live::select(&selection, env)` gives the answers asked once, each
+  query's rule laid over a query layer for it alone; a document's views
+  are rendered once by `answer`. `Live::standing(selection)`
+  gives a `Standing` and `Live::watch(plan, entity)` a `Watched`, whose
+  `poll(env)` gives the answers again when a row moved, or the view's
+  patches. Their rules are laid on the branch's session overlay and taken
+  off when the last `Standing` or `Watched` holding them is dropped. A
+  poll that fails loses nothing that the next poll does not give. `Reader`
+  is the env a poll reads through, and `LiveError` what fails.
+- The crate's surface is what is named at its root and in its modules
+  `apply`, `live` and `view`: `read`, `parse`, `parse_document`,
+  `parse_written`, `print`, `check`, `check_forms`, `Analyzer`, the
+  driver (`stage`, `answer`, `apply`), `compile` and the types they give,
+  the `Plan` of a view and the rendered tree and `Patch`es it gives. The
+  `inspect` feature also exposes, for tests, a template's tree, a plan's
+  parts, the maintainer of a view's tree and what a driver evaluated.
+- Every name the notation makes for itself is under `dialog.n`,
+  and a document that names anything under it is refused with
+  `Error::Reserved`. Its own variables are spelled with a `[`, which no
+  document can write in a variable. A field may not be labelled `this:`.
+  `syntax.meta` is read and never written.
+- A view's template makes only the HTML elements of sections and text,
+  lists, tables, forms and media, and custom elements; every other
+  element, SVG and MathML among them, is refused, with `Error::Unsafe`
+  where it would let a row's values reach script and `Error::Refused`
+  otherwise.
+  Of the attributes it refuses the shapes known to let a row's values
+  reach script: a name or local name `on…`, `xml/base`, `srcdoc`, a
+  `style` a value writes, a `srcset` a value is written into, and a URL
+  attribute, older HTML's included, whose fixed start neither names
+  `http`, `https` or `mailto` nor is a path, a query or a fragment. A
+  namespaced name written with `/` is compared as `xlink:href`. It is no
+  sanitizer: a back end still escapes every text and attribute value it
+  serialises.
+- A derived attribute, `(rule (list/count-open ?l ?n) …)`, concludes the
+  relation `dialog.n.c.<hash>/is`, and one concluded with labels,
+  `(rule (list/count-open ?l open: ?n done: ?d) …)`, the relation of
+  each label it names, `dialog.n.c.<hash>/open`; the hash 128 bits of the
+  reference of the concept's name and the attribute's as written: one
+  length whatever the names, and two names that spelled one relation
+  before are two. A refusal and an answer name it as written,
+  `(list/count-open list:home is: 3)`; only the trees compiled for
+  Dialog-DB hold the hash, which `Analyzer::spelled` writes as the name.
+- A set, `{: "errand" : "home"}`, is a value: an answer that holds one
+  reads back from its text and `Syntax::value` keeps it in the order of
+  its members, refusing a member twice. A set whose members are not all
+  constants, `{: ?a : 5}`, is refused with `Error::Unsupported` where it
+  would be matched or written, since a stored set is a list matched in
+  order. The empty set is written `{:}` and the empty map `{}`: a
+  collected set with no member answers `{:}`, the two read back as two
+  trees and make two values, and `{:}` is stored as the empty list and
+  found by a pattern `{:}`. A blank member of a set, `{: _}` written
+  out or `{: 1 :}`, is refused by the reader.
+- `check(analyzer, text)` gives, form by form, what a document compiles
+  to, its diagnostics, and its declarations as data
+  (`Declaration::Concept`, `Declaration::Query`).
+- A line's `cardinality:` is the attribute's, and every line of a
+  concept or a command writes one, `cardinality: :one` or
+  `cardinality: :many`: a line that says none is refused at that form.
+  A line read in a rule's body or a select needs none and reads every
+  claim. An elector in a concept's head, `status: (max ?s)`, or on a
+  line's value, `is: (max ?s)`, is the concept field's `pick`; a
+  variant's cases, `as: [:open :done]`, are the attribute's listed
+  values, least first. A listed `as:` with no elector chooses nothing.
+- A view's `(count ?x)` of what its own markup collects is kept by
+  `Branch::subscribe_fold`.
+- Refused, each with what to write instead or why: a fold in a rule
+  that derives, a query applied by a rule or a concept, `distinct` outside
+  a query, a query that calls itself, a retract of a command, and the
+  other forms listed by `Error::Unsupported`.
+
+Why: a form costs a release when its meaning is in code. A notation
+whose forms are rules about syntax can grow without one, and the same
+text means the same to a person, an agent and a replica. Queries and
+views are the second layer because no rule may read a fold; the engine
+folds, and the notation evaluates only what the engine cannot yet state.
+
+### A rule can name an entity it did not read
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/primitive.md](./design/macros/primitive.md).
+
+A rule that concludes a fact of an entity its premises did not bind, the
+row of a command it issues or a record it creates, had no way to name
+that entity. The formula `entity/derive` makes one from two values: `id:`
+followed by the base58 of the two values' references, as a list under the
+type `id:`. Equal values name one entity on every replica. Deriving again
+from the result takes in one more value, and the order values are taken
+in is part of the name.
+
+What this changes for you:
+
+- `entity/derive` is a formula: `{ "assert": "entity/derive", "where":
+  { "of": …, "with": …, "is": … } }`. In Rust it is
+  `dialog_query::formula::entity::Derive`, and
+  `dialog_query::formula::entity::derive` is the same function for a
+  caller that has both values.
+- A derived entity has the scheme `id:`. Nothing reserves the scheme: an
+  entity written `id:…` by hand is an entity like any other.
+
+Why: a command a rule issues is a fact of a new entity, and that entity
+has to be the same wherever the rule fires on the same bindings. Nothing
+but the bindings can name it.
+
+Its two cells are a stand-in, and this entry is not to be released as it
+reads: the formula is to take one record once a rule can build one, and
+the entities it names will change with it.
+
+### A fold can give the set of a group's values
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773).
+
+`Aggregator::Distinct` folds a group to its distinct present values, a
+composite list in the order of their bytes, each value once; a group
+whose inputs are all absent gives the empty list. It is what a folding
+query (`Fold`, `Branch::subscribe_fold`) gives for the whole of a field.
+
+What this changes for you:
+
+- `dialog_query::reduce::Aggregator` has a `Distinct` case. A `match`
+  over it that lists every case needs one more arm.
+- No rule's `reduce` spells it: `"distinct"` does not deserialize as an
+  aggregator, as `top` does not.
+
+Why: #839 left it out because a list had no value to be on main; the
+composite value is that value now.
+
 ### Every identity generation a release computed is named, and the current one is a constant
 
 [#859](https://github.com/dialog-db/dialog-db/pull/859).
@@ -1462,6 +2146,17 @@ answer still paid in the size of its cover was building, copying and
 dropping that scope.
 
 #### Compatibility and migration
+
+- A concept the notation declared with `top` before this release keeps
+  its stored `pick: top`, which the engine reads as before until it
+  removes `top`. The notation no longer writes `top`; declaring the
+  concept again with `max` over its list reversed stores a new concept, with
+  a new identity. Nothing is rewritten automatically.
+- The notation stores nothing of its own: what it writes are concepts'
+  facts and rules in the formats this release writes. A rule that uses
+  the formula `entity/derive` is read by no older release, which does
+  not know the formula; nothing an older release wrote is rewritten.
+  `Aggregator::Distinct` is never stored. Nothing an embedder has to run.
 
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a

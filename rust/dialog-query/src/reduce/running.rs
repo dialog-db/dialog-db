@@ -120,7 +120,8 @@ impl Running {
                     chosen: None,
                     held: 0,
                 }),
-                Aggregator::Avg | Aggregator::Last | Aggregator::Top => None,
+                // A set of values is built whole again, as `avg` is.
+                Aggregator::Avg | Aggregator::Last | Aggregator::Top | Aggregator::Distinct => None,
             })
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
@@ -570,10 +571,15 @@ mod tests {
         Ok(())
     }
 
-    /// `avg`, `last` and `top` have no running value.
+    /// `avg`, `last`, `top` and `distinct` have no running value.
     #[dialog_common::test]
     fn it_runs_no_average_and_nothing_ordered_by_standing() {
-        for aggregator in [Aggregator::Avg, Aggregator::Last, Aggregator::Top] {
+        for aggregator in [
+            Aggregator::Avg,
+            Aggregator::Last,
+            Aggregator::Top,
+            Aggregator::Distinct,
+        ] {
             assert!(!reduce(aggregator).runs());
             assert!(Running::new(&reduce(aggregator)).is_none());
         }

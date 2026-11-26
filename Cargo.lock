@@ -1658,6 +1658,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-notation"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "base58",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-effects",
+ "dialog-notation",
+ "dialog-peer",
+ "dialog-query",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "dialog-varsig",
+ "futures-util",
+ "merkle-reference",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-number"
 version = "0.5.0"
 dependencies = [

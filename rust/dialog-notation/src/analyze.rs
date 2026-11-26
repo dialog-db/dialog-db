@@ -1,0 +1,381 @@
+//! Analysis: the second phase, from syntax trees to analyzed trees.
+//!
+//! The analyzer is given the trees a document parsed to. A rule about
+//! syntax among them is kept as a definition; every other tree is
+//! rewritten by the definitions in force until it is a rule of the
+//! primitive. What comes back is those rules, the analyzed trees, and
+//! what the definitions said about the document.
+//!
+//! The definitions are held here, in memory. They are to be read from a
+//! replica, which is why this phase and not the others is the one that
+//! reads a database.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::diagnostic::{Diagnostic, Severity};
+use crate::expand::Expander;
+use crate::{Error, Syntax};
+
+/// What analysis made of a document.
+///
+/// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+/// and [`answer`](crate::answer), and should prefer them over this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Analysis {
+    /// The analyzed trees: every one a rule of the primitive forms, in the order
+    /// their forms were written. A form several definitions take is a
+    /// rule a definition. None when any tree of the document is
+    /// refused.
+    pub analyzed: Vec<Syntax>,
+    /// For each analyzed tree, which tree of the document it came of.
+    pub origin: Vec<usize>,
+    /// Each tree of the document that came to a rule an earlier tree
+    /// came to as well, a rule, a concept or a query written again, with
+    /// that earlier tree: the rule is analyzed once, at the earlier tree.
+    /// A write written again is analyzed again, in its place.
+    pub repeats: Vec<(usize, usize)>,
+    /// Everything there is to say about the document, each with the
+    /// way to the form it is about: every refusal, in the order of
+    /// their trees, and then what the definitions said without
+    /// refusing.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Analysis {
+    /// The refusals: the diagnostics that are errors.
+    pub fn refusals(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity() == Severity::Error)
+    }
+}
+
+/// The second phase, with the definitions it has been given.
+#[derive(Clone, Debug)]
+pub struct Analyzer {
+    expander: Expander,
+}
+
+impl Analyzer {
+    /// `text` with each derived attribute's relation this analyzer made
+    /// written as the name it is written by, `list/count-open`, in place
+    /// of the hash that names it: for what is shown of the trees compiled
+    /// for Dialog-DB, [`crate::Checked::analyzed`]. Refusals from `check`
+    /// and answers are written so already.
+    pub fn spelled(&self, text: &str) -> String {
+        crate::syntax::told(text)
+    }
+
+    /// An analyzer that knows the core forms.
+    pub fn new() -> Result<Self, Error> {
+        Ok(Analyzer {
+            expander: Expander::new()?,
+        })
+    }
+
+    /// Analyze `trees`: keep the definitions among them, and give every
+    /// other analyzed.
+    ///
+    /// Analysis does not stop at a refusal. It goes on to the end of
+    /// the document and says every one, so an editor can show them all.
+    /// A document with a refusal in it is refused whole: none of its
+    /// trees comes back analyzed and none of its definitions is kept,
+    /// so the same document can be analyzed again once it is mended.
+    ///
+    /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
+    /// and [`answer`](crate::answer), and should prefer them over this.
+    pub fn analyze(&mut self, trees: &[Syntax]) -> Analysis {
+        let mut trial = self.expander.clone();
+        let (analyzed, diagnostics) = trial.check(trees.to_vec());
+        let analysis = Analysis {
+            analyzed,
+            origin: trial.origin().to_vec(),
+            repeats: trial.repeats().to_vec(),
+            diagnostics,
+        };
+        if analysis.refusals().next().is_some() {
+            return Analysis {
+                analyzed: Vec::new(),
+                origin: Vec::new(),
+                repeats: Vec::new(),
+                ..analysis
+            };
+        }
+        self.expander = trial;
+        analysis
+    }
+
+    /// What `trees` analyze to, with nothing of them kept: the
+    /// analyzer is as it was.
+    pub(crate) fn trial(&self, trees: &[Syntax]) -> Analysis {
+        let mut trial = self.expander.clone();
+        let (analyzed, diagnostics) = trial.check(trees.to_vec());
+        Analysis {
+            analyzed,
+            origin: trial.origin().to_vec(),
+            repeats: trial.repeats().to_vec(),
+            diagnostics,
+        }
+    }
+
+    /// Forget what the forms `refused` of the document last analyzed
+    /// form by form were recorded as using: a form refused after
+    /// analysis, when it was compiled, installed nothing.
+    pub(crate) fn forget(&mut self, refused: &BTreeSet<usize>) {
+        self.expander.forget_uses(refused);
+    }
+
+    /// Analyze `trees` form by form. A form that is refused gives no
+    /// analyzed tree, and every other form gives its own; each refusal
+    /// says the way to the form it is about. What the forms define is
+    /// kept, so the analyzer is not left as it was when a form is
+    /// refused, as it is by [`analyze`](Self::analyze).
+    ///
+    /// Two forms that define one name are both refused, whichever comes
+    /// first, and what neither defines is analyzed without them: which
+    /// of them would stand would depend on their order.
+    pub(crate) fn analyze_forms(&mut self, trees: &[Syntax]) -> Analysis {
+        let before = self.expander.clone();
+        let mut skipping: BTreeMap<usize, Error> = BTreeMap::new();
+        loop {
+            let (analyzed, diagnostics) = self.expander.check(trees.to_vec());
+            let twice = std::mem::take(&mut self.expander.twice);
+            if twice.is_empty() {
+                return Analysis {
+                    analyzed,
+                    origin: self.expander.origin().to_vec(),
+                    repeats: self.expander.repeats().to_vec(),
+                    diagnostics,
+                };
+            }
+            for (first, second, error) in twice {
+                skipping.entry(first).or_insert_with(|| error.clone());
+                skipping.entry(second).or_insert(error);
+            }
+            self.expander = before.clone();
+            self.expander.skipping = skipping.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::written::{Point, Segment, Span};
+    use crate::{parse, parse_written};
+
+    /// A warning says the way to the form it is about, which the
+    /// mapping the parser gave turns into a place in the text. An
+    /// analyzed tree says which tree it came of.
+    #[dialog_common::test]
+    fn it_says_where_the_form_a_warning_is_about_is() -> Result<(), Error> {
+        let text = "(concept (todo/add text: ?x)
+  (xyz.todo.add/text of: ?c is: ?x in: :control cardinality: :many))
+
+(rule (assert (todo/add text: ?x))
+  (xyz.draft ?t text: ?x))
+";
+        let (trees, written) = parse_written(text)?;
+        let analysis = Analyzer::new()?.analyze(&trees);
+        let [warning] = analysis.diagnostics.as_slice() else {
+            panic!("one warning: {:?}", analysis.diagnostics);
+        };
+        assert_eq!(warning.message, "no rule reads this command");
+        assert_eq!(
+            warning.path,
+            vec![Segment::Item(1), Segment::Item(0), Segment::Item(0)]
+        );
+        assert_eq!(
+            written.span(&warning.path),
+            Some(Span {
+                start: Point {
+                    line: 3,
+                    column: 14
+                },
+                end: Point {
+                    line: 3,
+                    column: 33
+                },
+            })
+        );
+        // The concept is kept as a definition, so the one analyzed tree
+        // is the rule's.
+        assert_eq!(analysis.origin, vec![1]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_gives_an_analyzed_tree_a_form_and_keeps_a_definition() -> Result<(), Error> {
+        let mut analyzer = Analyzer::new()?;
+        let analysis = analyzer.analyze(&parse(
+            "(concept (task ?t title: ?x)
+               (xyz.todo ?t text: ?x))
+             (select (task ?t title: ?x))",
+        )?);
+        assert!(analysis.diagnostics.is_empty());
+        assert_eq!(
+            analysis.analyzed,
+            parse("(rule (report (xyz.todo ?t text: ?x)) (xyz.todo ?t text: ?x))")?
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_says_what_nothing_defines_and_where() -> Result<(), Error> {
+        let mut analyzer = Analyzer::new()?;
+        let analysis = analyzer.analyze(&parse("(rule (report (xyz.a ?x n: ?n)) (nonesuch ?x))")?);
+        let [refused] = analysis.diagnostics.as_slice() else {
+            panic!("one refusal: {:?}", analysis.diagnostics);
+        };
+        assert_eq!(refused.severity(), Severity::Error);
+        assert!(matches!(&refused.refusal, Some(Error::Unknown(_))));
+        assert_eq!(refused.path, vec![Segment::Item(0), Segment::Item(1)]);
+        assert_eq!(refused.form.as_ref(), parse("(nonesuch ?x)")?.first());
+        assert!(analysis.analyzed.is_empty());
+        Ok(())
+    }
+
+    /// Analysis goes on past a refusal and says every one, each with
+    /// where it is. A document with a refusal in it is refused whole:
+    /// nothing of it comes back analyzed and no definition of it is
+    /// kept, so it can be analyzed again once it is mended.
+    #[dialog_common::test]
+    fn it_says_every_refusal_of_a_document_and_keeps_nothing_of_it() -> Result<(), Error> {
+        let broken = "(concept (todo ?t text: ?x)
+  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))
+
+(rule (all (assert (xyz.todo ?t text: ?x))
+           (retract (xyz.draft ?t text: ?x)))
+  (xyz.draft ?t text: ?x))
+
+(select (todo ?t text: ?x))
+
+(rule (xyz.seen ?t text: ?x)
+  (todo ?t text: ?x)
+  (frobnicate ?t))
+";
+        let mut analyzer = Analyzer::new()?;
+        let (trees, written) = parse_written(broken)?;
+        let analysis = analyzer.analyze(&trees);
+        let refusals: Vec<&Diagnostic> = analysis.refusals().collect();
+        let [several, unknown] = refusals.as_slice() else {
+            panic!("two refusals: {:?}", analysis.diagnostics);
+        };
+        assert!(
+            matches!(&several.refusal, Some(Error::Refused(why)) if why.contains("a rule for each"))
+        );
+        assert_eq!(several.path, vec![Segment::Item(1), Segment::Item(0)]);
+        assert_eq!(
+            written.span(&several.path).map(|span| span.start),
+            Some(Point { line: 3, column: 6 })
+        );
+        assert!(matches!(&unknown.refusal, Some(Error::Unknown(_))));
+        assert_eq!(unknown.path, vec![Segment::Item(3), Segment::Item(2)]);
+        assert_eq!(
+            written.span(&unknown.path),
+            Some(Span {
+                start: Point {
+                    line: 11,
+                    column: 2
+                },
+                end: Point {
+                    line: 11,
+                    column: 17
+                },
+            })
+        );
+        // The query in between is fine, and still nothing comes back.
+        assert!(analysis.analyzed.is_empty());
+        assert!(analysis.origin.is_empty());
+
+        // The concept the refused document defined was not kept.
+        let after = analyzer.analyze(&parse("(select (todo ?t text: ?x))")?);
+        assert!(matches!(
+            after
+                .refusals()
+                .next()
+                .and_then(|refused| refused.refusal.as_ref()),
+            Some(Error::Unknown(_))
+        ));
+
+        // Mended, the same document is analyzed, and its definition
+        // kept.
+        let mended = broken
+            .replace("(rule (all (assert (xyz.todo ?t text: ?x))\n           (retract (xyz.draft ?t text: ?x)))", "(rule (assert (xyz.todo ?t text: ?x))")
+            .replace("\n  (frobnicate ?t))", ")");
+        let analysis = analyzer.analyze(&parse(&mended)?);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert_eq!(analysis.origin, vec![1, 2, 3]);
+        let after = analyzer.analyze(&parse("(select (todo ?t text: ?x))")?);
+        assert!(after.diagnostics.is_empty());
+        assert_eq!(after.analyzed.len(), 1);
+        Ok(())
+    }
+
+    /// `tree` with the variable `from` named `to`, as a caller that builds
+    /// trees itself may name it.
+    fn renamed(tree: &Syntax, from: &str, to: &str) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if name == from => Syntax::Variable(to.into()),
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(renamed(operator, from, to)),
+                crate::syntax::Parameters {
+                    items: operand
+                        .items
+                        .iter()
+                        .map(|item| renamed(item, from, to))
+                        .collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), renamed(term, from, to)))
+                        .collect(),
+                },
+            ),
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (renamed(key, from, to), renamed(value, from, to)))
+                    .collect(),
+            ),
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| renamed(item, from, to)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Trees a caller builds itself, not read from text, may name a
+    /// variable the notation makes, `?z[1]` or `?[source]b`, or a name
+    /// under its namespace. Both entry points that take trees refuse
+    /// them as the reader would never give them.
+    #[dialog_common::test]
+    fn it_refuses_trees_that_name_what_the_notation_makes() -> Result<(), Error> {
+        let trees = parse(
+            "(concept (memo ?t text: ?w) (xyz.memo/text of: ?t is: ?w as: :text cardinality: :one))
+             (rule (xyz.out ?t v: ?w) (memo ?t text: ?w))",
+        )?;
+        for made in ["z[1]", "[source]b"] {
+            let trees: Vec<Syntax> = trees.iter().map(|tree| renamed(tree, "w", made)).collect();
+            for (entry, analysis) in [
+                ("analyze", Analyzer::new()?.analyze(&trees)),
+                ("analyze_forms", Analyzer::new()?.analyze_forms(&trees)),
+            ] {
+                assert!(
+                    analysis.diagnostics.iter().any(|diagnostic| matches!(
+                        &diagnostic.refusal,
+                        Some(Error::Reserved(name)) if name == &format!("?{made}")
+                    )),
+                    "{entry} {made}: {:?}",
+                    analysis.diagnostics
+                );
+                assert!(analysis.analyzed.is_empty(), "{entry} {made}");
+            }
+        }
+        Ok(())
+    }
+}

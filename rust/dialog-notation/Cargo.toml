@@ -1,0 +1,62 @@
+[package]
+name = "dialog-notation"
+version.workspace = true
+edition = "2024"
+authors.workspace = true
+description = "A notation for Dialog-DB: a small set of primitive forms, and the core forms defined in them as rules"
+license.workspace = true
+
+[features]
+default = ["repository"]
+# The driver that keeps selections and views current on a branch
+# (`live`). Without it the crate is the analyzer and compiler alone, and
+# does not depend on the repository.
+repository = [
+    "dep:dialog-repository",
+    "dep:dialog-capability",
+    "dep:dialog-common",
+    "dep:dialog-effects",
+    "dep:dialog-search-tree",
+]
+# What the tests look into: the maintainer of a view's tree and the
+# counts of what a driver evaluated. Not part of the crate's surface.
+inspect = []
+
+[dependencies]
+dialog-corpus = { workspace = true }
+dialog-repository = { workspace = true, optional = true }
+dialog-capability = { workspace = true, optional = true }
+dialog-common = { workspace = true, optional = true }
+dialog-effects = { workspace = true, optional = true }
+dialog-search-tree = { workspace = true, optional = true }
+dialog-query = { workspace = true }
+merkle-reference = { workspace = true }
+base58 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The integration tests look into the driver and the maintainer.
+dialog-notation = { path = ".", features = ["inspect"] }
+# The tests run documents against a real branch, which only the
+# repository's helpers build.
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
+dialog-repository = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+wasm-bindgen-test = { workspace = true }
+
+# The filesystem provider the layer tests also run on is the native one.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+dialog-capability = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-varsig = { workspace = true }
+tempfile = { workspace = true }
+
+[lints.rust]
+# `dialog_common::test` asks whether its caller runs web integration
+# tests. This crate has none.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))'] }

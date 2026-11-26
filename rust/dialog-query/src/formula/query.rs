@@ -155,6 +155,8 @@ define_formulas! {
     "signed-integer/parse"    => ParseSignedInteger(ParseSignedInteger, conversions::ParseSignedIntegerQuery),
     "float/parse"             => ParseFloat(ParseFloat, conversions::ParseFloatQuery),
 
+    "entity/derive"           => DeriveEntity(super::entity::Derive, super::entity::DeriveQuery),
+
     "dialog/revision"         => Revision(super::revision::Revision, super::revision::RevisionQuery),
     "dialog/revision-parent"  => RevisionParent(super::revision::RevisionParent, super::revision::RevisionParentQuery),
     "dialog/revision-slot"    => RevisionSlot(super::revision::RevisionSlot, super::revision::RevisionSlotQuery),
@@ -349,6 +351,7 @@ mod tests {
     use crate::constraint::Constraint;
     use crate::constraint::coalesce::Coalesce;
     use crate::constraint::equality::Equality;
+    use crate::formula::entity::Derive;
     use crate::term::Term;
     use crate::types::Any;
     use serde_json::json;
@@ -489,6 +492,16 @@ mod tests {
             is: Term::var("text"),
         });
         assert_round_trip(fq, "text/from", &["value", "is"]);
+    }
+
+    #[test]
+    fn it_serializes_derive_entity_formula() {
+        let fq = FormulaQuery::DeriveEntity(Query::<Derive> {
+            of: Term::var("of"),
+            with: Term::var("with"),
+            is: Term::var("entity"),
+        });
+        assert_round_trip(fq, "entity/derive", &["of", "with", "is"]);
     }
 
     #[test]

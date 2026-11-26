@@ -73,6 +73,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The tree talks in nodes through capabilities it performs on
   the environment; caching, decoding and storage form belong to providers.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
+- [Macros as rules](macros.md): **Designing.** A slim set of primitive forms (`rule`, two
+  kinds of application, the write relations) and every other form a macro
+  that is a rule. The [core forms](macros/primitive.md) are defined and
+  run on Dialog-DB ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`) as a proof of concept; syntax is not
+  stored yet.
 - [A replica cannot read or write what it held once a pull moves its head](held-across-pull.md):
   **Building.** A head adopted by root leaves every changed leaf by
   reference, so reads and writes of keys the replica held wait on the
