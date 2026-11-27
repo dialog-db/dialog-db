@@ -6,7 +6,7 @@
 - A backtick is the form as data, with `~?x` replaced by the value `?x` is bound to, and `~@` splicing if it comes for free.
 - `[ ]` is the only spelling of a list.
 
-The type, the coordinating session's call, which he delegated: a quoted form is the value `notation/read` gives for that text. Not built; this note is what building it has to settle.
+The type, the coordinating session's call, which he delegated: a quoted form is the value `notation/read` gives for that text. Apostrophe quoting is implemented. Syntax-quote with interpolation remains open.
 
 ## What changes from today
 
@@ -23,7 +23,7 @@ It is what `notation/read` gives under `tree` for the same text: `Syntax::value`
 
 - **Equal by content.** Two composites are equal when their trees are. A tree holds no source positions: spans, the order labels were written in, whether `of:` was written, and comments are kept beside it, in `Written`. So `'(todo ?t)` equals the read of `"(todo ?t)"` wherever that text stands, and `'(todo of: ?t)` equals `'(todo ?t)`.
 - **Its type in a query** is the composite's, a map. No line can say so today: the eight types a line takes (`primitive::TYPES`) are scalars, so a field that holds a form is read untyped. Whether a line can say "a composite", or "a form", is open.
-- **What takes it.** `notation/analyze` takes a form, so a quoted form can be analyzed without parsing, and later evaluated. Evaluating one from a rule waits on rules holding the supplied formulas (`crate::supplied` in dialog-query).
+- **What takes it.** `syntax/analyze` accepts a form or an ordered list of forms. A query can read a saved form and analyze it directly. A host can prepare a saved analyzed value with `check_analyzed` and run it through the regular driver.
 
 ## Syntax-quote
 

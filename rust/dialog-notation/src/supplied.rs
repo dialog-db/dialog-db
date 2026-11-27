@@ -19,13 +19,11 @@
 //! | `notation/read` | each form [`parse_document`] reads of the text: `at`, its place among them; `tree`, the form as data ([`Syntax::value`](crate::Syntax::value)); its range |
 //! | `notation/analyze` | each thing [`Analyzer::analyze`] says of the forms together: `at`, the form it is about; `severity`, `"error"` or `"warning"`; `code`, its kind as a word; `message`; `path`, the way to the part of the form it is about |
 //!
-//! A document asks `notation/read` in a `select`, or a `query` a select
-//! asks, alone: a rule is stored and read back from its body, and the
-//! engine refuses a rule holding a formula whose code is not its own. It
-//! does not ask `notation/analyze` yet: its `forms` is a list of a
-//! document's trees, and no query a document writes can build one, since
-//! nothing gathers rows into an ordered list and a quoted form is not
-//! built. A query built in Rust gives it a constant list.
+//! A document asks `notation/read` in a `select`, a named `query`, or
+//! a top-level write. The `syntax/parse`, `syntax/analyze` and
+//! `syntax/compile` premises let these queries pass syntax, analysis,
+//! and compiled previews as composite values. The legacy
+//! `notation/analyze` diagnostic interface is called from Rust.
 //!
 //! **What `notation/analyze` does here is temporary.** It analyzes the
 //! forms against the definitions the [`Analyzer`] given to [`supply`]
@@ -40,15 +38,31 @@
 
 use dialog_corpus::{Composite, Value};
 use dialog_query::error::EvaluationError;
-use dialog_query::supplied::{Facts, NotationAnalyze, NotationRead, Output, Selected};
+use dialog_query::supplied::{
+    Facts, NotationAnalyze, NotationPipeline, NotationRead, Output, Selected,
+};
 
 use crate::analyze::Analyzer;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::parse_document;
 use crate::written::{Point, Segment, Span};
-use crate::{Error, Syntax};
+use crate::{Error, Step, Syntax, check_forms, compile};
 
-pub use dialog_query::supplied::{ANALYZE, READ};
+pub use dialog_query::supplied::{ANALYZE, PIPELINE, READ};
+pub(crate) const STAGES: [&str; 3] = ["syntax/parse", "syntax/analyze", "syntax/compile"];
+
+pub(crate) fn phase(name: &str) -> Option<&'static str> {
+    match name {
+        "syntax/parse" => Some("read"),
+        "syntax/analyze" => Some("analyze"),
+        "syntax/compile" => Some("compile"),
+        _ => None,
+    }
+}
+
+pub(crate) fn declares(name: &str) -> bool {
+    matches!(name, READ | ANALYZE | PIPELINE) || phase(name).is_some()
+}
 
 /// The keyword a formula of `name` is kept by in an analyzed tree, a
 /// name an entity's scheme may be: `notation.read`.
@@ -59,8 +73,9 @@ pub(crate) fn keyword(name: &str) -> String {
 /// The declared formula a keyword of an analyzed tree names, where it
 /// names one whose code is the notation's.
 pub(crate) fn named(keyword: &str) -> Option<&'static str> {
-    [READ, ANALYZE]
+    [READ, ANALYZE, PIPELINE]
         .into_iter()
+        .chain(STAGES)
         .find(|name| self::keyword(name) == keyword)
 }
 
@@ -73,12 +88,194 @@ pub(crate) fn named(keyword: &str) -> Option<&'static str> {
 pub fn supply(env: &(impl dialog_common::Holds + ?Sized), analyzer: &Analyzer) {
     use std::sync::Arc;
     dialog_query::supplied::supply_read(env, Arc::new(Read));
+    supply_pipeline(env);
     dialog_query::supplied::supply_analyze(
         env,
         Arc::new(Analyze {
             analyzer: analyzer.clone(),
         }),
     );
+}
+
+/// Supply the reader and the stateless pipeline. Analysis context
+/// travels in the query and repeated setup keeps the reader's cache warm.
+pub fn supply_pipeline(env: &(impl dialog_common::Holds + ?Sized)) {
+    dialog_query::supplied::supply_read_once(env, std::sync::Arc::new(Read));
+    dialog_query::supplied::supply_pipeline(env, std::sync::Arc::new(Pipeline));
+}
+
+/// The reader, analyzer and compiler as independent document phases.
+#[derive(Debug)]
+pub struct Pipeline;
+
+impl NotationPipeline for Pipeline {
+    fn run(
+        &self,
+        phase: &str,
+        input: &Value,
+        context: Option<&Value>,
+    ) -> Result<Output, EvaluationError> {
+        pipeline(phase, input, context).map_err(|error| EvaluationError::Serialization {
+            message: error.to_string(),
+        })
+    }
+}
+
+fn pipeline(phase: &str, input: &Value, context: Option<&Value>) -> Result<Output, Error> {
+    let mut diagnostics = Vec::new();
+    let output = match (phase, input) {
+        ("read", Value::String(text)) => {
+            let parsed = parse_document(text);
+            diagnostics = parsed.diagnostics;
+            let lines = Lines::of(text);
+            let notes = diagnostics
+                .iter()
+                .map(|note| {
+                    let path = &note.path[..];
+                    let at = path.first().unwrap_or(&Segment::Item(0));
+                    let mut fields = diagnostic_fields(note, at, path);
+                    fields.extend(lines.range(note.span));
+                    record(fields)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let forms = parsed
+                .trees
+                .iter()
+                .map(Syntax::value)
+                .collect::<Result<Vec<_>, _>>()?;
+            return outputs(crate::data::list(forms)?, notes);
+        }
+        ("analyze", _) => {
+            let mut analyzer = Analyzer::new()?;
+            if let Some(context) = context {
+                let Some(texts) = crate::data::items(context)? else {
+                    return Err(Error::Refused(
+                        "analysis context must be a list of source texts".into(),
+                    ));
+                };
+                for text in texts {
+                    let Value::String(text) = text else {
+                        return Err(Error::Refused(
+                            "analysis context must contain source texts".into(),
+                        ));
+                    };
+                    check_forms(&mut analyzer, &text);
+                }
+            }
+            let forms = document_forms(input)?;
+            let analysis = analyzer.analyze(&forms);
+            let declarations = if analysis.refusals().next().is_none() {
+                forms
+                    .iter()
+                    .filter(|tree| matches!(tree.applies(), Some("concept" | "query")))
+                    .map(Syntax::value)
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            diagnostics = analysis.diagnostics;
+            let lowered = analysis
+                .analyzed
+                .iter()
+                .map(Syntax::value)
+                .collect::<Result<Vec<_>, _>>()?;
+            record(vec![
+                ("forms", crate::data::list(lowered)?),
+                ("declarations", crate::data::list(declarations)?),
+            ])?
+        }
+        ("compile", _) => {
+            let mut compiled = Vec::new();
+            for (at, tree) in analyzed_forms(input)?.into_iter().enumerate() {
+                match compile(&tree) {
+                    Ok(steps) => {
+                        for step in steps {
+                            compiled.push(compiled_step(at, step)?);
+                        }
+                    }
+                    Err(error) => diagnostics.push(Diagnostic::refused(
+                        Some(tree),
+                        vec![Segment::Item(at)],
+                        error,
+                    )),
+                }
+            }
+            crate::data::list(compiled)?
+        }
+        _ => {
+            return Err(Error::Refused(format!(
+                "notation/pipeline expects source text for read or syntax data for analyze or compile, got phase {phase}"
+            )));
+        }
+    };
+    let notes = diagnostics
+        .iter()
+        .map(|note| {
+            let (at, path) = note.path.split_first().unwrap_or((&Segment::Item(0), &[]));
+            record(diagnostic_fields(note, at, path))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    outputs(output, notes)
+}
+
+pub(crate) fn document_forms(input: &Value) -> Result<Vec<Syntax>, Error> {
+    match input {
+        Value::Composite(list) if list.is_list() => {
+            list.items().map(|tree| Syntax::try_from(&tree)).collect()
+        }
+        value => Ok(vec![Syntax::try_from(value)?]),
+    }
+}
+
+pub(crate) fn analyzed_forms(input: &Value) -> Result<Vec<Syntax>, Error> {
+    if let Some(record) = crate::data::entries(input)?
+        && let Some(forms) = record.get("forms")
+    {
+        return document_forms(forms);
+    }
+    document_forms(input)
+}
+
+fn outputs(output: Value, diagnostics: Vec<Value>) -> Result<Output, Error> {
+    Ok(vec![
+        ("output", output),
+        ("diagnostics", crate::data::list(diagnostics)?),
+    ])
+}
+
+fn diagnostic_fields(note: &Diagnostic, at: &Segment, path: &[Segment]) -> Output {
+    let at = match at {
+        Segment::Item(at) => *at,
+        _ => 0,
+    };
+    row(at, note.severity(), code(note), note.message.clone(), path)
+}
+
+fn record(fields: Output) -> Result<Value, Error> {
+    crate::data::record(fields)
+}
+
+fn compiled_step(at: usize, step: Step) -> Result<Value, Error> {
+    fn describe(value: &impl std::fmt::Debug) -> String {
+        format!("{value:?}")
+    }
+    let (kind, detail) = match step {
+        Step::Assert(value) => ("assert", describe(&value)),
+        Step::Retract(value) => ("retract", describe(&value)),
+        Step::Issue(value) => ("issue", describe(&value)),
+        Step::Deduce(value) => ("deduce", describe(&value)),
+        Step::Induce(value) => ("induce", describe(&value)),
+        Step::Transient(value) => ("transient", value.to_string()),
+        Step::Query(value) => ("query", describe(&value.select)),
+        Step::Write(value) => ("write", describe(&value.query.select)),
+        Step::Select(value) => ("select", format!("{value:?}")),
+        Step::View(value) => ("view", format!("{value:?}")),
+    };
+    record(vec![
+        ("at", natural(at)),
+        ("kind", Value::String(kind.into())),
+        ("detail", Value::String(detail)),
+    ])
 }
 
 /// `notation/read`: the crate's reader.

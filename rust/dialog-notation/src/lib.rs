@@ -237,7 +237,7 @@ pub use apply::{
     Answer, Answers, Applied, ApplyError, Did, DocumentReport, FormAnswer, FormReport, Stage,
     answer, apply, stage,
 };
-pub use check::{Checked, check, check_forms};
+pub use check::{Checked, check, check_analyzed, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
 pub use diagnostic::{Diagnostic, Severity};

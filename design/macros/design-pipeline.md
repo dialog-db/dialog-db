@@ -184,9 +184,30 @@ Proposed, to be checked against what tonk's plugin consumes (forwarded by the co
 - **completion:** `label`, `kind` (`:concept`, `:field`, `:form`, `:type`, `:attribute`), `detail` (a concept's head, a form's shape), and the span it replaces.
 - **form:** `at` (its place among the forms), `tree` (the tree, `Syntax::encode`, a composite value), and its span.
 
+### Calling the phases from a query
+
+```clojure
+(select (syntax/parse "(select (xyz.note/text of: note:1 is: ?x))" is: ?forms))
+(select (syntax/analyze '(select (xyz.note/text of: note:1 is: ?x)) is: ?analyzed))
+
+(assert (xyz.syntax/source of: syntax:example
+  is: "(select (xyz.note/text of: note:1 is: ?x))" cardinality: :one))
+
+(query (pipeline/inspect ?example is: ?result)
+  (xyz.syntax/source of: ?example is: ?source)
+  (syntax/parse ?source is: ?forms)
+  (syntax/analyze ?forms is: ?analyzed)
+  (syntax/compile ?analyzed is: ?steps)
+  (is ?result {:forms ?forms :analyzed ?analyzed :steps ?steps}))
+
+(select (pipeline/inspect syntax:example is: ?result))
+```
+
+The reader returns an ordered list of syntax values. The analyzer accepts one form or a list and returns a record with lowered `forms` and source `declarations`. The compiler takes that record, an analyzed form, or a list of analyzed forms and reports each step's kind, form index and preview. Each phase can project `diagnostics:` beside `is:`. Analysis can take an explicit `context:` list of preceding source texts. Parsed and analyzed forms are ordinary composite values. A top-level assertion can take them straight from its premises, and a later query can read them back. To apply a saved analyzed value, a host calls `check_analyzed` and uses the normal staging and evaluation driver. These supplied phases can run together in a select or a named query. A stored rule still requires a versioned implementation that replicas can validate.
+
 ### A keystroke
 
-A cell's text is a fact (`xyz.cell/source`) or a constant in the query. A keystroke changes it, so the query is asked again: under a subscription only the row of that cell's text changes, and the formula runs again on that text alone, parse and analysis whole, as `check` does today; there is no incremental parser. Every other cell's text is unchanged, so its formula is a cache hit when the formula is marked cached. What a keystroke costs is one `check` of one cell; how long that is for a cell of tonk's size is not measured (hypothesis: under a frame for a cell of 50 lines, release build, the prelude analyzed once and kept, not per call; `Analyzer::new` analyzes the prelude every time today).
+A cell's text is a fact (`xyz.cell/source`) or a constant in the query. A standing reader query reevaluates its premises after a change. Cached source texts reuse their reader rows, while a miss parses the whole cell. Analysis also requires the definitions in scope.
 
 ### What a query left out
 

@@ -413,6 +413,150 @@ async fn it_bounds_read_results_and_recomputes_for_a_replaced_reader() -> Result
     Ok(())
 }
 
+#[dialog_common::test]
+async fn it_selects_syntax_phases_alone_and_passes_their_values_between_premises() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let parse = notebook
+        .answers(r#"(select (syntax/parse "(select (xyz.cell/source of: x:1 is: ?s))" is: ?form))"#)
+        .await?;
+    assert_eq!(parse.len(), 1);
+    assert!(parse[0].contains("application"), "{parse:?}");
+
+    notebook
+        .write("x:1", "(select (xyz.cell/source of: x:1 is: ?s))")
+        .await?;
+    let result = notebook
+        .answers(
+            r#"(query (pipeline/inspect ?example is: ?result)
+                 (cell ?example source: ?source)
+                 (syntax/compile ?expanded is: ?steps)
+                 (syntax/analyze ?trees is: ?expanded diagnostics: ?diagnostics)
+                 (syntax/parse ?source is: ?trees)
+                 (is ?result {:forms ?trees :analyzed ?expanded
+                              :steps ?steps :diagnostics ?diagnostics}))
+               (select (pipeline/inspect x:1 is: ?result))"#,
+        )
+        .await?;
+    assert_eq!(result.len(), 1);
+    assert!(
+        result[0].contains("kind") && result[0].contains("query"),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_stores_parsed_syntax_and_evaluates_saved_analysis_explicitly() -> Result<()> {
+    use dialog_query::supplied::{NotationPipeline, NotationPipelineQuery};
+
+    let mut notebook = Notebook::open().await?;
+    let quoted = notebook
+        .answers(
+            r#"(select (syntax/analyze
+             '(concept (note ?n text: ?t)
+                (xyz.note/text of: ?n is: ?t as: :text cardinality: :one))
+             is: ?forms diagnostics: ?messages))"#,
+        )
+        .await?;
+    assert_eq!(quoted.len(), 1);
+    assert!(quoted[0].contains("diagnostics: []"), "{quoted:?}");
+    assert!(quoted[0].contains(":name /note"), "{quoted:?}");
+
+    let source = r#"(assert (xyz.note/text of: note:1 is: "saved" cardinality: :one))"#;
+    let phase = |name: &str, input, output| -> Result<Premise> {
+        let mut terms = Parameters::new();
+        terms.insert("phase".into(), Term::Constant(Value::String(name.into())));
+        terms.insert("input".into(), input);
+        terms.insert("output".into(), output);
+        Ok(Premise::Assert(Proposition::Resolver(Box::new(
+            ResolverQuery::NotationPipeline(NotationPipelineQuery::new(terms)?),
+        ))))
+    };
+    let query = PremiseQuery::new(
+        vec![
+            phase(
+                "read",
+                Term::Constant(Value::String(source.into())),
+                Term::var("parsed"),
+            )?,
+            phase("analyze", Term::var("parsed"), Term::var("analyzed"))?,
+        ],
+        ["parsed", "analyzed"],
+    )?;
+    let rows = notebook
+        .branch
+        .query()
+        .select(query)
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    let [row]: &[PremiseRow] = rows.as_slice() else {
+        anyhow::bail!("one pipeline row")
+    };
+    let Some(Value::Composite(parsed)) = row.get("parsed") else {
+        anyhow::bail!("parsed list")
+    };
+    let form = parsed.items().next().expect("one parsed form");
+    assert_eq!(form, parse(source)?[0].value()?);
+    let analyzed = row.get("analyzed").expect("analysis record");
+    assert_ne!(&form, analyzed);
+
+    notebook
+        .apply(&format!(
+            r#"(assert (xyz.syntax/form of: syntax:saved is: ?form cardinality: :one)
+                 (notation/read text: {source:?} tree: ?form))
+               (assert (xyz.syntax/analyzed of: syntax:saved is: ?analysis cardinality: :one)
+                 (xyz.syntax/form of: syntax:saved is: ?form)
+                 (syntax/analyze ?form is: ?analysis))"#
+        ))
+        .await?;
+
+    let selected = notebook
+        .answers(
+            r#"(query (pipeline/compile-saved ?example is: ?steps)
+             (xyz.syntax/form of: ?example is: ?stored)
+             (syntax/analyze ?stored is: ?analysis)
+             (syntax/compile ?analysis is: ?steps))
+           (select (pipeline/compile-saved syntax:saved is: ?steps))"#,
+        )
+        .await?;
+    assert_eq!(selected.len(), 1);
+    assert!(selected[0].contains("assert"), "{selected:?}");
+    let compare = notebook
+        .answers(
+            r#"(select (xyz.syntax/form of: syntax:saved
+                     is: '(assert (xyz.note/text of: note:1 is: "saved" cardinality: :one))))"#,
+        )
+        .await?;
+    assert_eq!(compare.len(), 1);
+    let select: dialog_query::ConceptQuery = serde_json::from_value(serde_json::json!({
+        "assert": { "with": { "is": { "the": "xyz.syntax/analyzed" } } },
+        "where": { "this": { "entity:": "syntax:saved" }, "is": { "?": { "name": "is" } } }
+    }))?;
+    let found: Vec<dialog_query::ConceptConclusion> = notebook
+        .branch
+        .query()
+        .select(select)
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    assert_eq!(found.len(), 1);
+    let saved = found[0].source().lookup(&Term::var("is"))?.content()?;
+    assert_eq!(&saved, analyzed);
+    let saved = dialog_notation::check_analyzed(&saved)?;
+    apply(&notebook.branch, &saved, &notebook.operator).await?;
+    let notes = notebook
+        .answers("(select (xyz.note/text of: note:1 is: ?text))")
+        .await?;
+    assert!(matches!(notes.as_slice(), [note] if note.contains("saved")));
+    // Analyze accepts a single stored form without a source-text round trip.
+    assert_eq!(
+        dialog_notation::supplied::Pipeline.run("analyze", &parse(source)?[0].value()?, None)?[0].1,
+        *analyzed
+    );
+    Ok(())
+}
+
 /// What a query gathers of a query asking `notation/read` is gathered
 /// from that query's rows: the places of a cell's forms, as a set.
 #[dialog_common::test]
@@ -441,19 +585,13 @@ async fn it_gathers_what_read_reads_of_a_text() -> Result<()> {
     Ok(())
 }
 
-/// `notation/read` is asked by a `select`, and by a query a select asks,
-/// alone: a rule is stored and read back from its body, and Dialog-DB
-/// refuses a rule holding a formula whose code is the notation's, and a
-/// write's premises and a view's layer are rules. A rule, a write and a
-/// view holding it are refused, saying so, and nothing of the document
-/// is applied.
+/// A stored rule or a view layer cannot hold a supplied reader. Refusing
+/// either leaves any other writes in the same document unapplied.
 #[dialog_common::test]
 async fn it_refuses_notation_read_where_a_rule_would_hold_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     for text in [
         "(rule (cell/bad ?c at: ?n) (cell ?c source: ?s) (notation/read text: ?s at: ?n))",
-        "(assert (cell x:3 source: \"written\")) \
-         (assert (cell x:3 source: ?k) (cell ?c source: ?s) (notation/read text: ?s at: ?k))",
         "(assert (cell x:3 source: \"written\")) \
          (query (cell/shown ?c is: ?v) (cell ?c source: ?s) (notation/read text: ?s at: ?n) \
            (view ?v [:p ?n])) \
@@ -468,7 +606,7 @@ async fn it_refuses_notation_read_where_a_rule_would_hold_it() -> Result<()> {
         };
         assert!(
             matches!(&refused.refusal, Some(Error::Refused(why))
-                if why.contains("(notation/read …) is asked in a `select` alone")),
+                if why.contains("(notation/read …) is available in a `select` or a top-level write")),
             "{text}: {refused:?}"
         );
     }
