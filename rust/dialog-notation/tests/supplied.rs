@@ -455,6 +455,7 @@ async fn it_stores_quoted_syntax_and_evaluates_saved_analysis_explicitly() -> Re
         .await?;
     assert_eq!(quoted.len(), 1);
     assert!(quoted[0].contains("diagnostics: []"), "{quoted:?}");
+    assert!(quoted[0].contains(":name /note"), "{quoted:?}");
 
     let source = r#"(assert (xyz.note/text of: note:1 is: "saved" cardinality: :one))"#;
     let phase = |name: &str, input, output| -> Result<Premise> {
@@ -492,7 +493,7 @@ async fn it_stores_quoted_syntax_and_evaluates_saved_analysis_explicitly() -> Re
     };
     let form = parsed.items().next().expect("one parsed form");
     assert_eq!(form, parse(source)?[0].value()?);
-    let analyzed = row.get("analyzed").expect("analyzed list");
+    let analyzed = row.get("analyzed").expect("analysis record");
     assert_ne!(&form, analyzed);
 
     let stored: AttributeDescriptor =
@@ -529,7 +530,21 @@ async fn it_stores_quoted_syntax_and_evaluates_saved_analysis_explicitly() -> Re
         )
         .await?;
     assert_eq!(compare.len(), 1);
-    let saved = dialog_notation::check_analyzed(analyzed)?;
+    let select: dialog_query::ConceptQuery = serde_json::from_value(serde_json::json!({
+        "assert": { "with": { "is": { "the": "xyz.syntax/analyzed" } } },
+        "where": { "this": { "entity:": "syntax:saved" }, "is": { "?": { "name": "is" } } }
+    }))?;
+    let found: Vec<dialog_query::ConceptConclusion> = notebook
+        .branch
+        .query()
+        .select(select)
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    assert_eq!(found.len(), 1);
+    let saved = found[0].source().lookup(&Term::var("is"))?.content()?;
+    assert_eq!(&saved, analyzed);
+    let saved = dialog_notation::check_analyzed(&saved)?;
     apply(&notebook.branch, &saved, &notebook.operator).await?;
     let notes = notebook
         .answers("(select (xyz.note/text of: note:1 is: ?text))")

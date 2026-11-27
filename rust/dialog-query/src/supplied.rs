@@ -325,8 +325,8 @@ pub(crate) static PIPELINE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
             .cell("context", Some(Kind::from(ValueType::List)))
             .the("the source texts of preceding documents, in order");
         builder
-            .cell("output", Some(Kind::from(ValueType::List)))
-            .the("the phase's output, in document order")
+            .cell("output", None)
+            .the("the phase's output")
             .output(0);
         builder
             .cell("diagnostics", Some(Kind::from(ValueType::List)))

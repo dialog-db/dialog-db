@@ -141,7 +141,7 @@ fn pipeline(phase: &str, input: &Value, context: Option<&Value>) -> Result<Outpu
                 .iter()
                 .map(Syntax::value)
                 .collect::<Result<Vec<_>, _>>()?;
-            return outputs(forms, notes);
+            return outputs(crate::data::list(forms)?, notes);
         }
         ("analyze", _) => {
             let mut analyzer = Analyzer::new()?;
@@ -162,16 +162,29 @@ fn pipeline(phase: &str, input: &Value, context: Option<&Value>) -> Result<Outpu
             }
             let forms = document_forms(input)?;
             let analysis = analyzer.analyze(&forms);
+            let declarations = if analysis.refusals().next().is_none() {
+                forms
+                    .iter()
+                    .filter(|tree| matches!(tree.applies(), Some("concept" | "query")))
+                    .map(Syntax::value)
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
             diagnostics = analysis.diagnostics;
-            analysis
+            let lowered = analysis
                 .analyzed
                 .iter()
                 .map(Syntax::value)
-                .collect::<Result<_, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            record(vec![
+                ("forms", crate::data::list(lowered)?),
+                ("declarations", crate::data::list(declarations)?),
+            ])?
         }
         ("compile", _) => {
             let mut compiled = Vec::new();
-            for (at, tree) in document_forms(input)?.into_iter().enumerate() {
+            for (at, tree) in analyzed_forms(input)?.into_iter().enumerate() {
                 match compile(&tree) {
                     Ok(steps) => {
                         for step in steps {
@@ -185,7 +198,7 @@ fn pipeline(phase: &str, input: &Value, context: Option<&Value>) -> Result<Outpu
                     )),
                 }
             }
-            compiled
+            crate::data::list(compiled)?
         }
         _ => {
             return Err(Error::Refused(format!(
@@ -212,9 +225,18 @@ pub(crate) fn document_forms(input: &Value) -> Result<Vec<Syntax>, Error> {
     }
 }
 
-fn outputs(forms: Vec<Value>, diagnostics: Vec<Value>) -> Result<Output, Error> {
+pub(crate) fn analyzed_forms(input: &Value) -> Result<Vec<Syntax>, Error> {
+    if let Some(record) = crate::data::entries(input)?
+        && let Some(forms) = record.get("forms")
+    {
+        return document_forms(forms);
+    }
+    document_forms(input)
+}
+
+fn outputs(output: Value, diagnostics: Vec<Value>) -> Result<Output, Error> {
     Ok(vec![
-        ("output", crate::data::list(forms)?),
+        ("output", output),
         ("diagnostics", crate::data::list(diagnostics)?),
     ])
 }

@@ -195,7 +195,7 @@ Proposed, to be checked against what tonk's plugin consumes (forwarded by the co
   (syntax/compile ?analyzed is: ?steps))
 ```
 
-The reader returns an ordered list of syntax values. The analyzer and compiler accept a single form or a list. Each phase can project `diagnostics:` beside `is:`. Analysis can take an explicit `context:` list of preceding source texts. Parsed and analyzed forms are ordinary composite values that can be stored and passed back as query inputs. The compiler reports each step's kind, form index and preview. To apply a saved analyzed value, a host calls `check_analyzed` and uses the normal staging and evaluation driver. These supplied phases can run together in a select or a named query. A stored rule still requires a versioned implementation that replicas can validate.
+The reader returns an ordered list of syntax values. The analyzer accepts one form or a list and returns a record with lowered `forms` and source `declarations`. The compiler takes that record, an analyzed form, or a list of analyzed forms and reports each step's kind, form index and preview. Each phase can project `diagnostics:` beside `is:`. Analysis can take an explicit `context:` list of preceding source texts. Parsed and analyzed forms are ordinary composite values that can be stored and passed back as query inputs. To apply a saved analyzed value, a host calls `check_analyzed` and uses the normal staging and evaluation driver. These supplied phases can run together in a select or a named query. A stored rule still requires a versioned implementation that replicas can validate.
 
 ### A keystroke
 

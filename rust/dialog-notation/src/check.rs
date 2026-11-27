@@ -243,11 +243,10 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     checked
 }
 
-/// Compile an analyzed form or an ordered list of analyzed forms saved
-/// as data. The result can be staged and answered through the usual
-/// driver. Compiling it does not execute any step.
+/// Compile the result of `syntax/analyze`, or individual analyzed forms.
+/// The result can be staged and answered through the usual driver.
 pub fn check_analyzed(value: &Value) -> Result<Checked, Error> {
-    let analyzed = crate::supplied::document_forms(value)?;
+    let analyzed = crate::supplied::analyzed_forms(value)?;
     let (mut checked, _) = Checked::of(parse_document(""));
     for (at, form) in analyzed.iter().enumerate() {
         let steps = crate::compile::compile(form)?;
