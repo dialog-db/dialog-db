@@ -40,6 +40,12 @@
 mod repository;
 pub use repository::*;
 
+/// DOM-independent keyed tree edits and their retained projection.
+pub mod tree_edits;
+pub use tree_edits::{
+    EditedTree, ProjectedNode, TreeEdit, TreeEditError, TreeId, TreePosition, TreeProjection,
+};
+
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
 pub use placement::{
