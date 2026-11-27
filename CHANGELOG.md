@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A subscription can deliver edits to a keyed result tree
 
-Stacked on [#908](https://github.com/dialog-db/dialog-db/pull/908).
+[#909](https://github.com/dialog-db/dialog-db/pull/909).
 [Design note](design/macros/design-tree-subscriptions.md).
 Sources contribute local nodes as their query rows change. A receiver
 assembles the nodes once and applies subsequent edits by ID.
