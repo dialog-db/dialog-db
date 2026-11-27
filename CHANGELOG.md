@@ -14,6 +14,28 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription can deliver edits to a keyed result tree
+
+[#909](https://github.com/dialog-db/dialog-db/pull/909).
+[Design note](design/macros/design-tree-subscriptions.md).
+Sources contribute local nodes as their query rows change. A receiver
+assembles the nodes once and applies subsequent edits by ID.
+
+What this changes for you:
+
+- Use `Branch::subscribe_tree` or `Stack::tree_subscription` to get
+  inserts, value changes, moves and removals from standing queries.
+- `EditedTree` applies those operations to any payload type. Moving
+  a node carries its existing children with it.
+- `Live::standing_tree` lowers supported keyed notation selections.
+  `Live::watch_html` emits view edits that `HtmlMount` applies to an
+  HTML host, including `BrowserHost` in Wasm.
+- `EditEncoder` and `EditDecoder` carry ordered edits in binary frames
+  with a bounded session dictionary.
+
+Why: a one-tag edit can change one child of a card without assembling
+or sending the notebook and its other cards again.
+
 ### A standing fold can keep records collected by another fold
 
 [#908](https://github.com/dialog-db/dialog-db/pull/908).

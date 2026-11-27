@@ -180,6 +180,10 @@ pub struct Plan {
     /// The entity the question names, where it names one by its value:
     /// `(select (todo/row todo:1 is: ?row))`.
     pub given: Option<Value>,
+    // Nested template paths whose local key includes the view's own
+    // entity. A query whose entity is bound by its parent has no such
+    // identity (for example, a tag label scoped to one card).
+    pub(crate) move_paths: BTreeSet<Vec<usize>>,
     /// The conditions of the query asked and the reads it counts in its
     /// own markup, as a selection is compiled from them: what
     /// [`Plan::folds`] lowers to the folds Dialog-DB keeps the counts by.
@@ -477,6 +481,7 @@ struct Spec {
     path: Vec<usize>,
     conditions: Vec<Condition>,
     key: Vec<String>,
+    movable: bool,
 }
 
 /// A count as it is built.
@@ -557,6 +562,9 @@ impl Builder<'_> {
                 _ => Vec::new(),
             };
         }
+        let movable = !root
+            && matches!(operand.items.first(), Some(Syntax::Variable(entity))
+                if !above.contains(entity) && key.contains(entity));
         let mut bound = above.clone();
         for condition in &conditions {
             bound.extend(info(condition).vars);
@@ -571,6 +579,7 @@ impl Builder<'_> {
                 })
                 .collect(),
             key,
+            movable,
         });
         // What it collects, by the variable it is put under.
         let mut collected: BTreeMap<String, (Syntax, From)> = BTreeMap::new();
@@ -780,6 +789,7 @@ impl Builder<'_> {
                 })
                 .collect(),
             key,
+            movable: false,
         });
         self.sources.push((
             path,
@@ -864,6 +874,7 @@ impl Plan {
         places(&template, Vec::new(), None, &mut elements);
         // Each place a layer of its own takes, the others their parent's.
         let mut layers: Vec<Layer> = Vec::new();
+        let mut move_paths = BTreeSet::new();
         for at in 0..elements.len() {
             // A query collected that needs no condition of its own, one of
             // no entity, stands once under its parent: no layer of its own.
@@ -872,6 +883,9 @@ impl Plan {
             }) {
                 Some(spec) => {
                     elements[at].key = builder.specs[spec].key.clone();
+                    if builder.specs[spec].movable {
+                        move_paths.insert(elements[at].path.clone());
+                    }
                     elements[at].layer = layers.len();
                     layers.push(Layer {
                         element: at,
@@ -937,6 +951,7 @@ impl Plan {
         let mut plan = Plan {
             folding,
             given,
+            move_paths,
             name,
             entity,
             template,

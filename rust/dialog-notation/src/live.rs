@@ -52,11 +52,14 @@ use dialog_query::error::EvaluationError;
 use dialog_query::query::Output as _;
 use dialog_query::query::{PremiseQuery, PremiseRow};
 use dialog_query::{ConceptConclusion, ConceptQuery, FoldConclusion};
+use dialog_repository::tree_edits::wire::EditEncoder;
 use dialog_repository::{Branch, Delta, Ephemeral, FoldSubscription, RemoteSite, Subscription};
+use dialog_repository::{TreeEdit, TreeSubscription, TreeSubscriptionError};
 use dialog_search_tree::nodes;
 
 use crate::select::Selection;
 use crate::syntax::Syntax;
+use crate::view::html::HtmlEdits;
 use crate::view::plan::{FoldedCount, Plan};
 use crate::view::tree::{Change, Counts, Maintainer, Patch, Rendered, Row};
 use crate::{Error, Query};
@@ -538,6 +541,21 @@ impl Live {
         })
     }
 
+    /// Lower a keyed record selection to standing feeds, emitting edits
+    /// to its value tree. Unsupported query shapes are refused here.
+    pub fn standing_tree(&self, selection: Selection) -> Result<StandingTree, LiveError> {
+        let mut lease = self.lease();
+        let mut feeds = Vec::new();
+        for (query, feed) in selection.tree_feeds()? {
+            self.lay(&mut lease, &query.rule, query.derives.as_ref())?;
+            feeds.push(feed);
+        }
+        Ok(StandingTree {
+            feed: self.branch.subscribe_reachable_tree(feeds),
+            _lease: lease,
+        })
+    }
+
     /// The view `plan` kept current for `entity`, the entity it is
     /// rendered for where it answers of one: its layers' rules laid and a
     /// subscription of each layer's query, but for a count Dialog-DB
@@ -580,6 +598,68 @@ impl Live {
             polled: false,
             _lease: lease,
         })
+    }
+
+    /// Watch HTML as the same generic edits a receiver applies to a
+    /// retained tree. The watch renders only the instances its rows move.
+    pub fn watch_html(&self, plan: Plan, entity: Option<Value>) -> Result<WatchedHtml, LiveError> {
+        let edits = HtmlEdits::with_plan(&plan);
+        Ok(WatchedHtml {
+            watched: self.watch(plan, entity)?,
+            edits,
+        })
+    }
+}
+
+/// A watched view whose patches are expressed as keyed tree edits.
+pub struct WatchedHtml {
+    watched: Watched,
+    edits: HtmlEdits,
+}
+
+impl WatchedHtml {
+    /// Poll the existing view subscriptions and translate their patches.
+    pub async fn poll<E: Reader>(&mut self, env: &E) -> Result<Vec<TreeEdit<Value>>, LiveError> {
+        let patches = self.watched.poll(env).await?;
+        Ok(self.edits.edits(&patches)?)
+    }
+
+    /// Encode this poll using the receiver's session encoder.
+    pub async fn poll_frame<E: Reader>(
+        &mut self,
+        env: &E,
+        encoder: &mut EditEncoder,
+    ) -> Result<Option<Vec<u8>>, LiveError> {
+        let edits = self.poll(env).await?;
+        Ok((!edits.is_empty()).then(|| encoder.encode(&edits)))
+    }
+}
+
+/// A keyed notation selection which sends its initial tree and changes
+/// as ordered edits. Each value is a local node described by
+/// `[kind, label-or-false, scalar?]`.
+pub struct StandingTree {
+    feed: TreeSubscription<ConceptQuery, Value>,
+    _lease: Lease,
+}
+
+impl StandingTree {
+    /// Poll the standing projection.
+    pub async fn poll<E: Reader>(
+        &mut self,
+        env: &E,
+    ) -> Result<Vec<TreeEdit<Value>>, TreeSubscriptionError> {
+        self.feed.poll(env).await
+    }
+
+    /// Encode this poll using the receiver's session encoder.
+    pub async fn poll_frame<E: Reader>(
+        &mut self,
+        env: &E,
+        encoder: &mut EditEncoder,
+    ) -> Result<Option<Vec<u8>>, TreeSubscriptionError> {
+        let edits = self.poll(env).await?;
+        Ok((!edits.is_empty()).then(|| encoder.encode(&edits)))
     }
 }
 

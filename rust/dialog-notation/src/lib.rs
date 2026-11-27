@@ -245,6 +245,8 @@ pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
 pub use select::{Folded, Selection};
+#[cfg(feature = "repository")]
+pub use select::{RecordContent, RecordNode};
 /// What names a definition: for the tests.
 #[cfg(feature = "inspect")]
 pub use syntax::Signature;

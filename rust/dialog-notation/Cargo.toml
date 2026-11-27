@@ -17,6 +17,9 @@ repository = [
     "dep:dialog-common",
     "dep:dialog-effects",
     "dep:dialog-search-tree",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:web-sys",
 ]
 # What the tests look into: the maintainer of a view's tree and the
 # counts of what a driver evaluated. Not part of the crate's surface.
@@ -34,6 +37,11 @@ merkle-reference = { workspace = true }
 base58 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, features = ["Document", "Element", "Node", "Text"], optional = true }
 
 [dev-dependencies]
 # The integration tests look into the driver and the maintainer.

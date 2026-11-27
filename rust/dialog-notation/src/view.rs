@@ -44,6 +44,8 @@
 //! here: it is safe only where the renderer sets attributes, never
 //! properties of the element by the attribute's name.
 
+#[cfg(feature = "repository")]
+pub mod html;
 mod markup;
 pub(crate) mod plan;
 pub(crate) mod tree;

@@ -50,6 +50,11 @@ use crate::compile::{Query, Step, compile, written};
 use crate::data;
 use crate::syntax::{Parameters, Syntax};
 
+#[cfg(feature = "repository")]
+mod tree;
+#[cfg(feature = "repository")]
+pub use tree::{RecordContent, RecordNode};
+
 /// What a query's analyzed tree is applied as.
 pub const SELECTED: &str = crate::syntax::namespaced!("select");
 

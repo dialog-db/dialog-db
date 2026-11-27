@@ -6018,3 +6018,6 @@ mod invariants;
 
 mod fold;
 pub use fold::{FoldInput, FoldSubscription, NestedFoldSubscription};
+
+mod tree;
+pub use tree::{TreeSource, TreeSubscription, TreeSubscriptionError};
