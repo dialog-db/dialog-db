@@ -71,26 +71,18 @@
 //! Attribute and concept queries yield each row once.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::mem;
 
-use dialog_capability::{Fork, Provider};
-use dialog_common::{ConditionalSync, Holds};
-use dialog_corpus::tree::CorpusNode;
-use dialog_effects::archive::Load as ArchiveLoad;
-use dialog_effects::archive::{Get, Put};
-use dialog_effects::authority::Identify;
-use dialog_effects::blob::Load as BlobLoad;
-use dialog_effects::blob::Read as BlobRead;
-use dialog_effects::memory::Resolve;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Application;
 use dialog_query::reduce::{Reduce, ReduceEntry, Running};
 use dialog_query::selection::Match;
 use dialog_query::{Conclusion, Fold, FoldConclusion};
-use dialog_search_tree::nodes;
 
 use super::{Delta, Subscription};
-use crate::{Branch, RemoteSite, Stack};
+use crate::{Branch, OpenStackEnv, Stack};
 
 /// How many times one poll polls both inner subscriptions again when
 /// something they read moved while they were polled. Past it the poll
@@ -116,10 +108,10 @@ struct Journal {
 /// of its groups query and one of its inputs query (see the [module
 /// docs](self)). Created by [`Branch::subscribe_fold`] or
 /// [`Stack::fold_subscription`]; driven by [`poll`](Self::poll).
-pub struct FoldSubscription<G: Application, Q: Application> {
+pub struct FoldSubscription<G: Application, Q: Application, I = Subscription<Q>> {
     fold: Fold<G, Q>,
     groups: Subscription<G>,
-    inputs: Subscription<Q>,
+    inputs: I,
     /// The group rows that hold, by key.
     held: Rows<G::Conclusion>,
     /// Every input row, by the key of its group.
@@ -153,6 +145,9 @@ pub struct FoldSubscription<G: Application, Q: Application> {
     evaluations: usize,
 }
 
+/// A standing fold whose input rows come from another standing fold.
+pub type NestedFoldSubscription<G, H, Q> = FoldSubscription<G, Fold<H, Q>, FoldSubscription<H, Q>>;
+
 impl Branch {
     /// Register a standing fold over this branch: a
     /// [`FoldSubscription`], which keeps `fold` current from a
@@ -167,6 +162,19 @@ impl Branch {
         FoldSubscription::new(
             self.subscribe(fold.groups().clone()),
             self.subscribe(fold.inputs().clone()),
+            fold,
+        )
+    }
+
+    /// Register a fold over another fold. The input fold keeps its own
+    /// groups current and sends only their changes to the outer fold.
+    pub fn subscribe_nested_fold<G: Application, H: Application, Q: Application>(
+        &self,
+        fold: Fold<G, Fold<H, Q>>,
+    ) -> NestedFoldSubscription<G, H, Q> {
+        FoldSubscription::new(
+            self.subscribe(fold.groups().clone()),
+            self.subscribe_fold(fold.inputs().clone()),
             fold,
         )
     }
@@ -186,10 +194,22 @@ impl Stack {
             fold,
         )
     }
+
+    /// Keep both levels of a nested fold current over this stack.
+    pub fn nested_fold_subscription<G: Application, H: Application, Q: Application>(
+        &self,
+        fold: Fold<G, Fold<H, Q>>,
+    ) -> NestedFoldSubscription<G, H, Q> {
+        FoldSubscription::new(
+            self.subscription(fold.groups().clone()),
+            self.fold_subscription(fold.inputs().clone()),
+            fold,
+        )
+    }
 }
 
-impl<G: Application, Q: Application> FoldSubscription<G, Q> {
-    fn new(groups: Subscription<G>, inputs: Subscription<Q>, fold: Fold<G, Q>) -> Self {
+impl<G: Application, Q: Application, I> FoldSubscription<G, Q, I> {
+    fn new(groups: Subscription<G>, inputs: I, fold: Fold<G, Q>) -> Self {
         let afresh = fold
             .reduce()
             .entries
@@ -225,8 +245,9 @@ impl<G: Application, Q: Application> FoldSubscription<G, Q> {
         &self.groups
     }
 
-    /// The subscription of the fold's inputs query.
-    pub fn inputs(&self) -> &Subscription<Q> {
+    /// The subscription of the fold's inputs query, which can itself
+    /// be a standing fold.
+    pub fn inputs(&self) -> &I {
         &self.inputs
     }
 
@@ -245,6 +266,78 @@ impl<G: Application, Q: Application> FoldSubscription<G, Q> {
     /// instead of folded again (see the [module docs](self)).
     pub fn steps(&self) -> usize {
         self.steps
+    }
+}
+
+mod sealed {
+    use super::{Application, FoldSubscription, Subscription};
+
+    pub trait Sealed {}
+    impl<Q: Application> Sealed for Subscription<Q> {}
+    impl<G: Application, Q: Application, I> Sealed for FoldSubscription<G, Q, I> {}
+}
+
+/// The source of a standing fold's input deltas.
+#[doc(hidden)]
+pub trait FoldInput<C>: sealed::Sealed + ConditionalSend {
+    /// Poll the source for changes.
+    fn poll_input<'a, Env: OpenStackEnv>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> impl Future<Output = Result<Option<Delta<C>>, EvaluationError>> + ConditionalSend + 'a;
+
+    /// Whole evaluations performed by this source.
+    fn recomputes(&self) -> usize;
+
+    /// Incremental maintenances performed by this source.
+    fn maintenances(&self) -> usize;
+}
+
+impl<Q> FoldInput<Q::Conclusion> for Subscription<Q>
+where
+    Q: Application + ConditionalSync,
+    Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
+{
+    fn poll_input<'a, Env: OpenStackEnv>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> impl Future<Output = Result<Option<Delta<Q::Conclusion>>, EvaluationError>> + ConditionalSend + 'a
+    {
+        self.poll(env)
+    }
+
+    fn recomputes(&self) -> usize {
+        self.recomputes()
+    }
+
+    fn maintenances(&self) -> usize {
+        self.maintenances()
+    }
+}
+
+impl<G, Q, I> FoldInput<FoldConclusion> for FoldSubscription<G, Q, I>
+where
+    G: Application + ConditionalSync,
+    G::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
+    Q: Application + ConditionalSync,
+    Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
+    I: FoldInput<Q::Conclusion> + ConditionalSync,
+{
+    fn poll_input<'a, Env: OpenStackEnv>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> impl Future<Output = Result<Option<Delta<FoldConclusion>>, EvaluationError>>
+    + ConditionalSend
+    + 'a {
+        self.poll(env)
+    }
+
+    fn recomputes(&self) -> usize {
+        self.recomputes()
+    }
+
+    fn maintenances(&self) -> usize {
+        self.maintenances()
     }
 }
 
@@ -358,12 +451,13 @@ fn build<'r>(
     (running.rows() > 0).then_some(running)
 }
 
-impl<G, Q> FoldSubscription<G, Q>
+impl<G, Q, I> FoldSubscription<G, Q, I>
 where
     G: Application + Clone + ConditionalSync,
     G::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
     Q: Application + Clone + ConditionalSync,
     Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
+    I: FoldInput<Q::Conclusion> + ConditionalSync,
 {
     /// Full evaluations so far: of the inner queries, both together,
     /// each one's first poll and every fallback from its maintenance;
@@ -398,30 +492,10 @@ where
     /// before the other is polled, and the groups it moved are kept until
     /// they are folded, so a poll that fails loses nothing: the next one
     /// folds them, and reports their rows against the ones last reported.
-    pub async fn poll<'a, Env>(
+    pub async fn poll<'a, Env: OpenStackEnv>(
         &'a mut self,
         env: &'a Env,
-    ) -> Result<Option<Delta<FoldConclusion>>, EvaluationError>
-    where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<ArchiveLoad>
-            + Provider<nodes::Write<CorpusNode>>
-            + ConditionalSync
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<BlobLoad>
-            + Provider<dialog_corpus::Preload>
-            + Provider<dialog_corpus::Speculation>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Holds
-            + ConditionalSync
-            + 'static,
-    {
+    ) -> Result<Option<Delta<FoldConclusion>>, EvaluationError> {
         let mut reported = false;
         for _ in 0..ROUNDS {
             let stamp = self.groups.stamp();
@@ -437,15 +511,15 @@ where
                     delta,
                 )?;
             }
-            if let Some(delta) = self.inputs.poll(env).await? {
+            if let Some(delta) = self.inputs.poll_input(env).await? {
                 reported = true;
-                let (fold, inputs) = (&self.fold, &self.inputs);
+                let fold = &self.fold;
                 apply(
                     &mut self.rows,
                     &mut self.pending,
                     self.runs.then_some((&mut self.journal, Side::Inputs)),
                     |row| fold.key(row),
-                    |conclusion| inputs.query.bindings(conclusion),
+                    |conclusion| fold.inputs().bindings(conclusion),
                     delta,
                 )?;
             }
@@ -524,7 +598,7 @@ where
                         }
                     };
                     match folded {
-                        Some(row) => Some(self.fold.realize(row)?),
+                        Some(row) => Some(self.fold.realize_group(row)?),
                         None => None,
                     }
                 }
@@ -564,35 +638,15 @@ where
     /// Evaluate the whole fold afresh, over what the inner queries read,
     /// and report how its rows differ from the ones last reported: what
     /// a poll of a fold that orders by standing does.
-    async fn evaluate_afresh<'a, Env>(
+    async fn evaluate_afresh<'a, Env: OpenStackEnv>(
         &'a mut self,
         env: &'a Env,
-    ) -> Result<Delta<FoldConclusion>, EvaluationError>
-    where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<ArchiveLoad>
-            + Provider<nodes::Write<CorpusNode>>
-            + ConditionalSync
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + ConditionalSync
-            + Provider<BlobLoad>
-            + Provider<dialog_corpus::Preload>
-            + Provider<dialog_corpus::Speculation>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Holds
-            + ConditionalSync
-            + 'static,
-    {
+    ) -> Result<Delta<FoldConclusion>, EvaluationError> {
         // A subscription's first poll is a whole evaluation, read as the
         // inner subscriptions read: the same branch, and the same stack.
         let mut whole = Subscription::over(
-            self.inputs.branch.clone(),
-            self.inputs.stack.clone(),
+            self.groups.branch.clone(),
+            self.groups.stack.clone(),
             self.fold.clone(),
         );
         let rows = whole

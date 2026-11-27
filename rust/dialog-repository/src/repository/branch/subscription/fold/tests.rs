@@ -13,7 +13,10 @@ use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::reduce::{Aggregator, Reduce, ReduceEntry};
 use dialog_query::types::Any;
-use dialog_query::{AttributeQuery, Conclusion, Fold, FoldConclusion, Output as _, Term, the};
+use dialog_query::{
+    AttributeQuery, ConceptQuery, Conclusion, Fold, FoldConclusion, MapPattern, Output as _,
+    Parameters, Term, the,
+};
 use dialog_storage::provider::storage::VolatileSpace;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
@@ -59,6 +62,189 @@ async fn opened() -> anyhow::Result<(Operator, Branch)> {
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     Ok((operator, branch))
+}
+
+#[dialog_common::test]
+async fn it_keeps_cards_with_their_own_tags_in_each_notebook() -> anyhow::Result<()> {
+    let (operator, branch) = opened().await?;
+    let work: Entity = "id:work".parse()?;
+    let home: Entity = "id:home".parse()?;
+    let empty: Entity = "id:empty".parse()?;
+    let milk: Entity = "id:milk".parse()?;
+    let call: Entity = "id:call".parse()?;
+    let email: Entity = "id:email".parse()?;
+    let text = |s: &str| Value::String(s.into());
+
+    let mut tx = branch.transaction();
+    for notebook in [&work, &home, &empty] {
+        tx = tx.assert(
+            the!("notebook/title")
+                .of(notebook.clone())
+                .is("Notebook".to_string()),
+        );
+    }
+    for (todo, notebook, title) in [
+        (&milk, &home, "Buy milk"),
+        (&call, &home, "Call mum"),
+        (&email, &work, "Email Sam"),
+    ] {
+        tx = tx
+            .assert(the!("todo/notebook").of(todo.clone()).is(notebook.clone()))
+            .assert(the!("todo/title").of(todo.clone()).is(title.to_string()));
+    }
+    tx.assert(the!("todo/tag").of(milk.clone()).is("errand".to_string()))
+        .assert(the!("todo/tag").of(email.clone()).is("today".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("t"));
+    terms.insert("notebook".into(), Term::var("member-of"));
+    terms.insert("title".into(), Term::var("todo-title"));
+    let todos = ConceptQuery {
+        predicate: serde_json::from_value(serde_json::json!({
+            "with": {
+                "notebook": { "the": "todo/notebook", "as": "entity:" },
+                "title": { "the": "todo/title", "as": "text:" }
+            }
+        }))?,
+        terms,
+    };
+    let cards = Fold::new(
+        todos,
+        read(Term::from(the!("todo/tag")), "tag", "cause"),
+        Reduce::new(
+            vec!["t".into()],
+            vec![
+                ReduceEntry::new("notebook", Aggregator::Min, Term::var("member-of")),
+                ReduceEntry::new("title", Aggregator::Min, Term::var("todo-title")),
+                ReduceEntry::new("tags", Aggregator::Distinct, Term::var("tag")),
+            ],
+        ),
+    )
+    .with_projection(
+        "card",
+        MapPattern::new([
+            (text("id"), Term::var("t").into()),
+            (text("title"), Term::var("title").into()),
+            (text("tags"), Term::var("tags").into()),
+        ])?,
+    );
+    let pages = Fold::new(
+        AttributeQuery::new(
+            Term::from(the!("notebook/title")),
+            Term::<Entity>::var("notebook"),
+            Term::<Any>::blank(),
+            Term::blank(),
+            None,
+        ),
+        cards,
+        Reduce::new(
+            vec!["notebook".into()],
+            vec![ReduceEntry::new(
+                "cards",
+                Aggregator::Distinct,
+                Term::var("card"),
+            )],
+        ),
+    );
+
+    let cards_of = |row: &FoldConclusion| -> anyhow::Result<BTreeMap<Entity, (Value, Vec<Value>)>> {
+        let Some(Value::Composite(cards)) = row.get("cards") else {
+            anyhow::bail!("no cards collection");
+        };
+        cards
+            .items()
+            .map(|item| {
+                let Value::Composite(card) = item else {
+                    anyhow::bail!("card is not a record");
+                };
+                let (Some(Value::Entity(id)), Some(title), Some(Value::Composite(tags))) = (
+                    card.first(&text("id")),
+                    card.first(&text("title")),
+                    card.first(&text("tags")),
+                ) else {
+                    anyhow::bail!("card has missing fields");
+                };
+                Ok((id, (title, tags.items().collect())))
+            })
+            .collect()
+    };
+
+    let mut subscription = branch.subscribe_nested_fold(pages.clone());
+    fn assert_send<T: dialog_common::ConditionalSend>(_: T) {}
+    assert_send(subscription.poll(&operator));
+    let initial = subscription
+        .poll(&operator)
+        .await?
+        .expect("initial notebooks");
+    assert!(initial.retracted.is_empty());
+    let rows: BTreeMap<_, _> = initial
+        .asserted
+        .iter()
+        .map(|row| (row.this(), row))
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        cards_of(rows[&home])?,
+        BTreeMap::from([
+            (milk.clone(), (text("Buy milk"), vec![text("errand")])),
+            (call.clone(), (text("Call mum"), vec![])),
+        ])
+    );
+    assert_eq!(
+        cards_of(rows[&work])?,
+        BTreeMap::from([(email, (text("Email Sam"), vec![text("today")])),])
+    );
+    assert!(cards_of(rows[&empty])?.is_empty());
+
+    let recomputes = subscription.recomputes();
+    let outer_refolds = subscription.refolds();
+    let inner_refolds = subscription.inputs().refolds();
+    branch
+        .transaction()
+        .retract(the!("todo/tag").of(milk.clone()).is("errand".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let changed = subscription.poll(&operator).await?.expect("tag removed");
+    assert_eq!(changed.retracted, vec![rows[&home].clone()]);
+    let [after] = changed.asserted.as_slice() else {
+        anyhow::bail!("expected one changed notebook");
+    };
+    assert_eq!(after.this(), &home);
+    assert_eq!(
+        cards_of(after)?,
+        BTreeMap::from([
+            (milk, (text("Buy milk"), vec![])),
+            (call, (text("Call mum"), vec![])),
+        ])
+    );
+    assert_eq!(subscription.recomputes(), recomputes);
+    assert_eq!(subscription.refolds(), outer_refolds + 1);
+    assert_eq!(subscription.inputs().refolds(), inner_refolds + 1);
+
+    let selected = branch
+        .query()
+        .select(pages)
+        .perform(&operator)
+        .try_vec()
+        .await?;
+    assert_eq!(
+        subscription
+            .results()
+            .map(|row| (row.this(), row))
+            .collect::<BTreeMap<_, _>>(),
+        selected
+            .iter()
+            .map(|row| (row.this(), row))
+            .collect::<BTreeMap<_, _>>(),
+    );
+    assert!(subscription.poll(&operator).await?.is_none());
+    Ok(())
 }
 
 /// Selected through a branch, a fold gives each group, and 0 for the

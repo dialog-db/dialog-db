@@ -6017,4 +6017,4 @@ mod tests {
 mod invariants;
 
 mod fold;
-pub use fold::FoldSubscription;
+pub use fold::{FoldInput, FoldSubscription, NestedFoldSubscription};

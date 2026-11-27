@@ -29,10 +29,10 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use dialog_corpus::Entity;
 
-use crate::Term;
 use crate::concept::Conclusion;
 use crate::corpus::Value;
 use crate::error::EvaluationError;
@@ -40,6 +40,7 @@ use crate::reduce::{Reduce, group_key};
 use crate::selection::{Binding, Match, Selection};
 use crate::try_stream;
 use crate::types::Any;
+use crate::{Pattern, Term};
 
 use super::Application;
 
@@ -80,6 +81,7 @@ pub struct Fold<G, Q> {
     groups: G,
     inputs: Q,
     reduce: Reduce,
+    projection: Option<Arc<(Term<Any>, Pattern)>>,
 }
 
 impl<G, Q> Fold<G, Q> {
@@ -93,7 +95,25 @@ impl<G, Q> Fold<G, Q> {
             groups,
             inputs,
             reduce,
+            projection: None,
         }
+    }
+
+    /// Bind a field to a value built from this fold's grouping fields
+    /// and aggregate outputs. A map pattern, for example, packages a
+    /// group's fields as one record another fold can collect.
+    ///
+    /// The field must be new, and the pattern must build a value for
+    /// each group. A missing or absent field in the pattern is an
+    /// evaluation error. Use an aggregate with an identity (such as
+    /// `distinct`, which gives an empty list) for an empty collection.
+    pub fn with_projection(
+        mut self,
+        field: impl Into<String>,
+        pattern: impl Into<Pattern>,
+    ) -> Self {
+        self.projection = Some(Arc::new((Term::var(field.into()), pattern.into())));
+        self
     }
 
     /// What it folds with.
@@ -159,6 +179,23 @@ impl<G, Q> Fold<G, Q> {
         }
         self.reduce.clone().fold_rows(&rows)
     }
+
+    fn project(&self, row: &mut Match) -> Result<(), EvaluationError> {
+        if let Some((field, pattern)) = self.projection.as_deref() {
+            if row.contains(field) {
+                return Err(EvaluationError::Planning {
+                    message: format!("fold projection field {field} is already bound"),
+                });
+            }
+            let value = pattern
+                .build(row)
+                .ok_or_else(|| EvaluationError::Planning {
+                    message: format!("fold projection {field} cannot build {pattern}"),
+                })?;
+            row.bind(field, value)?;
+        }
+        Ok(())
+    }
 }
 
 /// How a group's key is written, to look its inputs up by.
@@ -192,7 +229,12 @@ where
             }
             // Every group, with its inputs, or with each input absent.
             let groups = self.groups.clone().evaluate(Match::new().seed(), env).try_vec().await?;
-            let folded = self.fold_groups(&groups, |key| joined.get(key).into_iter().flatten())?;
+            let mut folded = self.fold_groups(&groups, |key| joined.get(key).into_iter().flatten())?;
+            if self.projection.is_some() {
+                for row in &mut folded {
+                    self.project(row)?;
+                }
+            }
             // The caller's rows, each joined to the folded rows it
             // agrees with.
             for caller in selection.try_vec().await? {
@@ -225,6 +267,11 @@ where
             }
             values.insert(name.clone(), value);
         }
+        if let Some((field, _)) = self.projection.as_deref()
+            && let Some(name) = field.name()
+        {
+            values.insert(name.to_string(), Some(input.lookup(field)?.content()?));
+        }
         let this = match this {
             Some(this) => this,
             None => UNGROUPED
@@ -246,6 +293,17 @@ where
             }
         }
         Some(row)
+    }
+}
+
+impl<G: Application, Q: Application> Fold<G, Q> {
+    /// Realize a group from the raw bindings returned by
+    /// [`fold_groups`](Self::fold_groups) or a running reduction.
+    /// A standing fold uses this to apply the same projection as a
+    /// fresh evaluation.
+    pub fn realize_group(&self, mut row: Match) -> Result<FoldConclusion, EvaluationError> {
+        self.project(&mut row)?;
+        self.realize(row)
     }
 }
 
