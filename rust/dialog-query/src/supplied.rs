@@ -76,7 +76,7 @@ use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Binding, Parameters, Value, try_stream};
+use crate::{Binding, Environment, Parameters, Value, try_stream};
 
 /// The formula that reads a text's forms.
 pub const READ: &str = "notation/read";
@@ -84,6 +84,9 @@ pub const READ: &str = "notation/read";
 /// The resolver that says what is refused of a form, and what is said
 /// of it without refusing.
 pub const ANALYZE: &str = "notation/analyze";
+
+/// The resolver that runs one phase of the notation pipeline.
+pub const PIPELINE: &str = "notation/pipeline";
 
 /// One row an implementation gives: the value of each output cell, by
 /// the cell's name.
@@ -135,11 +138,23 @@ pub trait NotationAnalyze: fmt::Debug + ConditionalSend + ConditionalSync {
     fn analyze<'s>(&'s self, forms: &'s [Value], facts: &'s dyn Facts) -> Selected<'s>;
 }
 
+/// The implementation of the independently callable document phases.
+pub trait NotationPipeline: fmt::Debug + ConditionalSend + ConditionalSync {
+    /// Run one phase on its input and return its output and diagnostics.
+    fn run(
+        &self,
+        phase: &str,
+        input: &Value,
+        context: Option<&Value>,
+    ) -> Result<Output, EvaluationError>;
+}
+
 /// The key the environment holds a reader under.
 const READER: &str = "dialog-query/supplied/notation/read";
 
 /// The key the environment holds an analyzer under.
 const ANALYZER: &str = "dialog-query/supplied/notation/analyze";
+const PIPELINE_KEY: &str = "dialog-query/supplied/notation/pipeline";
 
 #[derive(Clone)]
 pub(crate) struct Reader {
@@ -155,6 +170,14 @@ static READER_GENERATION: AtomicU64 = AtomicU64::new(0);
 struct ReadRow(Output);
 
 struct Analyzer(Arc<dyn NotationAnalyze>);
+struct Pipeline(Arc<dyn NotationPipeline>);
+
+/// Hold the notation pipeline in a query environment. The implementation
+/// receives all document context explicitly.
+#[doc(hidden)]
+pub fn supply_pipeline(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationPipeline>) {
+    env.held_or(PIPELINE_KEY, &|| Arc::new(Pipeline(implementation.clone())));
+}
 
 /// Hold `implementation` in `env` as what `notation/read` asks, in place
 /// of any held before.
@@ -166,13 +189,23 @@ struct Analyzer(Arc<dyn NotationAnalyze>);
 /// see. It is hidden from the docs for that reason; see the module's.
 #[doc(hidden)]
 pub fn supply_read(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationRead>) {
-    let reader = Reader {
-        generation: READER_GENERATION.fetch_add(1, Ordering::Relaxed),
-        implementation,
-    };
-    env.hold(READER.into(), Arc::new(reader));
+    env.hold(READER.into(), Arc::new(Reader::new(implementation)));
 }
 
+/// Supply the reader if this environment does not already hold one.
+#[doc(hidden)]
+pub fn supply_read_once(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationRead>) {
+    env.held_or(READER, &|| Arc::new(Reader::new(implementation.clone())));
+}
+
+impl Reader {
+    fn new(implementation: Arc<dyn NotationRead>) -> Self {
+        Self {
+            generation: READER_GENERATION.fetch_add(1, Ordering::Relaxed),
+            implementation,
+        }
+    }
+}
 /// Hold `implementation` in `env` as what `notation/analyze` asks, in
 /// place of any held before.
 ///
@@ -277,6 +310,113 @@ pub(crate) static ANALYZE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 });
 
 const ANALYZE_OUTPUTS: [&str; 5] = ["at", "severity", "code", "message", "path"];
+
+pub(crate) static PIPELINE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+    Cells::define(|builder| {
+        builder
+            .cell("phase", text())
+            .the("read, analyze or compile")
+            .required();
+        builder
+            .cell("input", None)
+            .the("the phase's input")
+            .required();
+        builder
+            .cell("context", Some(Kind::from(ValueType::List)))
+            .the("the source texts of preceding documents, in order");
+        builder
+            .cell("output", Some(Kind::from(ValueType::List)))
+            .the("the phase's output, in document order")
+            .output(0);
+        builder
+            .cell("diagnostics", Some(Kind::from(ValueType::List)))
+            .the("the phase's diagnostics")
+            .output(0);
+    })
+});
+
+/// A query asking one phase of the notation pipeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Parameters", into = "Parameters")]
+pub struct NotationPipelineQuery(Parameters);
+
+impl NotationPipelineQuery {
+    /// Bind the phase's cells to query terms.
+    pub fn new(terms: Parameters) -> Result<Self, TypeError> {
+        Ok(Self(PIPELINE_CELLS.conform(terms)?))
+    }
+
+    pub(crate) fn ready(&self, env: &Environment) -> bool {
+        ["phase", "input", "context"]
+            .iter()
+            .all(|key| self.0.get(key).is_none_or(|term| term.is_bound(env)))
+    }
+
+    pub(crate) fn terms(&self) -> &Parameters {
+        &self.0
+    }
+
+    pub(crate) fn input(&self) -> &Term<Any> {
+        self.0.get("input").unwrap_or(&BLANK)
+    }
+
+    pub(crate) fn replace(&mut self, terms: &Parameters) {
+        for (cell, term) in terms.iter() {
+            self.0.insert(cell.clone(), term.clone());
+        }
+    }
+
+    pub(crate) fn evaluate<'a, M: Selection + 'a>(
+        self,
+        env: &(impl Holds + ?Sized),
+        selection: M,
+    ) -> impl Selection + 'a {
+        let pipeline = env
+            .held(PIPELINE_KEY)
+            .and_then(|held| held.downcast_ref::<Pipeline>().map(|held| held.0.clone()));
+        try_stream! {
+            let pipeline = pipeline.ok_or_else(|| EvaluationError::Unsupplied {
+                formula: PIPELINE.into(),
+            })?;
+            for await candidate in selection {
+                let base = candidate?;
+                let value = |key: &str| {
+                    base.lookup(self.0.get(key)?).ok()?.content().ok()
+                };
+                let (Some(Value::String(phase)), Some(input)) = (value("phase"), value("input")) else {
+                    continue;
+                };
+                let context = value("context");
+                if self.0.get("context").is_some() && context.is_none() {
+                    continue;
+                }
+                let output = pipeline.run(&phase, &input, context.as_ref())?;
+                for row in checked(PIPELINE, &["output", "diagnostics"], &PIPELINE_CELLS, vec![output])? {
+                    let projected = row.into_iter()
+                        .filter_map(|(cell, value)| Some((self.0.get(cell)?, Some(value))))
+                        .collect();
+                    for row in rows(&base, vec![projected])? {
+                        yield row;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl TryFrom<Parameters> for NotationPipelineQuery {
+    type Error = TypeError;
+
+    fn try_from(terms: Parameters) -> Result<Self, Self::Error> {
+        Self::new(terms)
+    }
+}
+
+impl From<NotationPipelineQuery> for Parameters {
+    fn from(query: NotationPipelineQuery) -> Self {
+        query.0
+    }
+}
 
 /// `rows`, each held to the outputs and the cells declared for
 /// `formula`: a value for a cell not declared as an output, an output

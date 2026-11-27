@@ -2985,10 +2985,15 @@ impl Expander {
             // `(notation/read text: ?s at: ?n …)` and `notation/analyze`,
             // whose code is the notation's, kept by a keyword a `/` cannot
             // be in: `notation.read`.
-            if let Some(name) = word
-                .as_deref()
-                .filter(|word| [crate::supplied::READ, crate::supplied::ANALYZE].contains(word))
-                && !self.concepts.contains(name)
+            if let Some(name) = word.as_deref().filter(|word| {
+                [
+                    crate::supplied::READ,
+                    crate::supplied::ANALYZE,
+                    crate::supplied::PIPELINE,
+                ]
+                .contains(word)
+                    || crate::supplied::phase(word).is_some()
+            }) && !self.concepts.contains(name)
                 && let Syntax::Application(_, operand) = &tree
             {
                 return Ok(Syntax::Application(
@@ -5223,6 +5228,7 @@ mod tests {
                 POSITION,
                 crate::supplied::READ,
                 crate::supplied::ANALYZE,
+                crate::supplied::PIPELINE,
                 crate::primitive::QUOTE,
                 crate::select::COLLECT,
                 crate::select::DISTINCT,
@@ -5231,6 +5237,7 @@ mod tests {
             .map(String::from),
         );
         defined.extend(Expander::new().unwrap().names.iter().cloned());
+        defined.extend(crate::supplied::STAGES.map(String::from));
         // The key a site is named apart by is the notation's own and never
         // read: no document's use of `site` meets it.
         defined.remove("site");

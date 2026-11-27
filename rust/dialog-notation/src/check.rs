@@ -243,6 +243,32 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     checked
 }
 
+/// Compile an analyzed form or an ordered list of analyzed forms saved
+/// as data. The result can be staged and answered through the usual
+/// driver. Compiling it does not execute any step.
+pub fn check_analyzed(value: &Value) -> Result<Checked, Error> {
+    let analyzed = crate::supplied::document_forms(value)?;
+    let (mut checked, _) = Checked::of(parse_document(""));
+    for (at, form) in analyzed.iter().enumerate() {
+        let steps = crate::compile::compile(form)?;
+        checked
+            .step_forms
+            .extend(std::iter::repeat_n(at, steps.len()));
+        checked.steps.extend(steps);
+    }
+    if let Some((_, error)) = clashes(
+        checked.steps.iter().zip(checked.step_forms.iter().copied()),
+        &analyzed,
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(error);
+    }
+    checked.analyzed = analyzed;
+    Ok(checked)
+}
+
 /// What the compiler refuses of the rule `shown`, which came of the tree
 /// at `origin`, said of that tree: nothing yet says which part of it.
 /// Where the refusal quotes the rule it compiled, the author's form is

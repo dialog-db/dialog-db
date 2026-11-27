@@ -3253,20 +3253,17 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     .await?;
     assert_eq!(named.len(), 3, "{named:?}");
 
-    // The parts of a node are a list, which `'( )` and `[ ]` both take
-    // apart: the kept tuple of two parts.
-    for pair in [
-        "(select (syntax.form ?f is: {:type :tuple :items '(_ _)}))",
+    let pairs = report(
+        &mut notebook,
         "(select (syntax.form ?f is: {:type :tuple :items [_ _]}))",
-    ] {
-        let pairs = report(&mut notebook, pair).await?;
-        assert_eq!(pairs.len(), 1, "{pair}: {pairs:?}");
-        assert!(pairs[0].contains(&entities[3]));
-    }
+    )
+    .await?;
+    assert_eq!(pairs.len(), 1, "{pairs:?}");
+    assert!(pairs[0].contains(&entities[3]));
     // And by a run: every application whose first part is a variable.
     let first = report(
         &mut notebook,
-        "(select (syntax.form ?f is: {:operand {:items '({:type :variable :name ?variable} ... ?more)
+        "(select (syntax.form ?f is: {:operand {:items [{:type :variable :name ?variable} ... ?more]
                                                ... ?parameters}
                                      ... ?node}))",
     )
@@ -3275,20 +3272,17 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     Ok(())
 }
 
-/// A list is `[1 2 3]` where a value stands, or `'(1 2 3)`, quoted as in
-/// lisp so that it is not read as applying `1`. Both say the one list the
-/// data model has, and either takes a kept one apart. `... ?run` after
-/// its items is the ones after them, and `...` alone takes them and binds
-/// nothing. A list comes back written `[ ]`, however it went in.
+/// A list is written `[1 2 3]`. `... ?run` takes the items after
+/// the pattern's prefix, and `...` alone leaves them unbound.
 #[dialog_common::test]
 async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert (xyz.note note:1 tags: '("math" "engines" "looms")))
-               (assert (xyz.note note:2 tags: '("math")))
+            r#"(assert (xyz.note note:1 tags: ["math" "engines" "looms"]))
+               (assert (xyz.note note:2 tags: ["math"]))
                (assert (xyz.note note:3 tags: ["math" "engines"]))
-               (assert (xyz.note note:4 about: {:tags '("math" {:by "Ada"})}))"#,
+               (assert (xyz.note note:4 about: {:tags ["math" {:by "Ada"}]}))"#,
         )
         .await?;
     let one = r#"(xyz.note note:1 tags: ["math" "engines" "looms"])"#;
@@ -3299,24 +3293,18 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
         rows
     };
 
-    // Whole, under a variable: a list is printed `[ ]`, quoted or not
-    // where it was written.
+    // Read the list whole under a variable.
     assert_eq!(
         sorted(report(&mut notebook, "(select (xyz.note ?n tags: ?tags))").await?),
         vec![one, two, three]
     );
-    // A list pattern with no run is the list of exactly its items, in
-    // either spelling, whichever spelling wrote the list.
-    assert_eq!(
-        report(&mut notebook, "(select (xyz.note ?n tags: '(?only)))").await?,
-        vec![two]
-    );
+    // A list pattern with no run matches exactly its items.
     assert_eq!(
         report(&mut notebook, "(select (xyz.note ?n tags: [?only]))").await?,
         vec![two]
     );
     assert_eq!(
-        report(&mut notebook, "(select (xyz.note ?n tags: '(?a ?b)))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: [?a ?b]))").await?,
         vec![three]
     );
     assert_eq!(
@@ -3325,18 +3313,13 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     );
     // With a run it is a list that starts with them. A run may take
     // nothing.
+    let starts = "(select (xyz.note ?n tags: [?first ?second ... ?more]))";
+    assert_eq!(
+        sorted(report(&mut notebook, starts).await?),
+        vec![one, three]
+    );
     for starts in [
-        "(select (xyz.note ?n tags: '(?first ?second ... ?more)))",
-        "(select (xyz.note ?n tags: [?first ?second ... ?more]))",
-    ] {
-        assert_eq!(
-            sorted(report(&mut notebook, starts).await?),
-            vec![one, three],
-            "{starts}"
-        );
-    }
-    for starts in [
-        r#"(select (xyz.note ?n tags: '("math" ... ?more)))"#,
+        r#"(select (xyz.note ?n tags: ["math" ... ?more]))"#,
         r#"(select (xyz.note ?n tags: ["math" ...]))"#,
     ] {
         assert_eq!(
@@ -3347,39 +3330,24 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     }
     // A list with no variable in it is the value, and what a row prints
     // reads back as it.
-    for whole in [
-        r#"(select (xyz.note ?n tags: '("math" "engines" "looms")))"#,
-        r#"(select (xyz.note ?n tags: ["math" "engines" "looms"]))"#,
-    ] {
-        assert_eq!(report(&mut notebook, whole).await?, vec![one], "{whole}");
-    }
+    let whole = r#"(select (xyz.note ?n tags: ["math" "engines" "looms"]))"#;
+    assert_eq!(report(&mut notebook, whole).await?, vec![one]);
     // Inside a struct, and a struct inside it.
     assert_eq!(
         report(
             &mut notebook,
-            "(select (xyz.note ?n about: {:tags '(_ {:by ?who})}))"
+            "(select (xyz.note ?n about: {:tags [_ {:by ?who}]}))"
         )
         .await?,
         vec![r#"(xyz.note note:4 about: {:tags ["math" {:by "Ada"}]})"#]
     );
 
-    // A list has no labelled part.
-    let labelled = notebook
-        .submit("(select (xyz.note ?n tags: '(?first then: ?second)))")
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(labelled, Err(Ok(Error::Refused(_)))),
-        "{labelled:?}"
-    );
-    // Quoted, a list may start with anything, a keyword too. Not
-    // quoted, a `( )` where a value stands is refused, with what to
-    // write.
+    // A list may start with a keyword.
     notebook
-        .submit("(assert (xyz.note note:5 tags: '(:open :done)))")
+        .submit("(assert (xyz.note note:5 tags: [:open :done]))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(select (xyz.note ?n tags: '(:open ...)))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: [:open ...]))").await?,
         vec!["(xyz.note note:5 tags: [:open :done])"]
     );
     let bare = notebook

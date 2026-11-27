@@ -152,6 +152,28 @@ impl Expander {
                 Ok(Some(Vec::new()))
             }
             Some("select") => {
+                if let [call] = items(tree)
+                    && let Some(name) = call
+                        .applies()
+                        .filter(|name| crate::supplied::phase(name).is_some())
+                    && let Some(call_terms) = call.operand()
+                {
+                    let head = Syntax::Application(
+                        Box::new(Syntax::Reference(name.replace('/', "."))),
+                        Parameters {
+                            items: vec![Syntax::Constant(crate::data::entity("syntax:result")?)],
+                            terms: call_terms
+                                .terms
+                                .iter()
+                                .filter(|(label, _)| matches!(label.as_str(), "is" | "diagnostics"))
+                                .map(|(label, term)| (label.clone(), term.clone()))
+                                .collect(),
+                        },
+                    );
+                    let mut rules = Vec::new();
+                    self.each(&apply("select", vec![head, call.clone()]), &mut rules)?;
+                    return Ok(Some(rules));
+                }
                 if let Some(found) = collects_in(tree).first() {
                     let found = (*found).clone();
                     return self.about(&found, |_| {

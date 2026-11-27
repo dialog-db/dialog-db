@@ -41,7 +41,7 @@ use crate::resolver::ResolverQuery;
 use crate::rule::RuleKind;
 use crate::rule::canonical::Identity;
 use crate::rule::types::TypeEnv;
-use crate::supplied::{ANALYZE, READ};
+use crate::supplied::{ANALYZE, PIPELINE, READ};
 use crate::type_system::unifier::Context;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::{Entity, Environment, Premise, Term};
@@ -445,6 +445,11 @@ pub fn analyze_with(
                 if matches!(**resolver, ResolverQuery::NotationAnalyze(_)) =>
             {
                 Some(ANALYZE)
+            }
+            Proposition::Resolver(resolver)
+                if matches!(**resolver, ResolverQuery::NotationPipeline(_)) =>
+            {
+                Some(PIPELINE)
             }
             _ => None,
         }

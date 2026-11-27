@@ -79,7 +79,9 @@ use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::supplied::{ANALYZE, ANALYZE_CELLS, NotationAnalyzeQuery};
+use crate::supplied::{
+    ANALYZE, ANALYZE_CELLS, NotationAnalyzeQuery, NotationPipelineQuery, PIPELINE, PIPELINE_CELLS,
+};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -308,6 +310,9 @@ pub enum ResolverQuery {
     /// ([`crate::supplied`]). No rule may hold it.
     #[serde(rename = "notation/analyze")]
     NotationAnalyze(NotationAnalyzeQuery),
+    /// One phase of the notation pipeline, supplied by the notation crate.
+    #[serde(rename = "notation/pipeline")]
+    NotationPipeline(NotationPipelineQuery),
 }
 
 /// One slot of a row a resolver yields: the term it binds, and its
@@ -324,6 +329,7 @@ impl ResolverQuery {
             Self::TreeBlock(_) => "tree/block",
             Self::TreeValue(_) => "tree/value",
             Self::NotationAnalyze(_) => ANALYZE,
+            Self::NotationPipeline(_) => PIPELINE,
         }
     }
 
@@ -336,6 +342,7 @@ impl ResolverQuery {
             Self::TreeBlock(_) => &TREE_BLOCK_CELLS,
             Self::TreeValue(_) => &TREE_VALUE_CELLS,
             Self::NotationAnalyze(_) => &ANALYZE_CELLS,
+            Self::NotationPipeline(_) => &PIPELINE_CELLS,
         }
     }
 
@@ -353,6 +360,7 @@ impl ResolverQuery {
             Self::TreeBlock(query) => &query.of,
             Self::TreeValue(query) => &query.of,
             Self::NotationAnalyze(query) => query.forms(),
+            Self::NotationPipeline(query) => query.input(),
         }
     }
 
@@ -366,6 +374,9 @@ impl ResolverQuery {
     /// fails the handle lookup, so such a query returns empty rather
     /// than erroring.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
+        if let Self::NotationPipeline(query) = self {
+            return query.ready(env).then_some(RESOLVER_COST);
+        }
         self.of().is_bound(env).then_some(RESOLVER_COST)
     }
 
@@ -378,6 +389,7 @@ impl ResolverQuery {
             Self::TreeBlock(query) => query.parameters(),
             Self::TreeValue(query) => query.parameters(),
             Self::NotationAnalyze(query) => query.terms().clone(),
+            Self::NotationPipeline(query) => query.terms().clone(),
         }
     }
 
@@ -392,6 +404,7 @@ impl ResolverQuery {
             Self::TreeBlock(query) => query.replace(terms),
             Self::TreeValue(query) => query.replace(terms),
             Self::NotationAnalyze(query) => query.replace(terms),
+            Self::NotationPipeline(query) => query.replace(terms),
         }
         renamed
     }
@@ -439,6 +452,12 @@ impl ResolverQuery {
             // A declared resolver whose implementation another crate
             // supplies reads no node: it is asked of that implementation.
             if let ResolverQuery::NotationAnalyze(query) = &resolver {
+                for await row in query.clone().evaluate(env, selection) {
+                    yield row?;
+                }
+                return;
+            }
+            if let ResolverQuery::NotationPipeline(query) = &resolver {
                 for await row in query.clone().evaluate(env, selection) {
                     yield row?;
                 }
@@ -636,7 +655,7 @@ impl ResolverQuery {
             // Read through the blob store in `evaluate`, not as a node.
             Self::TreeValue(_) => Vec::new(),
             // Asked of its implementation in `evaluate`, never a node.
-            Self::NotationAnalyze(_) => Vec::new(),
+            Self::NotationAnalyze(_) | Self::NotationPipeline(_) => Vec::new(),
         };
         rows(base, projected)
     }

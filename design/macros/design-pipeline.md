@@ -186,6 +186,19 @@ Proposed, to be checked against what tonk's plugin consumes (forwarded by the co
 
 ### A keystroke
 
+### Calling the phases from a query
+
+```clojure
+(select (syntax/parse "(select (xyz.note/text of: note:1 is: ?x))" is: ?forms))
+(select (syntax/analyze '(select (xyz.note/text of: note:1 is: ?x)) is: ?analyzed))
+(select (syntax.result syntax:result forms: ?forms analyzed: ?analyzed steps: ?steps)
+  (syntax/parse "(select (xyz.note/text of: note:1 is: ?x))" is: ?forms)
+  (syntax/analyze ?forms is: ?analyzed)
+  (syntax/compile ?analyzed is: ?steps))
+```
+
+The reader returns an ordered list of syntax values. The analyzer and compiler accept a single form or a list. Each phase can project `diagnostics:` beside `is:`. Analysis can take an explicit `context:` list of preceding source texts. Parsed and analyzed forms are ordinary composite values that can be stored and passed back as query inputs. The compiler reports each step's kind, form index and preview. To apply a saved analyzed value, a host calls `check_analyzed` and uses the normal staging and evaluation driver. These supplied phases can run together in a select or a named query. A stored rule still requires a versioned implementation that replicas can validate.
+
 A cell's text is a fact (`xyz.cell/source`) or a constant in the query. A keystroke changes it, so the query is asked again: under a subscription only the row of that cell's text changes, and the formula runs again on that text alone, parse and analysis whole, as `check` does today; there is no incremental parser. Every other cell's text is unchanged, so its formula is a cache hit when the formula is marked cached. What a keystroke costs is one `check` of one cell; how long that is for a cell of tonk's size is not measured (hypothesis: under a frame for a cell of 50 lines, release build, the prelude analyzed once and kept, not per call; `Analyzer::new` analyzes the prelude every time today).
 
 ### What a query left out

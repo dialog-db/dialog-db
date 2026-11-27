@@ -72,7 +72,7 @@ pub enum Term {
     Symbol(String),
     /// An application of a formula, standing for its `is:` value.
     Formula(Box<Formula>),
-    /// A struct, `{key value}`, or a list, `[a b]` or `'(a b)`. With no
+    /// A struct, a list, or a quoted syntax tree. With no
     /// variable in it, it is a value; with one, a pattern.
     Struct(Syntax),
     /// A fold, `(count ?t)`: one value made of every value its part is
@@ -230,8 +230,7 @@ pub struct Rule {
     pub unless: Vec<Premise>,
 }
 
-/// What the reader makes of `'x`: `(quote x)`. Where a value stands, a
-/// quoted `( )` is a list.
+/// What the reader makes of `'x`: `(quote x)`.
 pub const QUOTE: &str = "quote";
 
 pub(crate) fn term(node: &Syntax) -> Result<Term, Error> {
@@ -248,8 +247,6 @@ pub(crate) fn term(node: &Syntax) -> Result<Term, Error> {
         Syntax::Reference(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
         Syntax::Map(_) | Syntax::Tuple(_) => Term::Struct(node.clone()),
-        // `'(1 2 3)`: quoted, a `( )` is the list of what it holds, the
-        // same list `[1 2 3]` is.
         quoted if quoted.applies() == Some(QUOTE) => Term::Struct(node.clone()),
         Syntax::Application(_, operand)
             if node.applies().is_some_and(|word| FOLDS.contains(&word)) =>
@@ -271,7 +268,7 @@ pub(crate) fn term(node: &Syntax) -> Result<Term, Error> {
         Syntax::Application(..) => {
             return Err(Error::Refused(format!(
                 "{node} is not a term: it applies no formula, and a list where a value stands \
-                 is `[1 2 3]`, or quoted, `'(1 2 3)`"
+                 is `[1 2 3]`"
             )));
         }
         other => return Err(Error::Refused(format!("{other} is not a term"))),

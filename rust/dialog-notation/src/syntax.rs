@@ -495,7 +495,7 @@ pub fn declarable(name: &str) -> bool {
 /// fails when the notation defines a word this lacks, or this holds one
 /// it does not define. A concept, a command or a query declared under one would
 /// shadow what the notation means by it, so none may be.
-pub const FORMS: [&str; 33] = [
+pub const FORMS: [&str; 37] = [
     "concept",
     "select",
     "query",
@@ -523,6 +523,10 @@ pub const FORMS: [&str; 33] = [
     "dialog/position",
     "notation/read",
     "notation/analyze",
+    "notation/pipeline",
+    "syntax/parse",
+    "syntax/analyze",
+    "syntax/compile",
     "count",
     "count-distinct",
     "sum",
