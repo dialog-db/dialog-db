@@ -14,6 +14,24 @@ says how to cut a release.
 
 ## Unreleased
 
+### A standing fold can keep records collected by another fold
+
+[#908](https://github.com/dialog-db/dialog-db/pull/908).
+A fold can project its group and aggregate fields into one composite
+value. Another fold can collect those values into a nested answer.
+
+What this changes for you:
+
+- Use `Fold::with_projection` to build a record from an inner fold's
+  row, then use that fold as the input of an outer `Fold`.
+- Use `Branch::subscribe_nested_fold` or `Stack::nested_fold_subscription`
+  to maintain both levels. For ordinary distinct collections, a changed
+  child refolds its group and sends the resulting delta to the affected
+  parent group.
+
+Why: a notebook can collect to-do records, each with its own collection
+of tags, with the same engine operations for a select and a subscription.
+
 ### The notation supplies its reader to `notation/read`, and a document asks it in a `select`
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773). The engine declares
