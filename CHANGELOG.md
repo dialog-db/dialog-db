@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A standing fold can keep records collected by another fold
 
-Stacked on [#773](https://github.com/dialog-db/dialog-db/pull/773).
+[#908](https://github.com/dialog-db/dialog-db/pull/908).
 A fold can project its group and aggregate fields into one composite
 value. Another fold can collect those values into a nested answer.
 
