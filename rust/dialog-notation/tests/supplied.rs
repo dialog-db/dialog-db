@@ -440,9 +440,8 @@ async fn it_selects_syntax_phases_alone_and_passes_their_values_between_premises
 }
 
 #[dialog_common::test]
-async fn it_stores_quoted_syntax_and_evaluates_saved_analysis_explicitly() -> Result<()> {
+async fn it_stores_parsed_syntax_and_evaluates_saved_analysis_explicitly() -> Result<()> {
     use dialog_query::supplied::{NotationPipeline, NotationPipelineQuery};
-    use dialog_query::{AttributeDescriptor, concept::descriptor::ConceptStatement};
 
     let mut notebook = Notebook::open().await?;
     let quoted = notebook
@@ -496,22 +495,15 @@ async fn it_stores_quoted_syntax_and_evaluates_saved_analysis_explicitly() -> Re
     let analyzed = row.get("analyzed").expect("analysis record");
     assert_ne!(&form, analyzed);
 
-    let stored: AttributeDescriptor =
-        serde_json::from_value(serde_json::json!({"the": "xyz.syntax/form"}))?;
-    let compiled: AttributeDescriptor =
-        serde_json::from_value(serde_json::json!({"the": "xyz.syntax/analyzed"}))?;
     notebook
-        .branch
-        .transaction()
-        .assert(ConceptStatement {
-            this: "syntax:saved".parse()?,
-            with: vec![stored.resolve(form)?, compiled.resolve(analyzed.clone())?],
-        })
-        .commit()
-        .publish()
-        .perform(&notebook.operator)
+        .apply(&format!(
+            r#"(assert (xyz.syntax/form of: syntax:saved is: ?form cardinality: :one)
+                 (notation/read text: {source:?} tree: ?form))
+               (assert (xyz.syntax/analyzed of: syntax:saved is: ?analysis cardinality: :one)
+                 (xyz.syntax/form of: syntax:saved is: ?form)
+                 (syntax/analyze ?form is: ?analysis))"#
+        ))
         .await?;
-    notebook.branch.refresh(&notebook.operator).await?;
 
     let selected = notebook
         .answers(
@@ -586,19 +578,13 @@ async fn it_gathers_what_read_reads_of_a_text() -> Result<()> {
     Ok(())
 }
 
-/// `notation/read` is asked by a `select`, and by a query a select asks,
-/// alone: a rule is stored and read back from its body, and Dialog-DB
-/// refuses a rule holding a formula whose code is the notation's, and a
-/// write's premises and a view's layer are rules. A rule, a write and a
-/// view holding it are refused, saying so, and nothing of the document
-/// is applied.
+/// A stored rule or a view layer cannot hold a supplied reader. Refusing
+/// either leaves any other writes in the same document unapplied.
 #[dialog_common::test]
 async fn it_refuses_notation_read_where_a_rule_would_hold_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     for text in [
         "(rule (cell/bad ?c at: ?n) (cell ?c source: ?s) (notation/read text: ?s at: ?n))",
-        "(assert (cell x:3 source: \"written\")) \
-         (assert (cell x:3 source: ?k) (cell ?c source: ?s) (notation/read text: ?s at: ?k))",
         "(assert (cell x:3 source: \"written\")) \
          (query (cell/shown ?c is: ?v) (cell ?c source: ?s) (notation/read text: ?s at: ?n) \
            (view ?v [:p ?n])) \
@@ -613,7 +599,7 @@ async fn it_refuses_notation_read_where_a_rule_would_hold_it() -> Result<()> {
         };
         assert!(
             matches!(&refused.refusal, Some(Error::Refused(why))
-                if why.contains("(notation/read …) is asked in a `select` alone")),
+                if why.contains("(notation/read …) is available in a `select` or a top-level write")),
             "{text}: {refused:?}"
         );
     }

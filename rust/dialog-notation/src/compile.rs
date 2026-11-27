@@ -15,7 +15,7 @@
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
-//! | `(report A)` whose premises ask `notation/read` | a [`PremiseQuery`] of them, and no rule: a rule cannot hold it ([`crate::supplied`]) |
+//! | a report or top-level write whose premises ask a supplied notation phase | a [`PremiseQuery`] evaluated by the driver ([`crate::supplied`]) |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
 //! | `(dialog.n.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
 //! | `(dialog.n.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
@@ -85,7 +85,7 @@ pub enum Step {
 /// A write at the top level with premises: what its premises match, and
 /// the write each match makes. `apply` reads the
 /// matches through the transaction the document's earlier steps are
-/// staged in, with [`Query::rule`] laid over that read alone, and stages
+/// staged in, with the write's premises evaluated locally, and stages
 /// each match's [`statement`](Self::statement) in it.
 ///
 /// Plumbing: an embedder applies a document with [`stage`](crate::stage)
@@ -115,6 +115,34 @@ impl Write {
         for (label, value) in row.operand().into_iter().flat_map(|operand| &operand.terms) {
             values.insert(label.clone(), crate::primitive::term(value)?);
         }
+        self.statement_with(values)
+    }
+
+    /// The transaction-local premise query for a write that calls a supplied phase.
+    pub fn supplied_query(&self) -> Option<&PremiseQuery> {
+        self.query.asked.as_ref().map(|asked| &asked.query)
+    }
+
+    /// The facts written by a match of [`Self::supplied_query`].
+    pub fn supplied_statement(&self, row: &PremiseRow) -> Result<ConceptStatement, Error> {
+        let mut values = self.query.asked_values(row)?;
+        if let Term::Variable(name) = &self.head.entity {
+            values.insert(name.clone(), Query::asked_value(row, &self.query.entity)?);
+        }
+        let values = values
+            .into_iter()
+            .map(|(name, value)| {
+                let term = match value {
+                    Value::Composite(_) => Term::Struct(Syntax::Constant(value)),
+                    _ => crate::primitive::term(&written(&value))?,
+                };
+                Ok((name, term))
+            })
+            .collect::<Result<_, Error>>()?;
+        self.statement_with(values)
+    }
+
+    fn statement_with(&self, values: BTreeMap<String, Term>) -> Result<ConceptStatement, Error> {
         fn bound(term: &Term, values: &BTreeMap<String, Term>) -> Result<Term, Error> {
             Ok(match term {
                 Term::Variable(name) => values.get(name).cloned().ok_or_else(|| {
@@ -285,11 +313,6 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
             "{form} matches nothing a query can say"
         )));
     };
-    if let Some(name) = query.asks() {
-        return Err(Error::Refused(format!(
-            "({name} …) is asked in a `select` alone: a write's premises are a rule"
-        )));
-    }
     Ok(Step::Write(Box::new(Write {
         query: *query,
         retract,
@@ -871,8 +894,8 @@ pub(crate) fn compiled(form: &Syntax) -> Result<Vec<Step>, Error> {
             })?;
             if let Some(name) = query.asks() {
                 return Err(Error::Refused(format!(
-                    "({name} …) is asked in a `select` alone: the view {}, layer {layer}, is kept \
-                     by a rule",
+                    "({name} …) is available in a `select` or a top-level write: the view {}, \
+                     layer {layer}, is kept by a rule",
                     plan.name
                 )));
             }
@@ -1892,9 +1915,8 @@ impl Scope {
         }
         if !self.asks {
             return Err(Error::Refused(format!(
-                "({name} …) is asked in a `select` alone: a rule is stored and read back from its \
-                 body, and Dialog-DB refuses a rule holding a formula whose code is the \
-                 notation's; a write's premises and a view's layer are rules"
+                "({name} …) is available in a `select` or a top-level write: a stored rule or \
+                 a view layer cannot hold the notation's supplied formula"
             )));
         }
         if result.is_some() {

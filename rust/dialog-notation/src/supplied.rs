@@ -19,13 +19,11 @@
 //! | `notation/read` | each form [`parse_document`] reads of the text: `at`, its place among them; `tree`, the form as data ([`Syntax::value`](crate::Syntax::value)); its range |
 //! | `notation/analyze` | each thing [`Analyzer::analyze`] says of the forms together: `at`, the form it is about; `severity`, `"error"` or `"warning"`; `code`, its kind as a word; `message`; `path`, the way to the part of the form it is about |
 //!
-//! A document asks `notation/read` in a `select`, or a `query` a select
-//! asks, alone: a rule is stored and read back from its body, and the
-//! engine refuses a rule holding a formula whose code is not its own. It
-//! does not ask `notation/analyze` yet: its `forms` is a list of a
-//! document's trees, and no query a document writes can build one, since
-//! nothing gathers rows into an ordered list and a quoted form is not
-//! built. A query built in Rust gives it a constant list.
+//! A document asks `notation/read` in a `select`, a named `query`, or
+//! a top-level write. The `syntax/parse`, `syntax/analyze` and
+//! `syntax/compile` premises let these queries pass syntax, analysis,
+//! and compiled previews as composite values. The legacy
+//! `notation/analyze` diagnostic interface is called from Rust.
 //!
 //! **What `notation/analyze` does here is temporary.** It analyzes the
 //! forms against the definitions the [`Analyzer`] given to [`supply`]

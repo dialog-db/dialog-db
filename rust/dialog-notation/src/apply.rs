@@ -284,14 +284,27 @@ pub async fn stage<T: Stage, E: Reader>(
                 if let Some(rule) = &write.query.rule {
                     query = query.with_rule(rule.clone());
                 }
-                let rows: Vec<ConceptConclusion> = query
-                    .select(write.query.select.clone())
-                    .perform(env)
-                    .try_vec()
-                    .await?;
+                let statements = if let Some(premises) = write.supplied_query() {
+                    query
+                        .select(premises.clone())
+                        .perform(env)
+                        .try_vec()
+                        .await?
+                        .iter()
+                        .map(|row| write.supplied_statement(row))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    query
+                        .select(write.query.select.clone())
+                        .perform(env)
+                        .try_vec()
+                        .await?
+                        .iter()
+                        .map(|row| write.statement(row))
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 did.push(Did::Read);
-                for row in &rows {
-                    let statement = write.statement(row)?;
+                for statement in statements {
                     transaction = if write.retract {
                         did.push(Did::Retracted(statement.clone()));
                         transaction.retract(statement)
