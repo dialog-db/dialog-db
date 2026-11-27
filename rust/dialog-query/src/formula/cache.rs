@@ -31,7 +31,7 @@ pub const FORMULA_CACHE_CAPACITY: usize = 4096;
 /// The key an environment holds its formula cache under.
 const HELD: &str = "dialog.formulas";
 
-/// The outputs of formulas marked `#[formula(cached)]`, by formula and input
+/// The outputs of formulas that opt into caching, by formula and input
 /// values. Bounded by how many applications it remembers; the least useful
 /// are let go first.
 ///

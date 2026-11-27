@@ -10,17 +10,25 @@
 
 #![allow(deprecated)]
 
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::Result;
 use dialog_corpus::{Composite, Value};
 use dialog_notation::live::Live;
-use dialog_notation::supplied::supply;
+use dialog_notation::supplied::{Read, supply};
 use dialog_notation::{
     Analyzer, Answer, Applied, ApplyError, Error, Selection, Step, apply, check, compile, parse,
 };
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
+use dialog_query::error::EvaluationError;
+use dialog_query::formula::FormulaCache;
 use dialog_query::query::{Output as _, PremiseQuery, PremiseRow};
-use dialog_query::supplied::{NotationAnalyzeQuery, NotationReadQuery};
+use dialog_query::supplied::{
+    NotationAnalyzeQuery, NotationRead, NotationReadQuery, Output, supply_read,
+};
 use dialog_query::{FormulaQuery, Parameters, Premise, Proposition, ResolverQuery, Term};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -328,6 +336,80 @@ async fn it_keeps_what_read_reads_current_as_a_text_is_edited() -> Result<()> {
         edited,
         vec!["(cell/places x:1 is: 0)", "(cell/places x:1 is: 1)"]
     );
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct CountedRead(AtomicUsize);
+
+impl NotationRead for CountedRead {
+    fn read(&self, text: &str) -> Result<Vec<Output>, EvaluationError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Read.read(text)
+    }
+}
+
+#[dialog_common::test]
+async fn it_reads_only_the_edited_source_after_a_standing_poll() -> Result<()> {
+    const CELLS: usize = 50;
+    let mut notebook = Notebook::open().await?;
+    let reader = Arc::new(CountedRead::default());
+    supply_read(&notebook.operator, reader.clone());
+    let source = include_str!("fixtures/todo.clj");
+    let mut writes = PLACES.to_owned();
+    for cell in 0..CELLS {
+        let text = serde_json::to_string(&format!("{source}\n; cell {cell}"))?;
+        writeln!(writes, "(assert (cell x:{cell} source: {text}))")?;
+    }
+    notebook.apply(&writes).await?;
+    let live = Live::new(notebook.branch.clone());
+    let mut standing = live.standing(notebook.selection("(select (cell/places ?c is: ?n))")?)?;
+    let initial = standing
+        .poll(&notebook.operator)
+        .await?
+        .expect("initial forms");
+    assert_eq!(initial.len(), CELLS * parse(source)?.len());
+    assert_eq!(reader.0.load(Ordering::Relaxed), CELLS);
+
+    notebook.write("x:0", &format!("{source}\n(extra)")).await?;
+    let edited = standing
+        .poll(&notebook.operator)
+        .await?
+        .expect("one extra form");
+    assert_eq!(edited.len(), initial.len() + 1);
+    assert_eq!(reader.0.load(Ordering::Relaxed), CELLS + 1);
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_bounds_read_results_and_recomputes_for_a_replaced_reader() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let cache = FormulaCache::with_capacity(2);
+    cache.hold(&notebook.operator);
+    let reader = Arc::new(CountedRead::default());
+    supply_read(&notebook.operator, reader.clone());
+
+    let mut expected = Vec::new();
+    for source in ["(a ?x)", "(b ?y)", "(c ?z)"] {
+        notebook.write("x:1", source).await?;
+        expected = notebook.answers(FORMS).await?;
+        assert_eq!(expected.len(), 1);
+    }
+    assert_eq!(cache.len(), 2);
+    assert_eq!(notebook.answers(FORMS).await?, expected);
+
+    notebook.write("x:2", "(c ?z)").await?;
+    let both = notebook.answers(FORMS).await?;
+    assert_eq!(both.len(), 2);
+    assert!(both.iter().any(|row| row.starts_with("(cell/form x:1 ")));
+    assert!(both.iter().any(|row| row.starts_with("(cell/form x:2 ")));
+    assert_eq!(reader.0.load(Ordering::Relaxed), 3);
+
+    let replacement = Arc::new(CountedRead::default());
+    supply_read(&notebook.operator, replacement.clone());
+    assert_eq!(notebook.answers(FORMS).await?, both);
+    assert_eq!(replacement.0.load(Ordering::Relaxed), 1);
+    assert_eq!(cache.len(), 2);
     Ok(())
 }
 
