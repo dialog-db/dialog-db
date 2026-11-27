@@ -189,10 +189,18 @@ Proposed, to be checked against what tonk's plugin consumes (forwarded by the co
 ```clojure
 (select (syntax/parse "(select (xyz.note/text of: note:1 is: ?x))" is: ?forms))
 (select (syntax/analyze '(select (xyz.note/text of: note:1 is: ?x)) is: ?analyzed))
-(select (syntax.result syntax:result forms: ?forms analyzed: ?analyzed steps: ?steps)
-  (syntax/parse "(select (xyz.note/text of: note:1 is: ?x))" is: ?forms)
+
+(assert (xyz.syntax/source of: syntax:example
+  is: "(select (xyz.note/text of: note:1 is: ?x))" cardinality: :one))
+
+(query (pipeline/inspect ?example is: ?result)
+  (xyz.syntax/source of: ?example is: ?source)
+  (syntax/parse ?source is: ?forms)
   (syntax/analyze ?forms is: ?analyzed)
-  (syntax/compile ?analyzed is: ?steps))
+  (syntax/compile ?analyzed is: ?steps)
+  (is ?result {:forms ?forms :analyzed ?analyzed :steps ?steps}))
+
+(select (pipeline/inspect syntax:example is: ?result))
 ```
 
 The reader returns an ordered list of syntax values. The analyzer accepts one form or a list and returns a record with lowered `forms` and source `declarations`. The compiler takes that record, an analyzed form, or a list of analyzed forms and reports each step's kind, form index and preview. Each phase can project `diagnostics:` beside `is:`. Analysis can take an explicit `context:` list of preceding source texts. Parsed and analyzed forms are ordinary composite values. A top-level assertion can take them straight from its premises, and a later query can read them back. To apply a saved analyzed value, a host calls `check_analyzed` and uses the normal staging and evaluation driver. These supplied phases can run together in a select or a named query. A stored rule still requires a versioned implementation that replicas can validate.

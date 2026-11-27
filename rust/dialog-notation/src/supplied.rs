@@ -60,6 +60,10 @@ pub(crate) fn phase(name: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn declares(name: &str) -> bool {
+    matches!(name, READ | ANALYZE | PIPELINE) || phase(name).is_some()
+}
+
 /// The keyword a formula of `name` is kept by in an analyzed tree, a
 /// name an entity's scheme may be: `notation.read`.
 pub(crate) fn keyword(name: &str) -> String {

@@ -2985,15 +2985,10 @@ impl Expander {
             // `(notation/read text: ?s at: ?n …)` and `notation/analyze`,
             // whose code is the notation's, kept by a keyword a `/` cannot
             // be in: `notation.read`.
-            if let Some(name) = word.as_deref().filter(|word| {
-                [
-                    crate::supplied::READ,
-                    crate::supplied::ANALYZE,
-                    crate::supplied::PIPELINE,
-                ]
-                .contains(word)
-                    || crate::supplied::phase(word).is_some()
-            }) && !self.concepts.contains(name)
+            if let Some(name) = word
+                .as_deref()
+                .filter(|word| crate::supplied::declares(word))
+                && !self.concepts.contains(name)
                 && let Syntax::Application(_, operand) = &tree
             {
                 return Ok(Syntax::Application(

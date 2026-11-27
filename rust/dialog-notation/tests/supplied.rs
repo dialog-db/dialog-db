@@ -422,13 +422,19 @@ async fn it_selects_syntax_phases_alone_and_passes_their_values_between_premises
     assert_eq!(parse.len(), 1);
     assert!(parse[0].contains("application"), "{parse:?}");
 
+    notebook
+        .write("x:1", "(select (xyz.cell/source of: x:1 is: ?s))")
+        .await?;
     let result = notebook
         .answers(
-            r#"(select (syntax.result syntax:result parsed: ?trees analyzed: ?expanded compiled: ?steps
-                        messages: ?diagnostics)
+            r#"(query (pipeline/inspect ?example is: ?result)
+                 (cell ?example source: ?source)
                  (syntax/compile ?expanded is: ?steps)
                  (syntax/analyze ?trees is: ?expanded diagnostics: ?diagnostics)
-                 (syntax/parse "(select (xyz.cell/source of: x:1 is: ?s))" is: ?trees))"#,
+                 (syntax/parse ?source is: ?trees)
+                 (is ?result {:forms ?trees :analyzed ?expanded
+                              :steps ?steps :diagnostics ?diagnostics}))
+               (select (pipeline/inspect x:1 is: ?result))"#,
         )
         .await?;
     assert_eq!(result.len(), 1);
@@ -507,10 +513,11 @@ async fn it_stores_parsed_syntax_and_evaluates_saved_analysis_explicitly() -> Re
 
     let selected = notebook
         .answers(
-            r#"(select (syntax.result syntax:result compiled: ?steps)
-             (xyz.syntax/form of: syntax:saved is: ?stored)
+            r#"(query (pipeline/compile-saved ?example is: ?steps)
+             (xyz.syntax/form of: ?example is: ?stored)
              (syntax/analyze ?stored is: ?analysis)
-             (syntax/compile ?analysis is: ?steps))"#,
+             (syntax/compile ?analysis is: ?steps))
+           (select (pipeline/compile-saved syntax:saved is: ?steps))"#,
         )
         .await?;
     assert_eq!(selected.len(), 1);

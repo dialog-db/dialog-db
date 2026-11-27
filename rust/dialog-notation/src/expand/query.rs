@@ -1009,7 +1009,7 @@ fn parted(rule: &Syntax, part: &Syntax) -> Syntax {
 fn about(conditions: &[Syntax]) -> Option<Syntax> {
     let mut counted: Vec<(String, usize)> = Vec::new();
     for condition in conditions {
-        if condition.is_formula() || condition.applies().is_none() {
+        if condition.is_formula() || condition.applies().is_none_or(crate::supplied::declares) {
             continue;
         }
         if let Some(Syntax::Variable(entity)) = items(condition).first() {
