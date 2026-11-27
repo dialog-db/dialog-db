@@ -603,9 +603,10 @@ impl Live {
     /// Watch HTML as the same generic edits a receiver applies to a
     /// retained tree. The watch renders only the instances its rows move.
     pub fn watch_html(&self, plan: Plan, entity: Option<Value>) -> Result<WatchedHtml, LiveError> {
+        let edits = HtmlEdits::with_plan(&plan);
         Ok(WatchedHtml {
             watched: self.watch(plan, entity)?,
-            edits: HtmlEdits::default(),
+            edits,
         })
     }
 }

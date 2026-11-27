@@ -1,11 +1,13 @@
 //! A producer and mount adapter for HTML over generic tree edits.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use dialog_corpus::Value;
 use dialog_repository::{EditedTree, TreeEdit, TreeId, TreePosition};
 
+use super::plan::Plan;
 use super::{Address, Content, Given, Patch, Posted, Shown, Slot};
 use crate::{Error, data};
 
@@ -145,6 +147,13 @@ impl HtmlNode {
 }
 
 type Children = BTreeMap<usize, Vec<TreeId>>;
+type MoveKey = (Vec<usize>, Vec<Value>);
+
+fn child_address(parent: &Address, slot: usize, shown: &Shown) -> Address {
+    let mut address = parent.clone();
+    address.push((slot, shown.key.clone()));
+    address
+}
 
 struct Held {
     at: Option<Address>,
@@ -162,13 +171,35 @@ pub struct HtmlEdits {
     addresses: HashMap<Address, TreeId>,
     nodes: HashMap<TreeId, Held>,
     roots: Children,
+    move_paths: BTreeSet<Vec<usize>>,
+    occurrences: HashMap<MoveKey, usize>,
 }
 
 impl HtmlEdits {
+    pub(crate) fn with_plan(plan: &Plan) -> Self {
+        Self {
+            move_paths: plan.move_paths.clone(),
+            ..Self::default()
+        }
+    }
+
     /// Translate a batch emitted by a notation view initialized against
     /// an empty tree. A failed conversion requires a new watch and mount.
     pub fn edits(&mut self, patches: &[Patch]) -> Result<Vec<TreeEdit<Value>>, Error> {
+        let moves = self.moves(patches)?;
+        let moving: HashSet<&TreeId> = moves.values().collect();
         let mut edits = Vec::new();
+        // The plan gives insertions their final sibling ranks. Detach
+        // departures first so none of them can be an insertion anchor.
+        for patch in patches {
+            if let Patch::Remove { at } = patch {
+                let id = self.address(at)?;
+                self.detach(&id)?;
+                if !moving.contains(&id) {
+                    self.remove(id, &mut edits);
+                }
+            }
+        }
         for patch in patches {
             match patch {
                 Patch::Insert {
@@ -182,29 +213,22 @@ impl HtmlEdits {
                     } else {
                         Some(self.address(parent)?)
                     };
-                    self.shown(id, parent, *slot, *index, instance, &mut edits)?;
-                }
-                Patch::Remove { at } => {
-                    let id = self.address(at)?;
-                    let node = &self.nodes[&id];
-                    let parent = node.parent.clone();
-                    let slot = node.slot;
-                    let children = self
-                        .children(parent.as_ref())?
-                        .get_mut(&slot)
-                        .ok_or_else(invalid)?;
-                    children.retain(|child| child != &id);
-                    let mut gone = vec![id.clone()];
-                    while let Some(child) = gone.pop() {
-                        if let Some(child) = self.nodes.remove(&child) {
-                            if let Some(address) = child.at {
-                                self.addresses.remove(&address);
-                            }
-                            gone.extend(child.children.into_values().flatten());
-                        }
+                    let address = child_address(parent, *slot, instance);
+                    if let Some(existing) = moves.get(&address) {
+                        let to = self.place(existing, id, *slot, *index)?;
+                        let held = self.nodes.get_mut(existing).ok_or_else(invalid)?;
+                        held.parent = to.parent.clone();
+                        held.slot = *slot;
+                        edits.push(TreeEdit::Move {
+                            id: existing.clone(),
+                            to,
+                        });
+                        self.reconcile(existing, address, instance, &mut edits)?;
+                    } else {
+                        self.shown(id, address, *index, instance, &mut edits)?;
                     }
-                    edits.push(TreeEdit::Remove { id });
                 }
+                Patch::Remove { .. } => {}
                 Patch::SetText { at, slot, text } => {
                     let parent = self.address(at)?;
                     let id = self.nodes[&parent]
@@ -244,6 +268,93 @@ impl HtmlEdits {
         Ok(edits)
     }
 
+    fn move_key(&self, address: &Address) -> Option<MoveKey> {
+        if self.move_paths.is_empty() {
+            return None;
+        }
+        let (_, key) = address.last()?;
+        let path = address.iter().skip(1).map(|(slot, _)| *slot).collect();
+        self.move_paths.contains(&path).then(|| (path, key.clone()))
+    }
+
+    fn moves(&self, patches: &[Patch]) -> Result<HashMap<Address, TreeId>, Error> {
+        let mut departures = HashMap::new();
+        for patch in patches {
+            if let Patch::Remove { at } = patch
+                && let Some(key) = self.move_key(at)
+                && self.occurrences.get(&key) == Some(&1)
+            {
+                departures.insert(key, self.address(at)?);
+            }
+        }
+        if departures.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Descendants of an inserted ancestor also count toward
+        // uniqueness, even though only direct arrivals can move.
+        let mut arrivals = HashMap::new();
+        for patch in patches {
+            if let Patch::Insert {
+                parent,
+                slot,
+                instance,
+                ..
+            } = patch
+            {
+                let mut path: Vec<usize> = parent.iter().skip(1).map(|(slot, _)| *slot).collect();
+                if !parent.is_empty() {
+                    path.push(*slot);
+                }
+                self.count_arrivals(&mut path, instance, &departures, &mut arrivals);
+            }
+        }
+        let mut moves = HashMap::new();
+        for patch in patches {
+            if let Patch::Insert {
+                parent,
+                slot,
+                instance,
+                ..
+            } = patch
+            {
+                let address = child_address(parent, *slot, instance);
+                if let Some(key) = self.move_key(&address)
+                    && arrivals.get(&key) == Some(&1)
+                    && let Some(id) = departures.remove(&key)
+                {
+                    moves.insert(address, id);
+                }
+            }
+        }
+        Ok(moves)
+    }
+
+    fn count_arrivals(
+        &self,
+        path: &mut Vec<usize>,
+        shown: &Shown,
+        departures: &HashMap<MoveKey, TreeId>,
+        arrivals: &mut HashMap<MoveKey, usize>,
+    ) {
+        if self.move_paths.contains(path) {
+            let key = (path.clone(), shown.key.clone());
+            if departures.contains_key(&key) {
+                *arrivals.entry(key).or_default() += 1;
+            }
+        }
+        let Content::Element { slots, .. } = &shown.content;
+        for (slot, child) in slots.iter().enumerate() {
+            if let Slot::Instances(children) = child {
+                path.push(slot);
+                for child in children {
+                    self.count_arrivals(path, child, departures, arrivals);
+                }
+                path.pop();
+            }
+        }
+    }
+
     fn address(&self, address: &Address) -> Result<TreeId, Error> {
         self.addresses.get(address).cloned().ok_or_else(invalid)
     }
@@ -259,18 +370,13 @@ impl HtmlEdits {
         }
     }
 
-    fn insert(
+    fn place(
         &mut self,
+        id: &TreeId,
         parent: Option<TreeId>,
         slot: usize,
         index: usize,
-        address: Option<Address>,
-        value: HtmlNode,
-        edits: &mut Vec<TreeEdit<Value>>,
-    ) -> Result<TreeId, Error> {
-        let payload = value.encode()?;
-        let id: TreeId = Arc::from(self.next.to_string());
-        self.next += 1;
+    ) -> Result<TreePosition, Error> {
         let children = self.children(parent.as_ref())?;
         let before = children
             .get(&slot)
@@ -286,8 +392,59 @@ impl HtmlEdits {
             return Err(invalid());
         }
         siblings.insert(index, id.clone());
+        Ok(TreePosition { parent, before })
+    }
+
+    fn detach(&mut self, id: &TreeId) -> Result<(), Error> {
+        let node = self.nodes.get(id).ok_or_else(invalid)?;
+        let (parent, slot) = (node.parent.clone(), node.slot);
+        let siblings = self
+            .children(parent.as_ref())?
+            .get_mut(&slot)
+            .ok_or_else(invalid)?;
+        siblings.retain(|child| child != id);
+        Ok(())
+    }
+
+    fn remove(&mut self, id: TreeId, edits: &mut Vec<TreeEdit<Value>>) {
+        let mut gone = vec![id.clone()];
+        while let Some(id) = gone.pop() {
+            if let Some(child) = self.nodes.remove(&id) {
+                if let Some(address) = child.at {
+                    self.addresses.remove(&address);
+                    if let Some(key) = self.move_key(&address)
+                        && let Entry::Occupied(mut entry) = self.occurrences.entry(key)
+                    {
+                        *entry.get_mut() -= 1;
+                        if *entry.get() == 0 {
+                            entry.remove();
+                        }
+                    }
+                }
+                gone.extend(child.children.into_values().flatten());
+            }
+        }
+        edits.push(TreeEdit::Remove { id });
+    }
+
+    fn insert(
+        &mut self,
+        parent: Option<TreeId>,
+        slot: usize,
+        index: usize,
+        address: Option<Address>,
+        value: HtmlNode,
+        edits: &mut Vec<TreeEdit<Value>>,
+    ) -> Result<TreeId, Error> {
+        let payload = value.encode()?;
+        let id: TreeId = Arc::from(self.next.to_string());
+        self.next += 1;
+        let at = self.place(&id, parent.clone(), slot, index)?;
         if let Some(address) = &address {
             self.addresses.insert(address.clone(), id.clone());
+            if let Some(key) = self.move_key(address) {
+                *self.occurrences.entry(key).or_default() += 1;
+            }
         }
         self.nodes.insert(
             id.clone(),
@@ -301,7 +458,7 @@ impl HtmlEdits {
         );
         edits.push(TreeEdit::Insert {
             id: id.clone(),
-            at: TreePosition { parent, before },
+            at,
             value: payload,
         });
         Ok(id)
@@ -310,8 +467,7 @@ impl HtmlEdits {
     fn shown(
         &mut self,
         parent: Option<TreeId>,
-        address: &Address,
-        slot: usize,
+        address: Address,
         index: usize,
         shown: &Shown,
         edits: &mut Vec<TreeEdit<Value>>,
@@ -322,8 +478,7 @@ impl HtmlEdits {
             events,
             slots,
         } = &shown.content;
-        let mut address = address.clone();
-        address.push((slot, shown.key.clone()));
+        let slot = address.last().ok_or_else(invalid)?.0;
         let value = HtmlNode::Element {
             tag: tag.clone(),
             attributes: attributes.clone(),
@@ -344,10 +499,97 @@ impl HtmlEdits {
                 }
                 Slot::Instances(children) => {
                     for (index, child) in children.iter().enumerate() {
-                        self.shown(Some(id.clone()), &address, slot, index, child, edits)?;
+                        let at = child_address(&address, slot, child);
+                        self.shown(Some(id.clone()), at, index, child, edits)?;
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn reconcile(
+        &mut self,
+        id: &TreeId,
+        address: Address,
+        shown: &Shown,
+        edits: &mut Vec<TreeEdit<Value>>,
+    ) -> Result<(), Error> {
+        let Content::Element {
+            tag,
+            attributes,
+            events,
+            slots,
+        } = &shown.content;
+        let held = self.nodes.get_mut(id).ok_or_else(invalid)?;
+        let old = held.at.replace(address.clone()).ok_or_else(invalid)?;
+        self.addresses.remove(&old);
+        self.addresses.insert(address.clone(), id.clone());
+        self.set(
+            id,
+            HtmlNode::Element {
+                tag: tag.clone(),
+                attributes: attributes.clone(),
+                events: events.clone(),
+            },
+            edits,
+        )?;
+        for (slot, child) in slots.iter().enumerate() {
+            let old = self.nodes[id]
+                .children
+                .get(&slot)
+                .cloned()
+                .unwrap_or_default();
+            match child {
+                Slot::Text(text) => {
+                    let text_id = old.first().ok_or_else(invalid)?;
+                    self.set(text_id, HtmlNode::Text(text.clone()), edits)?;
+                }
+                Slot::Instances(children) => {
+                    let remaining: HashSet<_> = children.iter().map(|child| &child.key).collect();
+                    let mut kept = HashMap::new();
+                    for id in old {
+                        let (_, key) = self.nodes[&id]
+                            .at
+                            .as_ref()
+                            .and_then(|address| address.last())
+                            .ok_or_else(invalid)?;
+                        if remaining.contains(key) {
+                            kept.insert(key.clone(), id);
+                        } else {
+                            self.detach(&id)?;
+                            self.remove(id, edits);
+                        }
+                    }
+                    // Instances in a slot are in key order, so surviving
+                    // children are already in the right relative order.
+                    for (index, child) in children.iter().enumerate() {
+                        let at = child_address(&address, slot, child);
+                        if let Some(existing) = kept.get(&child.key) {
+                            self.reconcile(existing, at, child, edits)?;
+                        } else {
+                            self.shown(Some(id.clone()), at, index, child, edits)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set(
+        &mut self,
+        id: &TreeId,
+        value: HtmlNode,
+        edits: &mut Vec<TreeEdit<Value>>,
+    ) -> Result<(), Error> {
+        let current = &mut self.nodes.get_mut(id).ok_or_else(invalid)?.value;
+        if *current != value {
+            edits.push(TreeEdit::Set {
+                id: id.clone(),
+                value: value.encode()?,
+            });
+            *current = value;
         }
         Ok(())
     }

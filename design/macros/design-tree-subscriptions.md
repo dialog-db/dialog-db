@@ -53,9 +53,14 @@ the same edit operations. A new chip inserts its element and text
 children. `HtmlMount` applies edits to an `HtmlHost`; the WASM
 `BrowserHost` applies them to the DOM and delegates command listener
 binding to the embedder. The mount preserves a node handle on a
-generic `Move`. The legacy view plan names instances by their parent
-path, so moves across parents in that plan still appear as removals
-and inserts. Only mount frames from a trusted notation producer.
+generic `Move`. The HTML producer matches a departure and arrival at
+the same template position when the local key includes the view's
+entity and occurs once on each side of the batch. The move carries the
+existing subtree between mounted parents. Changes within the moved
+subtree are sent as local edits. The sender examines the moved subtree
+to produce those edits. Keys shared by several instances and changes
+covered by an ancestor's insertion or removal use ordinary inserts and
+removes. Only mount frames from a trusted notation producer.
 
 ## Binary frames
 

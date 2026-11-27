@@ -1,10 +1,10 @@
 use anyhow::Result;
 use dialog_corpus::Value;
-use dialog_notation::live::Live;
+use dialog_notation::live::{Live, WatchedHtml};
 use dialog_notation::view::html::{HtmlHost, HtmlMount, HtmlNode};
 use dialog_notation::{Analyzer, RecordContent, RecordNode, Step, Syntax, compile, parse};
 use dialog_repository::tree_edits::wire::{EditDecoder, EditEncoder, FrameError};
-use dialog_repository::{EditedTree, TreeEdit, TreePosition};
+use dialog_repository::{EditedTree, TreeEdit};
 
 #[path = "support/session.rs"]
 mod session;
@@ -278,71 +278,186 @@ impl HtmlHost for NativeHost {
     }
 }
 
-async fn exercise_html<H: HtmlHost>(
-    host: H,
-) -> Result<(HtmlMount<H>, usize, Vec<TreeEdit<Value>>)> {
-    let mut notebook = notebook().await?;
-    let Step::View(plan) = compiled(HTML)? else {
-        anyhow::bail!("expected HTML selection")
-    };
-    let live = Live::new(notebook.branch.clone());
-    let mut watched = live.watch_html(*plan, None)?;
-    let mut encoder = EditEncoder::default();
-    let mut decoder = EditDecoder::default();
-    let mut mount = HtmlMount::new(host);
-    let frame = watched
-        .poll_frame(&notebook.operator, &mut encoder)
-        .await?
-        .expect("initial HTML");
-    let seed = decoder.decode(&frame)?;
-    let seeded = seed.len();
-    mount.apply(seed).map_err(anyhow::Error::msg)?;
-    write(&mut notebook, r#"(assert (task/tag task:1 tag: "urgent"))"#).await?;
-    let frame = watched
-        .poll_frame(&notebook.operator, &mut encoder)
-        .await?
-        .expect("chip frame");
-    assert!(matches!(
-        decoder.decode(&frame[..frame.len() - 1]),
-        Err(FrameError::Malformed)
-    ));
-    let delta = decoder.decode(&frame)?;
-    assert_eq!(delta.len(), 2, "one element and its text");
-    mount.apply(delta.clone()).map_err(anyhow::Error::msg)?;
-    Ok((mount, seeded, delta))
+struct HtmlSession<H: HtmlHost> {
+    notebook: Notebook,
+    watched: WatchedHtml,
+    encoder: EditEncoder,
+    decoder: EditDecoder,
+    mount: HtmlMount<H>,
+}
+
+impl<H: HtmlHost> HtmlSession<H> {
+    async fn open(host: H, notebook: Notebook, query: &str) -> Result<Self> {
+        let Step::View(plan) = compiled(query)? else {
+            anyhow::bail!("expected HTML selection")
+        };
+        let watched = Live::new(notebook.branch.clone()).watch_html(*plan, None)?;
+        let mut session = Self {
+            notebook,
+            watched,
+            encoder: EditEncoder::default(),
+            decoder: EditDecoder::default(),
+            mount: HtmlMount::new(host),
+        };
+        let seed = session.frame().await?;
+        session.apply(&seed)?;
+        Ok(session)
+    }
+
+    async fn frame(&mut self) -> Result<Vec<u8>> {
+        Ok(self
+            .watched
+            .poll_frame(&self.notebook.operator, &mut self.encoder)
+            .await?
+            .expect("HTML frame"))
+    }
+
+    fn apply(&mut self, frame: &[u8]) -> Result<Vec<TreeEdit<Value>>> {
+        let edits = self.decoder.decode(frame)?;
+        self.mount
+            .apply(edits.clone())
+            .map_err(anyhow::Error::msg)?;
+        Ok(edits)
+    }
+
+    async fn update(&mut self, source: &str) -> Result<Vec<TreeEdit<Value>>> {
+        write(&mut self.notebook, source).await?;
+        let frame = self.frame().await?;
+        self.apply(&frame)
+    }
+
+    async fn add_chip(&mut self) -> Result<Vec<TreeEdit<Value>>> {
+        write(
+            &mut self.notebook,
+            r#"(assert (task/tag task:1 tag: "urgent"))"#,
+        )
+        .await?;
+        let frame = self.frame().await?;
+        assert!(matches!(
+            self.decoder.decode(&frame[..frame.len() - 1]),
+            Err(FrameError::Malformed)
+        ));
+        let delta = self.apply(&frame)?;
+        assert_eq!(delta.len(), 2, "one element and its text");
+        Ok(delta)
+    }
 }
 
 #[dialog_common::test]
-async fn it_mounts_one_chip_and_moves_the_same_handle() -> Result<()> {
-    let (mut mount, seeded, delta) = exercise_html(NativeHost::default()).await?;
-    assert_eq!(mount.host().values.len(), seeded + 2);
-    assert!(mount.host().removed.is_empty());
-    assert!(matches!(&mount.host().values[seeded], HtmlNode::Element { tag, .. } if tag == "span"));
-    assert_eq!(
-        mount.host().values[seeded + 1],
-        HtmlNode::Text("urgent".into())
-    );
-    let TreeEdit::Insert { id, at, .. } = &delta[0] else {
-        anyhow::bail!("expected insert")
+async fn it_mounts_one_chip_and_moves_its_card_with_local_edits() -> Result<()> {
+    let mut session = HtmlSession::open(NativeHost::default(), notebook().await?, HTML).await?;
+    let seeded = session.mount.host().values.len();
+    let delta = session.add_chip().await?;
+    let host = session.mount.host();
+    assert_eq!(host.values.len(), seeded + 2);
+    assert!(host.removed.is_empty());
+    assert!(matches!(&host.values[seeded], HtmlNode::Element { tag, .. } if tag == "span"));
+    assert_eq!(host.values[seeded + 1], HtmlNode::Text("urgent".into()));
+    let TreeEdit::Insert { at, .. } = &delta[0] else {
+        anyhow::bail!("expected chip insert")
     };
-    // A move gives the host the same element handle and no child payload.
-    mount
-        .apply(vec![TreeEdit::Move {
-            id: id.clone(),
-            to: TreePosition {
-                parent: at.parent.clone(),
-                before: None,
-            },
-        }])
-        .map_err(anyhow::Error::msg)?;
-    assert_eq!(mount.host().values.len(), seeded + 2);
-    assert_eq!(mount.host().placed.last().unwrap().0, seeded);
+    let card = at.parent.as_ref().expect("parent card");
+    let card_handle = host.placed[seeded].1.expect("mounted parent card");
+    let delta = session
+        .update(
+            r#"(assert (task task:1 list: list:work title: "Buy oat milk"))
+               (retract (task/tag task:1 tag: "home"))
+               (assert (task/tag task:1 tag: "work"))"#,
+        )
+        .await?;
+    let [
+        TreeEdit::Move { id, .. },
+        TreeEdit::Set { value, .. },
+        TreeEdit::Remove { .. },
+        TreeEdit::Insert { at, .. },
+        TreeEdit::Insert { .. },
+    ] = delta.as_slice()
+    else {
+        anyhow::bail!("expected a card move with local edits: {delta:?}")
+    };
+    assert_eq!(id, card);
+    assert_eq!(at.parent.as_ref(), Some(card));
+    assert_eq!(
+        HtmlNode::decode(value.clone())?,
+        HtmlNode::Text("Buy oat milk".into())
+    );
+    assert_eq!(session.mount.host().placed[seeded + 2].0, card_handle);
+    assert_eq!(session.mount.host().removed.len(), 1);
+
+    let delta = session
+        .update(
+            r#"(retract (task/tag task:1 tag: "urgent"))
+               (assert (task/tag task:2 tag: "urgent"))"#,
+        )
+        .await?;
+    assert!(matches!(
+        delta.as_slice(),
+        [
+            TreeEdit::Remove { .. },
+            TreeEdit::Insert { .. },
+            TreeEdit::Insert { .. }
+        ]
+    ));
+    assert_eq!(session.mount.host().removed.last(), Some(&seeded));
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_leaves_duplicate_card_instances_independent() -> Result<()> {
+    let membership = r#"
+        (concept (task/link ?t list: ?l)
+          (xyz.task/link of: ?t is: ?l as: :entity cardinality: :many))"#;
+    let query = format!("{membership}{HTML}").replace(
+        "(task ?t list: ?l title: ?title)",
+        "(task ?t title: ?title ...) (task/link ?t list: ?l)",
+    );
+    let mut notebook = notebook().await?;
+    write(&mut notebook, membership).await?;
+    write(
+        &mut notebook,
+        r#"(assert (shelf list:third name: "Third"))
+           (assert (task/link task:1 list: list:home))
+           (assert (task/link task:1 list: list:work))"#,
+    )
+    .await?;
+    let mut session = HtmlSession::open(NativeHost::default(), notebook, &query).await?;
+    let edits = session
+        .update(
+            r#"(retract (task/link task:1 list: list:home))
+               (assert (task/link task:1 list: list:third))"#,
+        )
+        .await?;
+    assert_eq!(edits.len(), 5);
+    assert!(matches!(edits.first(), Some(TreeEdit::Remove { .. })));
+    assert!(
+        edits[1..]
+            .iter()
+            .all(|edit| matches!(edit, TreeEdit::Insert { .. }))
+    );
+
+    session
+        .update(r#"(retract (task/link task:1 list: list:work))"#)
+        .await?;
+    let edits = session
+        .update(
+            r#"(retract (task/link task:1 list: list:third))
+               (assert (task/link task:1 list: list:home))
+               (assert (task/link task:1 list: list:work))"#,
+        )
+        .await?;
+    assert_eq!(edits.len(), 9);
+    assert!(matches!(edits.first(), Some(TreeEdit::Remove { .. })));
+    assert!(
+        edits[1..]
+            .iter()
+            .all(|edit| matches!(edit, TreeEdit::Insert { .. }))
+    );
     Ok(())
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[wasm_bindgen_test::wasm_bindgen_test]
-async fn it_inserts_the_chip_into_the_actual_dom() -> Result<()> {
+async fn it_moves_the_card_and_its_chip_in_the_actual_dom() -> Result<()> {
     use dialog_notation::view::html::BrowserHost;
     use web_sys::Element;
     let document: web_sys::Document = js_sys::Reflect::get(&js_sys::global(), &"document".into())
@@ -353,27 +468,47 @@ async fn it_inserts_the_chip_into_the_actual_dom() -> Result<()> {
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
     let host =
         BrowserHost::new(root.clone(), |_: &Element, _| Ok(())).map_err(anyhow::Error::msg)?;
-    let (mut mount, _, delta) = exercise_html(host).await?;
+    let mut session = HtmlSession::open(host, notebook().await?, HTML).await?;
+    session.add_chip().await?;
     assert!(root.inner_html().contains(
         r#"<li>Buy milk<span class="tag">home</span><span class="tag">urgent</span></li>"#
     ));
-    let chip = root
-        .query_selector("li > span:last-child")
-        .map_err(|err| anyhow::anyhow!("{err:?}"))?
-        .expect("tag chip");
-    let [TreeEdit::Insert { id, .. }, _] = delta.as_slice() else {
-        anyhow::bail!("expected chip")
+    let select = |selector| -> Result<Element> {
+        Ok(root
+            .query_selector(selector)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?
+            .expect("mounted element"))
     };
-    mount
-        .apply(vec![TreeEdit::Move {
-            id: id.clone(),
-            to: TreePosition {
-                parent: None,
-                before: None,
-            },
-        }])
-        .map_err(anyhow::Error::msg)?;
-    assert!(chip.is_same_node(root.last_child().as_ref()));
+    let card = select("section:first-child li:first-child")?;
+    let chip = select("section:first-child li:first-child > span:last-child")?;
+    let delta = session
+        .update(r#"(assert (task task:1 list: list:work title: "Buy milk"))"#)
+        .await?;
+    assert!(
+        matches!(delta.as_slice(), [TreeEdit::Move { .. }]),
+        "{delta:?}"
+    );
+    let moved = select("section:last-child li")?;
+    let urgent = select("section:last-child li > span:last-child")?;
+    assert!(card.is_same_node(Some(moved.as_ref())));
+    assert!(chip.is_same_node(Some(urgent.as_ref())));
     assert_eq!(chip.text_content().as_deref(), Some("urgent"));
+
+    let other = select("section:first-child li")?;
+    let delta = session
+        .update(
+            r#"(assert (task task:1 list: list:home title: "Buy milk"))
+               (assert (task task:2 list: list:work title: "Call mum"))"#,
+        )
+        .await?;
+    assert!(
+        matches!(
+            delta.as_slice(),
+            [TreeEdit::Move { .. }, TreeEdit::Move { .. }]
+        ),
+        "{delta:?}"
+    );
+    assert!(card.is_same_node(Some(select("section:first-child li")?.as_ref())));
+    assert!(other.is_same_node(Some(select("section:last-child li")?.as_ref())));
     Ok(())
 }

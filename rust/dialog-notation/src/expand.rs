@@ -5115,7 +5115,7 @@ mod tests {
     #[test]
     fn it_lists_every_word_the_notation_defines_in_forms() {
         use std::collections::BTreeSet;
-        let files: [(&str, &str); 24] = [
+        let files: [(&str, &str); 27] = [
             ("analyze.rs", include_str!("analyze.rs")),
             ("apply.rs", include_str!("apply.rs")),
             ("check.rs", include_str!("check.rs")),
@@ -5133,9 +5133,12 @@ mod tests {
             ("pattern.rs", include_str!("pattern.rs")),
             ("print.rs", include_str!("print.rs")),
             ("select.rs", include_str!("select.rs")),
+            ("select/tree.rs", include_str!("select/tree.rs")),
             ("supplied.rs", include_str!("supplied.rs")),
             ("syntax.rs", include_str!("syntax.rs")),
             ("view.rs", include_str!("view.rs")),
+            ("view/html.rs", include_str!("view/html.rs")),
+            ("view/html/browser.rs", include_str!("view/html/browser.rs")),
             ("view/markup.rs", include_str!("view/markup.rs")),
             ("view/plan.rs", include_str!("view/plan.rs")),
             ("view/tree.rs", include_str!("view/tree.rs")),
