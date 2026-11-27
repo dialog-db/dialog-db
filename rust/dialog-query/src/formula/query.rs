@@ -317,7 +317,7 @@ impl FormulaQuery {
                     formula: READ.into(),
                 })?;
                 for await candidate in selection {
-                    for row in query.expand(candidate?, reader.as_ref())? {
+                    for row in query.expand(candidate?, &reader, &cache)? {
                         yield row;
                     }
                 }

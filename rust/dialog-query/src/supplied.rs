@@ -50,6 +50,7 @@
 //! goes to), not as an [`EvaluationError`](crate::error::EvaluationError) when a query asks it.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use dialog_capability::Provider;
@@ -66,6 +67,7 @@ use serde::{Deserialize, Serialize};
 use crate::corpus::Type as ValueType;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::bindings::Bindings;
+use crate::formula::cache::FormulaCache;
 use crate::formula::cell::Cells;
 use crate::formula::query::{FormulaQuery, PARAM_COST};
 use crate::resolver::rows;
@@ -139,7 +141,18 @@ const READER: &str = "dialog-query/supplied/notation/read";
 /// The key the environment holds an analyzer under.
 const ANALYZER: &str = "dialog-query/supplied/notation/analyze";
 
-struct Reader(Arc<dyn NotationRead>);
+#[derive(Clone)]
+pub(crate) struct Reader {
+    generation: u64,
+    implementation: Arc<dyn NotationRead>,
+}
+
+// Cache keys distinguish reader installations even when environments
+// share a formula cache, or an in-flight query keeps an old reader.
+static READER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+// Gives notation/read its own namespace in FormulaCache.
+struct ReadRow(Output);
 
 struct Analyzer(Arc<dyn NotationAnalyze>);
 
@@ -153,7 +166,11 @@ struct Analyzer(Arc<dyn NotationAnalyze>);
 /// see. It is hidden from the docs for that reason; see the module's.
 #[doc(hidden)]
 pub fn supply_read(env: &(impl Holds + ?Sized), implementation: Arc<dyn NotationRead>) {
-    env.hold(READER.into(), Arc::new(Reader(implementation)));
+    let reader = Reader {
+        generation: READER_GENERATION.fetch_add(1, Ordering::Relaxed),
+        implementation,
+    };
+    env.hold(READER.into(), Arc::new(reader));
 }
 
 /// Hold `implementation` in `env` as what `notation/analyze` asks, in
@@ -170,9 +187,9 @@ pub fn supply_analyze(env: &(impl Holds + ?Sized), implementation: Arc<dyn Notat
 }
 
 /// The reader `env` holds, if one.
-pub(crate) fn reader(env: &(impl Holds + ?Sized)) -> Option<Arc<dyn NotationRead>> {
+pub(crate) fn reader(env: &(impl Holds + ?Sized)) -> Option<Reader> {
     let held = env.held(READER)?;
-    held.downcast_ref::<Reader>().map(|reader| reader.0.clone())
+    held.downcast_ref::<Reader>().cloned()
 }
 
 /// The analyzer `env` holds, if one.
@@ -335,15 +352,16 @@ impl NotationReadQuery {
     pub(crate) fn expand(
         &self,
         matched: Match,
-        reader: &dyn NotationRead,
+        reader: &Reader,
+        cache: &FormulaCache,
     ) -> Result<Vec<Match>, EvaluationError> {
         let mut bindings = Bindings::new(
             Arc::new(FormulaQuery::NotationRead(self.clone())),
             matched,
             self.terms.clone(),
         );
-        let text: String = match bindings.read("text") {
-            Ok(text) => text,
+        let input = match bindings.resolve("text") {
+            Ok(input) => input,
             Err(
                 EvaluationError::Conflict { .. }
                 | EvaluationError::Absent { .. }
@@ -351,9 +369,19 @@ impl NotationReadQuery {
             ) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let rows = checked(READ, &READ_OUTPUTS, &READ_CELLS, reader.read(&text)?)?;
+        let inputs = [Value::UnsignedInt(reader.generation.into()), input];
+        let Value::String(text) = &inputs[1] else {
+            return Ok(Vec::new());
+        };
+        let rows = cache.outputs(&inputs, || {
+            let output = reader.implementation.read(text)?;
+            Ok(checked(READ, &READ_OUTPUTS, &READ_CELLS, output)?
+                .into_iter()
+                .map(ReadRow)
+                .collect())
+        })?;
         let mut matches = Vec::new();
-        for output in rows {
+        for ReadRow(output) in rows.iter() {
             let mut row = bindings.clone();
             // An output the premise gives no term is one its asker did not
             // ask for.
