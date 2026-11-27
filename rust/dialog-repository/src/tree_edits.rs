@@ -1,13 +1,15 @@
 //! Ordered edits to a keyed result tree. A node carries its own value;
 //! its descendants have identities and are edited independently.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::Delta;
+
+pub mod wire;
 
 /// A node's identity within a projection, independent of its parent,
 /// position and value. Two occurrences of the same entity need distinct IDs.
@@ -94,6 +96,7 @@ type Siblings = BTreeSet<(Vec<u8>, TreeId)>;
 pub struct TreeProjection<V> {
     nodes: HashMap<TreeId, (ProjectedNode<V>, i64)>,
     children: HashMap<Option<TreeId>, Siblings>,
+    visible: Option<HashSet<TreeId>>,
 }
 
 impl<V> Default for TreeProjection<V> {
@@ -101,11 +104,22 @@ impl<V> Default for TreeProjection<V> {
         Self {
             nodes: HashMap::new(),
             children: HashMap::new(),
+            visible: None,
         }
     }
 }
 
 impl<V: Clone + Eq> TreeProjection<V> {
+    /// Keep contributions with an unresolved parent dormant. If the
+    /// parent arrives, publish its reachable descendants with it.
+    /// Enable before applying any changes.
+    pub fn reachable() -> Self {
+        Self {
+            visible: Some(HashSet::new()),
+            ..Self::default()
+        }
+    }
+
     /// Apply a batch of changed contributions and return the edits from
     /// the previously published tree. An invalid batch changes nothing.
     pub fn apply(
@@ -188,6 +202,49 @@ impl<V: Clone + Eq> TreeProjection<V> {
             }
             previous.insert(id, before);
         }
+        if let Some(visible) = &mut self.visible {
+            let mut dirty: Vec<_> = previous.keys().cloned().collect();
+            let mut checked = HashSet::new();
+            gone.clear();
+            while let Some(id) = dirty.pop() {
+                if !checked.insert(id.clone()) {
+                    continue;
+                }
+                let before = visible.contains(&id);
+                let mut cursor = Some(&id);
+                let mut after = true;
+                while let Some(node) = cursor {
+                    let Some((row, _)) = self.nodes.get(node) else {
+                        after = false;
+                        break;
+                    };
+                    cursor = row.parent.as_ref();
+                }
+                if !after {
+                    positions.remove(&id);
+                }
+                if before == after {
+                    continue;
+                }
+                if let Some(children) = self.children.get(&Some(id.clone())) {
+                    dirty.extend(children.iter().map(|(_, child)| child.clone()));
+                }
+                if after {
+                    visible.insert(id.clone());
+                    positions.insert(id.clone());
+                    previous.insert(id, None);
+                } else {
+                    visible.remove(&id);
+                    let parent = previous
+                        .get(&id)
+                        .and_then(|old| old.as_ref())
+                        .or_else(|| self.nodes.get(&id).map(|(row, _)| row))
+                        .and_then(|row| row.parent.clone());
+                    gone.push((id, parent));
+                }
+            }
+            previous.retain(|id, _| visible.contains(id));
+        }
 
         // Each relocation depends on its new parent and its right-hand
         // anchor. Following those dependencies orders parents before
@@ -262,10 +319,10 @@ impl<V: Clone + Eq> TreeProjection<V> {
         // Surviving children have already moved out of removed parents.
         // Only the roots of deleted subtrees need an operation.
         for (id, parent) in gone {
-            if parent
-                .as_ref()
-                .is_none_or(|parent| self.nodes.contains_key(parent))
-            {
+            if parent.as_ref().is_none_or(|parent| match &self.visible {
+                Some(visible) => visible.contains(parent),
+                None => self.nodes.contains_key(parent),
+            }) {
                 edits.push(TreeEdit::Remove { id });
             }
         }
@@ -301,12 +358,18 @@ impl<V: Clone + Eq> TreeProjection<V> {
                     if !path.insert(node.clone()) {
                         return Err(invalid(id, "parent cycle"));
                     }
-                    let (parent, _) =
-                        final_node(node).ok_or_else(|| invalid(id, "missing parent"))?;
+                    let Some((parent, _)) = final_node(node) else {
+                        if self.visible.is_some() {
+                            break;
+                        }
+                        return Err(invalid(id, "missing parent"));
+                    };
                     cursor = parent.parent.as_ref();
                 }
                 checked.extend(path);
-            } else if let Some(children) = self.children.get(&Some(id.clone())) {
+            } else if self.visible.is_none()
+                && let Some(children) = self.children.get(&Some(id.clone()))
+            {
                 for (_, child) in children {
                     if final_node(child).is_some_and(|(row, _)| row.parent.as_ref() == Some(id)) {
                         return Err(invalid(child, "removed parent still has a child"));

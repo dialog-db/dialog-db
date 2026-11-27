@@ -1675,12 +1675,15 @@ dependencies = [
  "dialog-storage",
  "dialog-varsig",
  "futures-util",
+ "js-sys",
  "merkle-reference",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "wasm-bindgen",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

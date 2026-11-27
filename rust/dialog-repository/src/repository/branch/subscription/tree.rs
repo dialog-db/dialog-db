@@ -74,6 +74,17 @@ impl Branch {
     ) -> TreeSubscription<Q, V> {
         TreeSubscription::new(sources, |query| self.subscribe(query))
     }
+
+    /// Subscribe to independently queried levels. Children whose parent
+    /// does not match are kept dormant until their path to a root holds.
+    pub fn subscribe_reachable_tree<Q: Application, V: Clone + Eq>(
+        &self,
+        sources: impl IntoIterator<Item = TreeSource<Q, V>>,
+    ) -> TreeSubscription<Q, V> {
+        let mut subscription = self.subscribe_tree(sources);
+        subscription.projection = TreeProjection::reachable();
+        subscription
+    }
 }
 
 impl Stack {

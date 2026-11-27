@@ -34,9 +34,41 @@ Use `Branch::subscribe_tree` or `Stack::tree_subscription` to combine
 sources of one query type, such as `ConceptQuery`. The generic local
 payload can carry a scalar, the kind of container, or the attributes
 of a renderable node. The existing nested fold remains useful for a
-single assembled answer. The prototype starts from explicitly defined
-standing queries and does not yet lower notation `select` to such
-queries or define a wire encoding.
+single assembled answer.
+
+## Notation and HTML
+
+`Live::standing_tree` lowers a keyed record select into separate
+concept subscriptions for its required rows and distinct collections.
+A nested call must return a record containing its entity key and link
+to its parent through one named field. Only the selected roots and
+their descendants are published. Results from independent feeds can
+stay dormant until the parent appears. The output applies to an
+`EditedTree<Value>`; `RecordNode::decode` describes the local value
+as a record, a set, or a scalar. Unsupported forms are refused by
+the tree API and can still use the ordinary select API.
+
+`Live::watch_html` adapts the existing incremental view patches to
+the same edit operations. A new chip inserts its element and text
+children. `HtmlMount` applies edits to an `HtmlHost`; the WASM
+`BrowserHost` applies them to the DOM and delegates command listener
+binding to the embedder. The mount preserves a node handle on a
+generic `Move`. The legacy view plan names instances by their parent
+path, so moves across parents in that plan still appear as removals
+and inserts. Only mount frames from a trusted notation producer.
+
+## Binary frames
+
+Keep one `EditEncoder` and `EditDecoder` per stream. Each versioned
+frame has a sequence number and an operation count. Short strings
+and IDs receive dense dictionary indices and can be referenced in
+later frames, including strings inside local composites. The
+dictionary stops growing at its bound; larger or unregistered
+strings can travel inline. This uses corpus scalar encodings and
+no JSON. A truncated frame or sequence gap leaves the decoder
+unchanged. Reconnect by replaying the missing frames in order,
+or restart both endpoints with an empty mount and dictionary.
+A host failure during application calls for a new seed.
 
 The comparison test uses the same 512-card notebook for a tree
 subscription and a nested fold. A tag addition must project one tag
